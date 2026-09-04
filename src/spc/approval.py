@@ -8,6 +8,7 @@ from .models import (
     ApprovalVerdict,
     FixResolution,
     GateVerdict,
+    HumanDecisionResolution,
     PlanValidationRecord,
     RequiredFix,
     ScientificCapability,
@@ -38,6 +39,7 @@ class ScientificPlanApprover:
         required_fixes: tuple[RequiredFix, ...] = (),
         fix_resolutions: tuple[FixResolution, ...] = (),
         human_decisions_required: tuple[str, ...] = (),
+        human_decision_resolutions: tuple[HumanDecisionResolution, ...] = (),
     ) -> ApprovalVerdict:
         return ApprovalVerdict(
             verdict_id=verdict_id,
@@ -49,6 +51,7 @@ class ScientificPlanApprover:
             required_fixes=required_fixes,
             fix_resolutions=fix_resolutions,
             human_decisions_required=human_decisions_required,
+            human_decision_resolutions=human_decision_resolutions,
             decision=decision,
             approver_id=self.approver_id,
         )

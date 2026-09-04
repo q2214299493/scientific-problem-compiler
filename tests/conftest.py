@@ -53,7 +53,7 @@ def evidence_repository(tmp_path):
             text=content,
         )
     )
-    return store.evidence_records
+    return store
 
 
 @pytest.fixture

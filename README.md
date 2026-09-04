@@ -4,7 +4,7 @@ SPC compiles vague scientific requests, reviewer comments, and source evidence i
 
 The compiler, independent approver, and exporter have separate data boundaries. A plan can be exported only after a hash-bound plan approval, a passed plan gate, and an explicit human selection. Every exported task is forced to `runnable: false`.
 
-Before every export, SPC reloads the selected domain pack, checks its version, reruns `validate_question_plan` against the on-disk `EvidenceSpan` repository, and verifies a `PlanValidationRecord` bound to the plan ID, version, and content hash. `GateVerdict` is additionally hash-bound to both that validation record and the independent `ApprovalVerdict`. Conditional approvals cannot export until every blocking fix has a parsed, resolved `FixResolution`.
+Before every export, SPC reloads the selected domain pack, checks its version, reruns `validate_question_plan` against the on-disk evidence store, and verifies a `PlanValidationRecord` bound to the plan ID, version, content hash, domain, and domain-pack version. Every `EvidenceSpan` is checked through its `SourceDocument` to the hash and exact offsets of the stored source file. `GateVerdict` is additionally hash-bound to both that validation record and the independent `ApprovalVerdict`. Hard red flags block export, and every blocking fix and required human decision must have a parsed, valid resolution.
 
 ## Quick start
 
@@ -14,7 +14,7 @@ spc --help
 pytest
 ```
 
-`spc validate PLAN --state-dir .spc --record-output validation.yaml` creates the validation record required by `spc export --validation-record validation.yaml`. Export packages are fully checksummed and validated in a same-filesystem staging directory before one atomic rename into their final path.
+`spc validate PLAN --state-dir .spc --record-output validation.yaml` creates the validation record required by `spc export --validation-record validation.yaml`. Export packages are checked for required files, checksums, and cross-file semantic consistency in a same-filesystem staging directory before one atomic rename into their final path.
 
 The package ships `base` and `fischer_tropsch` domain packs. Domain-specific terminology and capabilities live in those packs; the core models contain no Fischer–Tropsch-specific fields.
 

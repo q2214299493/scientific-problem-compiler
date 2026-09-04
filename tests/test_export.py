@@ -8,12 +8,29 @@ from spc.adapters.ft_agent import FTAgentAdapter
 from spc.approval import ScientificPlanApprover, bind_gate_verdict
 from spc.domains import DomainPackLoader
 from spc.export import ExportError, GenericExportService
-from spc.models import ApprovalScores, EvidenceSpan, FixResolution, RequiredFix
-from spc.repositories import ModelRepository
+from spc.models import (
+    ApprovalScores,
+    FixResolution,
+    HumanDecisionResolution,
+    RequiredFix,
+    RequiredHumanDecision,
+)
+from spc.repositories import SourceEvidenceStore
+from spc.serialization import dump_yaml, file_sha256, load_data
 from spc.validators import build_plan_validation_record, validate_export, validate_question_plan
 
 
-def approved_inputs(plan, evidence_repository, *, decision="approve", required_fixes=(), fix_resolutions=()):
+def approved_inputs(
+    plan,
+    evidence_repository,
+    *,
+    decision="approve",
+    hard_red_flags=(),
+    required_fixes=(),
+    fix_resolutions=(),
+    human_decisions_required=(),
+    human_decision_resolutions=(),
+):
     pack = DomainPackLoader().load(plan.domain)
     report = validate_question_plan(plan, pack.capabilities, evidence_repository)
     validation_record = build_plan_validation_record(plan, report, validation_id="validation-1")
@@ -23,8 +40,11 @@ def approved_inputs(plan, evidence_repository, *, decision="approve", required_f
         verdict_id="verdict-1",
         scores=score,
         decision=decision,
+        hard_red_flags=hard_red_flags,
         required_fixes=required_fixes,
         fix_resolutions=fix_resolutions,
+        human_decisions_required=human_decisions_required,
+        human_decision_resolutions=human_decision_resolutions,
     )
     gate = bind_gate_verdict(
         plan, verdict, validation_record, gate_id="gate-1", passed=True
@@ -58,7 +78,7 @@ def test_invalid_plan_cannot_export(tmp_path, make_plan, evidence_repository) ->
 
 def test_fake_evidence_cannot_pass(tmp_path, make_plan) -> None:
     plan = make_plan()
-    empty_repository = ModelRepository(tmp_path / "empty-evidence", EvidenceSpan)
+    empty_repository = SourceEvidenceStore(tmp_path / "empty-state")
     verdict, validation_record, gate = approved_inputs(plan, empty_repository)
     with pytest.raises(ExportError) as caught:
         run_export(tmp_path, plan, empty_repository, verdict, validation_record, gate)
@@ -100,6 +120,112 @@ def test_resolved_conditional_approval_can_export(tmp_path, make_plan, evidence_
     assert run_export(
         tmp_path, plan, evidence_repository, verdict, validation_record, gate
     ).is_dir()
+
+
+def test_hard_red_flag_cannot_export(tmp_path, make_plan, evidence_repository) -> None:
+    plan = make_plan()
+    verdict, validation_record, gate = approved_inputs(
+        plan, evidence_repository, hard_red_flags=("Scientific basis is invalid",)
+    )
+    with pytest.raises(ExportError) as caught:
+        run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    assert "HARD_RED_FLAGS_BLOCK_EXPORT" in {
+        item.code for item in caught.value.report.issues
+    }
+
+
+def test_unresolved_blocking_fix_cannot_hide_behind_approve(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    plan = make_plan()
+    verdict, validation_record, gate = approved_inputs(
+        plan,
+        evidence_repository,
+        required_fixes=(RequiredFix(fix_id="fix-1", description="Resolve it"),),
+    )
+    with pytest.raises(ExportError) as caught:
+        run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    assert "UNRESOLVED_BLOCKING_FIX" in {
+        item.code for item in caught.value.report.issues
+    }
+
+
+def test_unresolved_required_human_decision_cannot_export(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    decision = RequiredHumanDecision(
+        decision_id="decision-1",
+        question="Choose the comparison branch",
+        options=("branch-a", "branch-b"),
+        required_before="export",
+    )
+    plan = make_plan().model_copy(update={"required_human_decisions": (decision,)})
+    verdict, validation_record, gate = approved_inputs(
+        plan,
+        evidence_repository,
+        human_decisions_required=(decision.decision_id,),
+    )
+    with pytest.raises(ExportError) as caught:
+        run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    assert "UNRESOLVED_HUMAN_DECISION" in {
+        item.code for item in caught.value.report.issues
+    }
+
+
+def test_resolved_required_human_decision_can_export(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    decision = RequiredHumanDecision(
+        decision_id="decision-1",
+        question="Choose the comparison branch",
+        options=("branch-a", "branch-b"),
+        required_before="export",
+    )
+    plan = make_plan().model_copy(update={"required_human_decisions": (decision,)})
+    resolution = HumanDecisionResolution(
+        decision_id=decision.decision_id,
+        resolved=True,
+        selected_option="branch-a",
+        rationale="The reviewer selected the evidence-supported branch.",
+    )
+    verdict, validation_record, gate = approved_inputs(
+        plan,
+        evidence_repository,
+        human_decisions_required=(decision.decision_id,),
+        human_decision_resolutions=(resolution,),
+    )
+    assert run_export(
+        tmp_path, plan, evidence_repository, verdict, validation_record, gate
+    ).is_dir()
+
+
+def test_invalid_human_decision_option_cannot_export(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    decision = RequiredHumanDecision(
+        decision_id="decision-1",
+        question="Choose the comparison branch",
+        options=("branch-a", "branch-b"),
+        required_before="export",
+    )
+    plan = make_plan().model_copy(update={"required_human_decisions": (decision,)})
+    resolution = HumanDecisionResolution(
+        decision_id=decision.decision_id,
+        resolved=True,
+        selected_option="undeclared-branch",
+        rationale="A selection was recorded.",
+    )
+    verdict, validation_record, gate = approved_inputs(
+        plan,
+        evidence_repository,
+        human_decisions_required=(decision.decision_id,),
+        human_decision_resolutions=(resolution,),
+    )
+    with pytest.raises(ExportError) as caught:
+        run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    assert "INVALID_HUMAN_DECISION_OPTION" in {
+        item.code for item in caught.value.report.issues
+    }
 
 
 def test_domain_version_mismatch_cannot_export(tmp_path, make_plan, evidence_repository) -> None:
@@ -216,6 +342,59 @@ def test_extra_export_file_is_detected(tmp_path, make_plan, evidence_repository)
     (output / "extra.txt").write_text("unchecked", encoding="utf-8")
     report = validate_export(output)
     assert "EXTRA_EXPORT_FILE" in {item.code for item in report.issues}
+
+
+def test_checksummed_extra_export_file_is_detected(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    plan = make_plan()
+    verdict, validation_record, gate = approved_inputs(plan, evidence_repository)
+    output = run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    extra = output / "extra.txt"
+    extra.write_text("checked but outside the contract", encoding="utf-8")
+    checksums_path = output / "checksums.json"
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums["extra.txt"] = file_sha256(extra)
+    checksums_path.write_text(json.dumps(checksums), encoding="utf-8")
+    manifest_path = output / "manifest.yaml"
+    manifest = load_data(manifest_path)
+    manifest["files"].append("extra.txt")
+    dump_yaml(manifest_path, manifest)
+    checksums["manifest.yaml"] = file_sha256(manifest_path)
+    checksums_path.write_text(json.dumps(checksums), encoding="utf-8")
+    report = validate_export(output)
+    assert "EXTRA_EXPORT_FILE" in {item.code for item in report.issues}
+
+
+def test_missing_required_export_file_is_detected(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    plan = make_plan()
+    verdict, validation_record, gate = approved_inputs(plan, evidence_repository)
+    output = run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    (output / "handoff-package.yaml").unlink()
+    report = validate_export(output)
+    assert "MISSING_REQUIRED_EXPORT_FILE" in {item.code for item in report.issues}
+
+
+def test_semantic_tampering_is_detected_after_checksum_is_recomputed(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    plan = make_plan()
+    verdict, validation_record, gate = approved_inputs(plan, evidence_repository)
+    output = run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    task_graph = output / "task-graph.yaml"
+    task_graph.write_text(
+        task_graph.read_text(encoding="utf-8").replace("plan_id: plan-1", "plan_id: other"),
+        encoding="utf-8",
+    )
+    checksums_path = output / "checksums.json"
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums["task-graph.yaml"] = file_sha256(task_graph)
+    checksums_path.write_text(json.dumps(checksums), encoding="utf-8")
+    report = validate_export(output)
+    assert "CHECKSUM_MISMATCH" not in {item.code for item in report.issues}
+    assert "EXPORT_SEMANTIC_MISMATCH" in {item.code for item in report.issues}
 
 
 def test_phase1_rejects_runnable_task(make_plan, evidence_repository) -> None:

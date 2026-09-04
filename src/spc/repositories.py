@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Generic, Iterable, TypeVar
 
 from pydantic import BaseModel
@@ -87,6 +88,47 @@ class SourceEvidenceStore:
         self.source_records = ModelRepository(state_root / "sources", SourceDocument)
         self.evidence_records = ModelRepository(state_root / "evidence", EvidenceSpan)
 
+    def get(self, key: str) -> EvidenceSpan:
+        return self.evidence_records.get(key)
+
+    def _verify_evidence_against_source(self, evidence: EvidenceSpan) -> SourceDocument:
+        require_safe_path_component(evidence.source_id, field="evidence source_id")
+        require_safe_path_component(evidence.source_version, field="evidence source_version")
+        source = self.source_records.get(f"{evidence.source_id}--{evidence.source_version}")
+        if not source.read_only:
+            raise ValueError("SourceDocument must be marked read_only")
+        if source.content_sha256 != evidence.content_sha256:
+            raise ValueError("EvidenceSpan content hash does not match SourceDocument")
+        stored = PurePosixPath(source.stored_path)
+        expected = PurePosixPath("sources") / source.source_id / source.version / "content"
+        if stored != expected or stored.is_absolute() or ".." in stored.parts:
+            raise ValueError("SourceDocument stored_path is not the canonical source path")
+        content_path = self.state_root.joinpath(*stored.parts)
+        resolved_root = self.state_root.resolve()
+        resolved_content = content_path.resolve()
+        if not resolved_content.is_relative_to(resolved_root) or content_path.is_symlink():
+            raise ValueError("SourceDocument content path escapes the evidence store or is a symlink")
+        if not content_path.is_file():
+            raise FileNotFoundError(f"stored source content is missing: {source.stored_path}")
+        content = content_path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != source.content_sha256:
+            raise ValueError("stored source content hash does not match SourceDocument")
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("EvidenceSpan offsets require UTF-8 source content") from error
+        if evidence.end_offset > len(text):
+            raise ValueError("EvidenceSpan exceeds stored source content")
+        if text[evidence.start_offset : evidence.end_offset] != evidence.text:
+            raise ValueError("EvidenceSpan text does not match stored source offsets")
+        return source
+
+    def verify_evidence_integrity(self, evidence: EvidenceSpan) -> SourceDocument:
+        stored_evidence = self.evidence_records.get(evidence.evidence_id)
+        if stored_evidence != evidence:
+            raise ValueError("EvidenceSpan differs from its repository record")
+        return self._verify_evidence_against_source(stored_evidence)
+
     def ingest(self, source_path: Path, source_id: str, version: str, title: str | None = None) -> SourceDocument:
         require_safe_path_component(source_id, field="source_id")
         require_safe_path_component(version, field="version")
@@ -121,13 +163,7 @@ class SourceEvidenceStore:
         return record
 
     def add_evidence(self, evidence: EvidenceSpan) -> Path:
-        source = self.source_records.get(f"{evidence.source_id}--{evidence.source_version}")
-        if source.content_sha256 != evidence.content_sha256:
-            raise ValueError("evidence content hash does not match source version")
-        content_path = self.state_root / source.stored_path
-        text = content_path.read_text(encoding="utf-8")
-        if text[evidence.start_offset : evidence.end_offset] != evidence.text:
-            raise ValueError("evidence span text does not match stored source offsets")
+        self._verify_evidence_against_source(evidence)
         return self.evidence_records.put(evidence.evidence_id, evidence)
 
 

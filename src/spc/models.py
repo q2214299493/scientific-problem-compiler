@@ -241,6 +241,74 @@ class ScientificQuestionPlan(StrictModel):
     follow_up_of: str | None = None
     source_proposal: str | None = None
 
+    @model_validator(mode="after")
+    def validate_required_content_and_unique_ids(self) -> ScientificQuestionPlan:
+        required_strings = {
+            "plan_id": self.plan_id,
+            "version": self.version,
+            "domain": self.domain,
+            "domain_pack_version": self.domain_pack_version,
+            "original_question": self.original_question,
+            "latent_concern": self.latent_concern,
+            "cost_tier": self.cost_tier,
+            "wave_id": self.wave_id,
+        }
+        for field, value in required_strings.items():
+            if not value.strip():
+                raise ValueError(f"{field} must not be blank")
+        if self.original_comment_id is not None and not self.original_comment_id.strip():
+            raise ValueError("original_comment_id must not be blank when provided")
+        required_collections = {
+            "atomic_questions": self.atomic_questions,
+            "observables": self.observables,
+            "comparison_baselines": self.comparison_baselines,
+            "acceptance_criteria": self.acceptance_criteria,
+            "falsification_criteria": self.falsification_criteria,
+            "evidence_refs": self.evidence_refs,
+            "scientific_capability_ids": self.scientific_capability_ids,
+            "tasks": self.tasks,
+        }
+        for field, values in required_collections.items():
+            if not values:
+                raise ValueError(f"{field} must not be empty")
+        id_entries = [
+            ("plan", self.plan_id),
+            *(("question", item.question_id) for item in self.atomic_questions),
+            ("hypothesis statement", self.hypothesis.primary.statement_id),
+            ("hypothesis statement", self.hypothesis.null.statement_id),
+            ("model", self.model.model_id),
+            ("model statement", self.model.description.statement_id),
+            *(("model parameter", item.statement_id) for item in self.model.parameters),
+            *(("observable", item.observable_id) for item in self.observables),
+            *(("observable statement", item.description.statement_id) for item in self.observables),
+            *(("baseline", item.baseline_id) for item in self.comparison_baselines),
+            *(("baseline statement", item.description.statement_id) for item in self.comparison_baselines),
+            *(("acceptance criterion", item.criterion_id) for item in self.acceptance_criteria),
+            *(("falsification criterion", item.criterion_id) for item in self.falsification_criteria),
+            ("intent fingerprint", self.intent_fingerprint.fingerprint_id),
+            ("system fingerprint", self.system_fingerprint.fingerprint_id),
+            ("method fingerprint", self.method_fingerprint.fingerprint_id),
+            *(("evidence", item.evidence_id) for item in self.evidence_refs),
+            *(("assumption", item.assumption_id) for item in self.assumptions),
+            *(("default statement", item.statement_id) for item in self.defaults),
+            *(("unknown", item.unknown_id) for item in self.unknowns),
+            *(("proposed deviation", item.deviation_id) for item in self.proposed_deviations),
+            *(("task", item.task_id) for item in self.tasks),
+            *(("human decision", item.decision_id) for item in self.required_human_decisions),
+        ]
+        blank_ids = [category for category, identifier in id_entries if not identifier.strip()]
+        if blank_ids:
+            raise ValueError(f"entity IDs must not be blank: {', '.join(blank_ids)}")
+        counts: dict[str, int] = {}
+        for _, identifier in id_entries:
+            counts[identifier] = counts.get(identifier, 0) + 1
+        duplicates = sorted(identifier for identifier, count in counts.items() if count > 1)
+        if duplicates:
+            raise ValueError(f"entity IDs must be globally unique: {', '.join(duplicates)}")
+        if len(set(self.scientific_capability_ids)) != len(self.scientific_capability_ids):
+            raise ValueError("scientific_capability_ids must be unique")
+        return self
+
 
 class RequiredFix(StrictModel):
     fix_id: str
@@ -253,6 +321,13 @@ class FixResolution(StrictModel):
     resolved: bool
     resolution: str
     evidence_refs: tuple[str, ...] = ()
+
+
+class HumanDecisionResolution(StrictModel):
+    decision_id: str
+    resolved: bool
+    selected_option: str
+    rationale: str
 
 
 class ApprovalScores(StrictModel):
@@ -275,6 +350,7 @@ class ApprovalVerdict(StrictModel):
     required_fixes: tuple[RequiredFix, ...] = ()
     fix_resolutions: tuple[FixResolution, ...] = ()
     human_decisions_required: tuple[str, ...] = ()
+    human_decision_resolutions: tuple[HumanDecisionResolution, ...] = ()
     decision: ApprovalDecision
     approver_id: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -289,7 +365,7 @@ class PlanValidationRecord(StrictModel):
     domain_pack_version: str
     valid: bool
     issue_codes: tuple[str, ...] = ()
-    validator_version: str = "1.1.0"
+    validator_version: str = "1.2.0"
 
 
 class GateVerdict(StrictModel):

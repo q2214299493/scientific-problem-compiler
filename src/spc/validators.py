@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+import json
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Iterable, Protocol
@@ -21,12 +22,15 @@ from .models import (
     PlanValidationRecord,
     ScientificCapability,
     ScientificQuestionPlan,
+    SourceDocument,
 )
 from .serialization import content_hash, file_sha256, load_data
 
 
 class EvidenceSpanRepository(Protocol):
     def get(self, key: str) -> EvidenceSpan: ...
+
+    def verify_evidence_integrity(self, evidence: EvidenceSpan) -> SourceDocument: ...
 
 
 class ValidationIssue(BaseModel):
@@ -103,6 +107,23 @@ def validate_evidence_links(
                     ValidationIssue(
                         code="EVIDENCE_REFERENCE_MISMATCH",
                         message=f"EvidenceReference does not match stored EvidenceSpan: {reference.evidence_id}",
+                    )
+                )
+                continue
+            try:
+                evidence_repository.verify_evidence_integrity(evidence)
+            except AttributeError:
+                issues.append(
+                    ValidationIssue(
+                        code="EVIDENCE_INTEGRITY_REPOSITORY_REQUIRED",
+                        message="repository cannot verify EvidenceSpan-to-source-file integrity",
+                    )
+                )
+            except (FileNotFoundError, OSError, ValueError) as error:
+                issues.append(
+                    ValidationIssue(
+                        code="SOURCE_INTEGRITY_FAILURE",
+                        message=f"EvidenceSpan source integrity failed for {reference.evidence_id}: {error}",
                     )
                 )
     for path, value in _walk(plan):
@@ -316,6 +337,15 @@ def validate_plan_validation_record(
 
 def validate_conditional_approval(verdict: ApprovalVerdict) -> ValidationReport:
     issues: list[ValidationIssue] = []
+    fix_counts = Counter(item.fix_id for item in verdict.required_fixes)
+    for fix_id, count in fix_counts.items():
+        if count > 1:
+            issues.append(
+                ValidationIssue(
+                    code="DUPLICATE_REQUIRED_FIX",
+                    message=f"required fix is declared more than once: {fix_id}",
+                )
+            )
     resolution_counts = Counter(item.fix_id for item in verdict.fix_resolutions)
     for fix_id, count in resolution_counts.items():
         if count > 1:
@@ -334,7 +364,10 @@ def validate_conditional_approval(verdict: ApprovalVerdict) -> ValidationReport:
                     message=f"resolution references unknown required fix: {resolution.fix_id}",
                 )
             )
-    if verdict.decision == ApprovalDecision.APPROVE_WITH_CONDITIONS:
+    if verdict.decision in {
+        ApprovalDecision.APPROVE,
+        ApprovalDecision.APPROVE_WITH_CONDITIONS,
+    }:
         resolutions = {item.fix_id: item for item in verdict.fix_resolutions}
         for fix in verdict.required_fixes:
             resolution = resolutions.get(fix.fix_id)
@@ -344,9 +377,112 @@ def validate_conditional_approval(verdict: ApprovalVerdict) -> ValidationReport:
                 issues.append(
                     ValidationIssue(
                         code="UNRESOLVED_BLOCKING_FIX",
-                        message=f"conditional approval has unresolved blocking fix: {fix.fix_id}",
+                        message=f"exportable approval has unresolved blocking fix: {fix.fix_id}",
                     )
                 )
+    return _report(issues)
+
+
+def validate_approval_state(
+    plan: ScientificQuestionPlan,
+    verdict: ApprovalVerdict,
+) -> ValidationReport:
+    issues = list(validate_conditional_approval(verdict).issues)
+    exportable = verdict.decision in {
+        ApprovalDecision.APPROVE,
+        ApprovalDecision.APPROVE_WITH_CONDITIONS,
+    }
+    if exportable and verdict.hard_red_flags:
+        issues.append(
+            ValidationIssue(
+                code="HARD_RED_FLAGS_BLOCK_EXPORT",
+                message="an approval with hard red flags cannot be exported",
+            )
+        )
+
+    required_decision_counts = Counter(verdict.human_decisions_required)
+    for decision_id, count in required_decision_counts.items():
+        if count > 1:
+            issues.append(
+                ValidationIssue(
+                    code="DUPLICATE_REQUIRED_HUMAN_DECISION",
+                    message=f"human decision is required more than once: {decision_id}",
+                )
+            )
+    plan_decisions = {item.decision_id: item for item in plan.required_human_decisions}
+    verdict_decisions = set(verdict.human_decisions_required)
+    plan_decision_ids = set(plan_decisions)
+    for decision_id in sorted(verdict_decisions - plan_decision_ids):
+        issues.append(
+            ValidationIssue(
+                code="UNKNOWN_REQUIRED_HUMAN_DECISION",
+                message=f"approval requires a human decision not declared by the plan: {decision_id}",
+            )
+        )
+    for decision_id in sorted(plan_decision_ids - verdict_decisions):
+        issues.append(
+            ValidationIssue(
+                code="HUMAN_DECISION_STATE_MISMATCH",
+                message=f"approval omits a human decision required by the plan: {decision_id}",
+            )
+        )
+
+    resolution_counts = Counter(
+        item.decision_id for item in verdict.human_decision_resolutions
+    )
+    for decision_id, count in resolution_counts.items():
+        if count > 1:
+            issues.append(
+                ValidationIssue(
+                    code="DUPLICATE_HUMAN_DECISION_RESOLUTION",
+                    message=f"human decision has multiple resolutions: {decision_id}",
+                )
+            )
+    resolutions = {
+        item.decision_id: item for item in verdict.human_decision_resolutions
+    }
+    for decision_id in sorted(set(resolutions) - verdict_decisions):
+        issues.append(
+            ValidationIssue(
+                code="UNKNOWN_HUMAN_DECISION_RESOLUTION",
+                message=f"resolution references a human decision not required by the approval: {decision_id}",
+            )
+        )
+    if exportable:
+        for decision_id in sorted(plan_decision_ids | verdict_decisions):
+            resolution = resolutions.get(decision_id)
+            if (
+                resolution is None
+                or not resolution.resolved
+                or not resolution.selected_option.strip()
+                or not resolution.rationale.strip()
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="UNRESOLVED_HUMAN_DECISION",
+                        message=f"exportable approval has unresolved human decision: {decision_id}",
+                    )
+                )
+                continue
+            planned = plan_decisions.get(decision_id)
+            if planned is not None and resolution.selected_option not in planned.options:
+                issues.append(
+                    ValidationIssue(
+                        code="INVALID_HUMAN_DECISION_OPTION",
+                        message=f"selected option is not declared for human decision: {decision_id}",
+                    )
+                )
+    if (
+        verdict.decision == ApprovalDecision.APPROVE_WITH_CONDITIONS
+        and not verdict.required_fixes
+        and not verdict.human_decisions_required
+    ):
+        issues.append(
+            ValidationIssue(
+                code="CONDITIONAL_APPROVAL_WITHOUT_CONDITIONS",
+                message="approve_with_conditions requires at least one fix or human decision",
+            )
+        )
     return _report(issues)
 
 
@@ -383,7 +519,15 @@ def validate_handoff_package(
     plan_hash = content_hash(plan)
     if verdict.decision not in {ApprovalDecision.APPROVE, ApprovalDecision.APPROVE_WITH_CONDITIONS}:
         issues.append(ValidationIssue(code="PLAN_NOT_APPROVED", message="approval decision does not permit export"))
-    issues.extend(validate_conditional_approval(verdict).issues)
+    approval_state = validate_approval_state(plan, verdict)
+    issues.extend(approval_state.issues)
+    if gate.passed and not approval_state.valid:
+        issues.append(
+            ValidationIssue(
+                code="GATE_STATE_INCONSISTENT",
+                message="a passed gate is inconsistent with the approval state",
+            )
+        )
     declared_evidence = {reference.evidence_id for reference in plan.evidence_refs}
     for resolution in verdict.fix_resolutions:
         for evidence_id in resolution.evidence_refs:
@@ -439,6 +583,214 @@ def _safe_export_relative_path(value: Any) -> bool:
         return False
     path = PurePosixPath(value)
     return not path.is_absolute() and path.as_posix() == value and all(part not in {"", ".", ".."} for part in path.parts)
+
+
+REQUIRED_EXPORT_FILES = frozenset(
+    {
+        "manifest.yaml",
+        "selected-plan.yaml",
+        "handoff-package.yaml",
+        "task-graph.yaml",
+        "approvals/plan-review.yaml",
+        "approvals/plan-validation.yaml",
+        "approvals/plan-gate.yaml",
+        "capability-bindings.yaml",
+        "evidence-manifest.jsonl",
+        "decisions.jsonl",
+        "execution-policy.yaml",
+        "checksums.json",
+    }
+)
+
+
+def _load_jsonl(path: Path) -> list[Any]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
+    try:
+        plan = ScientificQuestionPlan.model_validate(load_data(export_dir / "selected-plan.yaml"))
+        manifest = ExportManifest.model_validate(load_data(export_dir / "manifest.yaml"))
+        handoff = AgentHandoffPackage.model_validate(load_data(export_dir / "handoff-package.yaml"))
+        verdict = ApprovalVerdict.model_validate(load_data(export_dir / "approvals/plan-review.yaml"))
+        validation = PlanValidationRecord.model_validate(
+            load_data(export_dir / "approvals/plan-validation.yaml")
+        )
+        gate = GateVerdict.model_validate(load_data(export_dir / "approvals/plan-gate.yaml"))
+        task_graph = load_data(export_dir / "task-graph.yaml")
+        bindings = load_data(export_dir / "capability-bindings.yaml")
+        policy = ExecutionPolicy.model_validate(load_data(export_dir / "execution-policy.yaml"))
+        evidence_manifest = _load_jsonl(export_dir / "evidence-manifest.jsonl")
+        decisions = _load_jsonl(export_dir / "decisions.jsonl")
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        return [
+            ValidationIssue(
+                code="INVALID_EXPORT_CONTENT",
+                message=f"cannot parse required export content: {error}",
+            )
+        ]
+
+    issues: list[ValidationIssue] = []
+    plan_hash = content_hash(plan)
+    plan_binding = (plan.plan_id, plan.version, plan_hash)
+    if (manifest.source_plan_id, manifest.source_plan_version, manifest.source_plan_hash) != plan_binding:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="manifest plan binding does not match selected plan"))
+    if (handoff.source_plan_id, handoff.source_plan_version, handoff.source_plan_hash) != plan_binding:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="handoff plan binding does not match selected plan"))
+    if (verdict.candidate_id, verdict.candidate_version, verdict.candidate_content_hash) != plan_binding:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="approval plan binding does not match selected plan"))
+    if (validation.plan_id, validation.plan_version, validation.plan_content_hash) != plan_binding:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="validation plan binding does not match selected plan"))
+    if (validation.domain, validation.domain_pack_version) != (
+        plan.domain,
+        plan.domain_pack_version,
+    ):
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="validation domain binding does not match selected plan"))
+    if (gate.candidate_id, gate.candidate_version, gate.candidate_content_hash) != plan_binding:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="gate plan binding does not match selected plan"))
+    if (manifest.export_id, manifest.target_agent) != (handoff.export_id, handoff.target_agent):
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="manifest export target does not match handoff"))
+    if (gate.approval_verdict_id, gate.approval_verdict_hash) != (
+        verdict.verdict_id,
+        content_hash(verdict),
+    ):
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="gate does not bind the exported approval"))
+    if (gate.plan_validation_id, gate.plan_validation_hash) != (
+        validation.validation_id,
+        content_hash(validation),
+    ):
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="gate does not bind the exported validation record"))
+    if not validation.valid or not gate.passed:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="export contains a failed validation record or gate"))
+    issues.extend(validate_approval_state(plan, verdict).issues)
+    declared_evidence = {reference.evidence_id for reference in plan.evidence_refs}
+    for resolution in verdict.fix_resolutions:
+        if not set(resolution.evidence_refs).issubset(declared_evidence):
+            issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message=f"fix resolution evidence does not belong to selected plan: {resolution.fix_id}"))
+    issues.extend(validate_phase1_boundary(policy, plan.tasks).issues)
+
+    expected_task_graph = {
+        "plan_id": plan.plan_id,
+        "plan_hash": plan_hash,
+        "tasks": [task.task_id for task in plan.tasks],
+    }
+    if task_graph != expected_task_graph:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="task graph does not match selected plan"))
+    expected_bindings = [
+        item.model_dump(mode="json", exclude_none=True)
+        for item in handoff.capability_bindings
+    ]
+    if bindings != expected_bindings:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="capability bindings do not match handoff"))
+    if policy != handoff.execution_policy:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="execution policy does not match handoff"))
+    expected_evidence = [item.model_dump(mode="json") for item in plan.evidence_refs]
+    if evidence_manifest != expected_evidence:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="evidence manifest does not match selected plan"))
+    expected_decisions = [
+        {
+            "decision": "human_selected",
+            "plan_id": plan.plan_id,
+            "plan_version": plan.version,
+            "plan_hash": plan_hash,
+        }
+    ]
+    if decisions != expected_decisions:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="decision record does not confirm selected plan"))
+
+    expected_task_files = {f"tasks/{task.task_id}.yaml" for task in plan.tasks}
+    actual_task_files = {
+        path.relative_to(export_dir).as_posix()
+        for path in (export_dir / "tasks").glob("*.yaml")
+        if path.is_file()
+    }
+    if actual_task_files != expected_task_files:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="exported task files do not match selected plan"))
+    binding_by_capability = {
+        item.scientific_capability_id: item for item in handoff.capability_bindings
+    }
+    for task in plan.tasks:
+        binding = binding_by_capability.get(task.capability_id)
+        if binding is None:
+            issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message=f"task has no exported capability binding: {task.task_id}"))
+            continue
+        expected_task = {
+            **task.model_dump(mode="json"),
+            "source_plan_id": plan.plan_id,
+            "source_plan_hash": plan_hash,
+            "target_capability_binding": binding.model_dump(mode="json", exclude_none=True),
+            "intent_fingerprint_ref": plan.intent_fingerprint.fingerprint_id,
+            "system_fingerprint_ref": plan.system_fingerprint.fingerprint_id,
+            "method_fingerprint_ref": plan.method_fingerprint.fingerprint_id,
+            "execution_policy": handoff.execution_policy.model_dump(mode="json"),
+            "runnable": False,
+        }
+        try:
+            actual_task = load_data(export_dir / f"tasks/{task.task_id}.yaml")
+        except (OSError, ValueError) as error:
+            issues.append(ValidationIssue(code="INVALID_EXPORT_CONTENT", message=f"cannot parse exported task {task.task_id}: {error}"))
+        else:
+            if actual_task != expected_task:
+                issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message=f"exported task does not match selected plan: {task.task_id}"))
+
+    fingerprints = (
+        plan.intent_fingerprint,
+        plan.system_fingerprint,
+        plan.method_fingerprint,
+    )
+    expected_fingerprint_files = {
+        f"fingerprints/{item.fingerprint_id}.yaml" for item in fingerprints
+    }
+    actual_fingerprint_files = {
+        path.relative_to(export_dir).as_posix()
+        for path in (export_dir / "fingerprints").glob("*.yaml")
+        if path.is_file()
+    }
+    if actual_fingerprint_files != expected_fingerprint_files:
+        issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="exported fingerprint files do not match selected plan"))
+    for fingerprint in fingerprints:
+        try:
+            actual_fingerprint = load_data(
+                export_dir / f"fingerprints/{fingerprint.fingerprint_id}.yaml"
+            )
+        except (OSError, ValueError) as error:
+            issues.append(ValidationIssue(code="INVALID_EXPORT_CONTENT", message=f"cannot parse exported fingerprint {fingerprint.fingerprint_id}: {error}"))
+        else:
+            if actual_fingerprint != fingerprint.model_dump(mode="json", exclude_none=True):
+                issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message=f"exported fingerprint does not match selected plan: {fingerprint.fingerprint_id}"))
+    expected_contract_files = (
+        set(REQUIRED_EXPORT_FILES)
+        | expected_task_files
+        | expected_fingerprint_files
+    )
+    actual_contract_files = {
+        path.relative_to(export_dir).as_posix()
+        for path in export_dir.rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    for relative_path in sorted(actual_contract_files - expected_contract_files):
+        issues.append(
+            ValidationIssue(
+                code="EXTRA_EXPORT_FILE",
+                message=f"file is outside the export contract: {relative_path}",
+            )
+        )
+    for relative_path in sorted(expected_contract_files - actual_contract_files):
+        issues.append(
+            ValidationIssue(
+                code="MISSING_REQUIRED_EXPORT_FILE",
+                message=f"required export-contract file is missing: {relative_path}",
+            )
+        )
+    expected_manifest_files = expected_contract_files - {"manifest.yaml", "checksums.json"}
+    if set(manifest.files) != expected_manifest_files:
+        issues.append(
+            ValidationIssue(
+                code="EXPORT_MANIFEST_FILE_MISMATCH",
+                message="manifest does not contain the exact export-contract file set",
+            )
+        )
+    return issues
 
 
 def validate_export(export_dir: Path) -> ValidationReport:
@@ -507,6 +859,13 @@ def validate_export(export_dir: Path) -> ValidationReport:
         if path.is_file() or path.is_symlink()
     }
     expected_files = safe_checksum_paths | {"checksums.json"}
+    for relative_path in sorted(REQUIRED_EXPORT_FILES - actual_files):
+        issues.append(
+            ValidationIssue(
+                code="MISSING_REQUIRED_EXPORT_FILE",
+                message=f"required export file is missing: {relative_path}",
+            )
+        )
     for relative_path in sorted(actual_files - expected_files):
         issues.append(
             ValidationIssue(
@@ -529,4 +888,6 @@ def validate_export(export_dir: Path) -> ValidationReport:
                         message="manifest file inventory does not match checksummed package files",
                     )
                 )
+    if REQUIRED_EXPORT_FILES.issubset(actual_files):
+        issues.extend(_semantic_export_issues(export_dir))
     return _report(issues)

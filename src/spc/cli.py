@@ -23,6 +23,7 @@ from .models import (
     ExportManifest,
     FixResolution,
     GateVerdict,
+    HumanDecisionResolution,
     IntentFingerprint,
     MethodFingerprint,
     PlanValidationRecord,
@@ -79,7 +80,7 @@ def compile_command(
     request = request_file.read_text(encoding="utf-8")
     initialize_state(state_dir, domain=domain)
     plans = [load_model(path, ScientificQuestionPlan) for path in mock_plan]
-    evidence_repository = SourceEvidenceStore(state_dir).evidence_records
+    evidence_repository = SourceEvidenceStore(state_dir)
     result = ScientificProblemCompiler(
         MockProvider(plans),
         DomainPackLoader(),
@@ -123,7 +124,7 @@ def validate(
         report = validate_question_plan(
             plan,
             pack.capabilities,
-            SourceEvidenceStore(state_dir).evidence_records,
+            SourceEvidenceStore(state_dir),
         )
         if record_output is not None:
             dump_yaml(
@@ -151,6 +152,12 @@ def approve(
     fix_resolutions_file: Annotated[
         Path | None, typer.Option("--fix-resolutions", exists=True, dir_okay=False)
     ] = None,
+    human_decisions_required_file: Annotated[
+        Path | None, typer.Option("--human-decisions-required", exists=True, dir_okay=False)
+    ] = None,
+    human_decision_resolutions_file: Annotated[
+        Path | None, typer.Option("--human-decision-resolutions", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     """Create an independent, hash-bound approval verdict without modifying the plan."""
     plan = load_model(plan_file, ScientificQuestionPlan)
@@ -163,6 +170,20 @@ def approve(
         FixResolution.model_validate(item)
         for item in (load_data(fix_resolutions_file) if fix_resolutions_file else [])
     )
+    human_decisions_required = tuple(
+        str(item)
+        for item in (
+            load_data(human_decisions_required_file) if human_decisions_required_file else []
+        )
+    )
+    human_decision_resolutions = tuple(
+        HumanDecisionResolution.model_validate(item)
+        for item in (
+            load_data(human_decision_resolutions_file)
+            if human_decision_resolutions_file
+            else []
+        )
+    )
     verdict = ScientificPlanApprover(approver_id).bind_verdict(
         plan,
         verdict_id=verdict_id,
@@ -170,6 +191,8 @@ def approve(
         decision=decision,
         required_fixes=required_fixes,
         fix_resolutions=fix_resolutions,
+        human_decisions_required=human_decisions_required,
+        human_decision_resolutions=human_decision_resolutions,
     )
     dump_yaml(output, verdict)
     typer.echo(str(output))
@@ -213,7 +236,7 @@ def export(
     try:
         path = GenericExportService(
             exports_dir,
-            SourceEvidenceStore(state_dir).evidence_records,
+            SourceEvidenceStore(state_dir),
         ).export(
             plan=plan,
             verdict=verdict,

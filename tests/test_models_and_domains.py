@@ -9,6 +9,7 @@ from spc.models import (
     FingerprintDifference,
     GroundedStatement,
     SystemFingerprint,
+    ScientificQuestionPlan,
 )
 from spc.serialization import content_hash
 from spc.validators import compare_method_fingerprints, validate_candidate_set, validate_question_plan
@@ -130,3 +131,30 @@ def test_nested_mutable_fingerprint_fields_are_prevented() -> None:
         fingerprint.attributes["surface"]["new"] = "mutable"
     with pytest.raises(TypeError):
         fingerprint.attributes._data["surface"] = "mutable"
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "atomic_questions",
+        "observables",
+        "comparison_baselines",
+        "acceptance_criteria",
+        "falsification_criteria",
+        "evidence_refs",
+        "scientific_capability_ids",
+        "tasks",
+    ),
+)
+def test_plan_rejects_empty_required_collections(make_plan, field) -> None:
+    data = make_plan().model_dump(mode="python")
+    data[field] = ()
+    with pytest.raises(ValidationError, match=f"{field} must not be empty"):
+        ScientificQuestionPlan.model_validate(data)
+
+
+def test_plan_rejects_globally_duplicate_entity_ids(make_plan) -> None:
+    data = make_plan().model_dump(mode="python")
+    data["tasks"][0]["task_id"] = data["atomic_questions"][0]["question_id"]
+    with pytest.raises(ValidationError, match="entity IDs must be globally unique"):
+        ScientificQuestionPlan.model_validate(data)
