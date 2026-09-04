@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -13,13 +13,20 @@ from .models import (
     ApprovalVerdict,
     DAGTask,
     EvidenceClassification,
+    EvidenceSpan,
     ExecutionPolicy,
+    ExportManifest,
     GateVerdict,
     GroundedStatement,
+    PlanValidationRecord,
     ScientificCapability,
     ScientificQuestionPlan,
 )
 from .serialization import content_hash, file_sha256, load_data
+
+
+class EvidenceSpanRepository(Protocol):
+    def get(self, key: str) -> EvidenceSpan: ...
 
 
 class ValidationIssue(BaseModel):
@@ -53,11 +60,51 @@ def _walk(value: Any, path: str = "") -> Iterable[tuple[str, Any]]:
             yield from _walk(child, f"{path}[{index}]")
 
 
-def validate_evidence_links(plan: ScientificQuestionPlan) -> ValidationReport:
+def validate_evidence_links(
+    plan: ScientificQuestionPlan,
+    evidence_repository: EvidenceSpanRepository | None,
+) -> ValidationReport:
     issues: list[ValidationIssue] = []
     declared = {ref.evidence_id for ref in plan.evidence_refs}
     if len(declared) != len(plan.evidence_refs):
         issues.append(ValidationIssue(code="DUPLICATE_EVIDENCE_ID", message="evidence IDs must be unique"))
+    if evidence_repository is None:
+        issues.append(
+            ValidationIssue(
+                code="EVIDENCE_REPOSITORY_REQUIRED",
+                message="validation requires a real EvidenceSpan repository",
+            )
+        )
+    else:
+        for reference in plan.evidence_refs:
+            try:
+                evidence = evidence_repository.get(reference.evidence_id)
+            except (FileNotFoundError, KeyError):
+                issues.append(
+                    ValidationIssue(
+                        code="EVIDENCE_SPAN_NOT_FOUND",
+                        message=f"EvidenceSpan repository has no record: {reference.evidence_id}",
+                    )
+                )
+                continue
+            except (OSError, ValueError) as error:
+                issues.append(
+                    ValidationIssue(
+                        code="EVIDENCE_REPOSITORY_ERROR",
+                        message=f"cannot read EvidenceSpan {reference.evidence_id}: {error}",
+                    )
+                )
+                continue
+            if (evidence.source_id, evidence.source_version) != (
+                reference.source_id,
+                reference.source_version,
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="EVIDENCE_REFERENCE_MISMATCH",
+                        message=f"EvidenceReference does not match stored EvidenceSpan: {reference.evidence_id}",
+                    )
+                )
     for path, value in _walk(plan):
         if isinstance(value, GroundedStatement):
             if value.classification == EvidenceClassification.EVIDENCE and not value.evidence_refs:
@@ -125,7 +172,11 @@ def validate_dag(tasks: Iterable[DAGTask]) -> ValidationReport:
 def compare_method_fingerprints(left: ScientificQuestionPlan, right: ScientificQuestionPlan) -> ValidationReport:
     issues: list[ValidationIssue] = []
     keys = set(left.method_fingerprint.attributes) | set(right.method_fingerprint.attributes)
-    disclosed_fields = {item.field for item in left.fingerprint_differences} | {item.field for item in right.fingerprint_differences}
+    disclosed_fields = {
+        item.field
+        for item in (*left.fingerprint_differences, *right.fingerprint_differences)
+        if item.disclosed_deviation
+    }
     for key in sorted(keys):
         if left.method_fingerprint.attributes.get(key) != right.method_fingerprint.attributes.get(key) and key not in disclosed_fields:
             issues.append(ValidationIssue(code="UNDISCLOSED_METHOD_DIFFERENCE", message=f"method difference is not disclosed: {key}"))
@@ -133,9 +184,11 @@ def compare_method_fingerprints(left: ScientificQuestionPlan, right: ScientificQ
 
 
 def validate_question_plan(
-    plan: ScientificQuestionPlan, capabilities: Iterable[ScientificCapability] = ()
+    plan: ScientificQuestionPlan,
+    capabilities: Iterable[ScientificCapability] = (),
+    evidence_repository: EvidenceSpanRepository | None = None,
 ) -> ValidationReport:
-    issues = list(validate_evidence_links(plan).issues) + list(validate_dag(plan.tasks).issues)
+    issues = list(validate_evidence_links(plan, evidence_repository).issues) + list(validate_dag(plan.tasks).issues)
     concern_tokens = {
         token for token in re.findall(r"[a-z0-9]+", plan.latent_concern.lower()) if len(token) >= 4
     }
@@ -203,6 +256,100 @@ def validate_approval_boundary(
     return _report(issues)
 
 
+def build_plan_validation_record(
+    plan: ScientificQuestionPlan,
+    report: ValidationReport,
+    *,
+    validation_id: str,
+) -> PlanValidationRecord:
+    return PlanValidationRecord(
+        validation_id=validation_id,
+        plan_id=plan.plan_id,
+        plan_version=plan.version,
+        plan_content_hash=content_hash(plan),
+        domain=plan.domain,
+        domain_pack_version=plan.domain_pack_version,
+        valid=report.valid,
+        issue_codes=tuple(issue.code for issue in report.issues),
+    )
+
+
+def validate_plan_validation_record(
+    plan: ScientificQuestionPlan,
+    record: PlanValidationRecord,
+    current_report: ValidationReport,
+) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    expected_binding = (
+        plan.plan_id,
+        plan.version,
+        content_hash(plan),
+        plan.domain,
+        plan.domain_pack_version,
+    )
+    actual_binding = (
+        record.plan_id,
+        record.plan_version,
+        record.plan_content_hash,
+        record.domain,
+        record.domain_pack_version,
+    )
+    if actual_binding != expected_binding:
+        issues.append(
+            ValidationIssue(
+                code="STALE_PLAN_VALIDATION",
+                message="PlanValidationRecord is not bound to the current plan ID, version, hash, and domain",
+            )
+        )
+    current_codes = tuple(issue.code for issue in current_report.issues)
+    if record.valid != current_report.valid or record.issue_codes != current_codes:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_VALIDATION_RECORD_MISMATCH",
+                message="PlanValidationRecord does not match the current deterministic validation result",
+            )
+        )
+    if not record.valid or not current_report.valid:
+        issues.append(ValidationIssue(code="PLAN_VALIDATION_FAILED", message="invalid plans cannot be exported"))
+    return _report(issues)
+
+
+def validate_conditional_approval(verdict: ApprovalVerdict) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    resolution_counts = Counter(item.fix_id for item in verdict.fix_resolutions)
+    for fix_id, count in resolution_counts.items():
+        if count > 1:
+            issues.append(
+                ValidationIssue(
+                    code="DUPLICATE_FIX_RESOLUTION",
+                    message=f"blocking fix has multiple resolutions: {fix_id}",
+                )
+            )
+    known_fixes = {item.fix_id for item in verdict.required_fixes}
+    for resolution in verdict.fix_resolutions:
+        if resolution.fix_id not in known_fixes:
+            issues.append(
+                ValidationIssue(
+                    code="UNKNOWN_FIX_RESOLUTION",
+                    message=f"resolution references unknown required fix: {resolution.fix_id}",
+                )
+            )
+    if verdict.decision == ApprovalDecision.APPROVE_WITH_CONDITIONS:
+        resolutions = {item.fix_id: item for item in verdict.fix_resolutions}
+        for fix in verdict.required_fixes:
+            resolution = resolutions.get(fix.fix_id)
+            if fix.blocking and (
+                resolution is None or not resolution.resolved or not resolution.resolution.strip()
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="UNRESOLVED_BLOCKING_FIX",
+                        message=f"conditional approval has unresolved blocking fix: {fix.fix_id}",
+                    )
+                )
+    return _report(issues)
+
+
 def validate_phase1_boundary(policy: ExecutionPolicy, tasks: Iterable[DAGTask]) -> ValidationReport:
     issues: list[ValidationIssue] = []
     if policy.mode != "planning_only":
@@ -226,6 +373,7 @@ def validate_phase1_boundary(policy: ExecutionPolicy, tasks: Iterable[DAGTask]) 
 def validate_handoff_package(
     plan: ScientificQuestionPlan,
     verdict: ApprovalVerdict,
+    validation_record: PlanValidationRecord,
     gate: GateVerdict,
     handoff: AgentHandoffPackage,
     *,
@@ -235,10 +383,41 @@ def validate_handoff_package(
     plan_hash = content_hash(plan)
     if verdict.decision not in {ApprovalDecision.APPROVE, ApprovalDecision.APPROVE_WITH_CONDITIONS}:
         issues.append(ValidationIssue(code="PLAN_NOT_APPROVED", message="approval decision does not permit export"))
+    issues.extend(validate_conditional_approval(verdict).issues)
+    declared_evidence = {reference.evidence_id for reference in plan.evidence_refs}
+    for resolution in verdict.fix_resolutions:
+        for evidence_id in resolution.evidence_refs:
+            if evidence_id not in declared_evidence:
+                issues.append(
+                    ValidationIssue(
+                        code="FIX_RESOLUTION_EVIDENCE_MISMATCH",
+                        message=f"fix resolution references evidence outside the validated plan: {evidence_id}",
+                    )
+                )
     if not gate.passed:
         issues.append(ValidationIssue(code="PLAN_GATE_FAILED", message="plan gate has not passed"))
     if (gate.candidate_id, gate.candidate_version, gate.candidate_content_hash) != (plan.plan_id, plan.version, plan_hash):
         issues.append(ValidationIssue(code="STALE_PLAN_GATE", message="plan gate is not bound to current plan content"))
+    if (gate.approval_verdict_id, gate.approval_verdict_hash) != (
+        verdict.verdict_id,
+        content_hash(verdict),
+    ):
+        issues.append(
+            ValidationIssue(
+                code="GATE_APPROVAL_BINDING_MISMATCH",
+                message="GateVerdict is not bound to the supplied ApprovalVerdict",
+            )
+        )
+    if (gate.plan_validation_id, gate.plan_validation_hash) != (
+        validation_record.validation_id,
+        content_hash(validation_record),
+    ):
+        issues.append(
+            ValidationIssue(
+                code="GATE_VALIDATION_BINDING_MISMATCH",
+                message="GateVerdict is not bound to the supplied PlanValidationRecord",
+            )
+        )
     if not human_selected:
         issues.append(ValidationIssue(code="HUMAN_SELECTION_REQUIRED", message="explicit human selection is required"))
     if (handoff.source_plan_id, handoff.source_plan_version, handoff.source_plan_hash) != (plan.plan_id, plan.version, plan_hash):
@@ -255,18 +434,99 @@ def validate_handoff_package(
     return _report(issues)
 
 
+def _safe_export_relative_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        return False
+    path = PurePosixPath(value)
+    return not path.is_absolute() and path.as_posix() == value and all(part not in {"", ".", ".."} for part in path.parts)
+
+
 def validate_export(export_dir: Path) -> ValidationReport:
     issues: list[ValidationIssue] = []
+    export_root = export_dir.resolve()
     checksums_path = export_dir / "checksums.json"
     if not checksums_path.is_file():
         return _report([ValidationIssue(code="MISSING_CHECKSUMS", message="checksums.json is missing")])
-    checksums = load_data(checksums_path)
+    try:
+        checksums = load_data(checksums_path)
+    except (OSError, ValueError) as error:
+        return _report([ValidationIssue(code="INVALID_CHECKSUMS", message=f"cannot read checksums.json: {error}")])
     if not isinstance(checksums, dict):
         return _report([ValidationIssue(code="INVALID_CHECKSUMS", message="checksums.json must be an object")])
+    safe_checksum_paths: set[str] = set()
     for relative_path, expected in checksums.items():
+        if not _safe_export_relative_path(relative_path):
+            issues.append(
+                ValidationIssue(
+                    code="UNSAFE_CHECKSUM_PATH",
+                    message=f"checksum path is not a safe package-relative path: {relative_path!r}",
+                )
+            )
+            continue
+        if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            issues.append(
+                ValidationIssue(
+                    code="INVALID_CHECKSUM_VALUE",
+                    message=f"invalid SHA-256 value for: {relative_path}",
+                )
+            )
+            continue
+        safe_checksum_paths.add(relative_path)
         path = export_dir / relative_path
+        resolved = path.resolve()
+        if not resolved.is_relative_to(export_root):
+            issues.append(
+                ValidationIssue(
+                    code="UNSAFE_CHECKSUM_PATH",
+                    message=f"checksum path escapes export root: {relative_path}",
+                )
+            )
+            continue
+        current = path
+        symlink_found = False
+        while current != export_dir:
+            if current.is_symlink():
+                symlink_found = True
+                break
+            current = current.parent
+        if symlink_found:
+            issues.append(
+                ValidationIssue(
+                    code="UNSAFE_EXPORT_SYMLINK",
+                    message=f"export package cannot contain symlinks: {relative_path}",
+                )
+            )
+            continue
         if not path.is_file():
             issues.append(ValidationIssue(code="MISSING_EXPORT_FILE", message=f"missing export file: {relative_path}"))
         elif file_sha256(path) != expected:
             issues.append(ValidationIssue(code="CHECKSUM_MISMATCH", message=f"checksum mismatch: {relative_path}"))
+    actual_files = {
+        path.relative_to(export_dir).as_posix()
+        for path in export_dir.rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    expected_files = safe_checksum_paths | {"checksums.json"}
+    for relative_path in sorted(actual_files - expected_files):
+        issues.append(
+            ValidationIssue(
+                code="EXTRA_EXPORT_FILE",
+                message=f"export contains an unchecked extra file: {relative_path}",
+            )
+        )
+    manifest_path = export_dir / "manifest.yaml"
+    if manifest_path.is_file():
+        try:
+            manifest = ExportManifest.model_validate(load_data(manifest_path))
+        except (OSError, ValueError) as error:
+            issues.append(ValidationIssue(code="INVALID_EXPORT_MANIFEST", message=str(error)))
+        else:
+            expected_manifest_files = safe_checksum_paths - {"manifest.yaml"}
+            if set(manifest.files) != expected_manifest_files:
+                issues.append(
+                    ValidationIssue(
+                        code="EXPORT_MANIFEST_FILE_MISMATCH",
+                        message="manifest file inventory does not match checksummed package files",
+                    )
+                )
     return _report(issues)

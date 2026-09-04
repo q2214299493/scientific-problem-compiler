@@ -14,6 +14,7 @@ from ..serialization import content_hash, load_data
 
 class FTAgentAdapter:
     target_agent = "ft-agent"
+    supported_domains = ("fischer_tropsch",)
 
     def __init__(self, catalog: AgentCapabilityCatalog | None = None) -> None:
         if catalog is None:

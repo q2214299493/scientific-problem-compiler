@@ -4,20 +4,25 @@ import pytest
 from pydantic import ValidationError
 
 from spc.domains import DomainPackLoader
-from spc.models import EvidenceClassification, GroundedStatement
+from spc.models import (
+    EvidenceClassification,
+    FingerprintDifference,
+    GroundedStatement,
+    SystemFingerprint,
+)
 from spc.serialization import content_hash
 from spc.validators import compare_method_fingerprints, validate_candidate_set, validate_question_plan
 
 
-def test_ft_co_activation_chain_growth_golden_fixture(make_plan) -> None:
+def test_ft_co_activation_chain_growth_golden_fixture(make_plan, evidence_repository) -> None:
     plan = make_plan()
     pack = DomainPackLoader().load("fischer_tropsch")
-    report = validate_question_plan(plan, pack.capabilities)
+    report = validate_question_plan(plan, pack.capabilities, evidence_repository)
     assert report.valid
     assert "ft_pathway_comparison_plan" in {item.capability_id for item in pack.capabilities}
 
 
-def test_cross_domain_core_has_no_ft_requirement(make_plan) -> None:
+def test_cross_domain_core_has_no_ft_requirement(make_plan, evidence_repository) -> None:
     plan = make_plan(
         domain="base",
         latent_concern="OER mechanism",
@@ -25,18 +30,18 @@ def test_cross_domain_core_has_no_ft_requirement(make_plan) -> None:
         capability_id="comparative_analysis",
     )
     pack = DomainPackLoader().load("base")
-    assert validate_question_plan(plan, pack.capabilities).valid
+    assert validate_question_plan(plan, pack.capabilities, evidence_repository).valid
     schema_text = str(type(plan).model_json_schema())
     assert "Fe" not in schema_text
     assert "Fischer" not in schema_text
 
 
-def test_adjacent_question_adversarial_fixture(make_plan) -> None:
+def test_adjacent_question_adversarial_fixture(make_plan, evidence_repository) -> None:
     plan = make_plan(
         latent_concern="CO activation",
         question="Does product selectivity change under the comparison?",
     )
-    report = validate_question_plan(plan)
+    report = validate_question_plan(plan, evidence_repository=evidence_repository)
     assert "INTENT_QUESTION_MISMATCH" in {item.code for item in report.issues}
 
 
@@ -49,8 +54,10 @@ def test_evidence_statement_without_reference_is_rejected() -> None:
         )
 
 
-def test_method_fingerprint_without_evidence_or_deviation_is_rejected(make_plan) -> None:
-    report = validate_question_plan(make_plan(method_evidence=False))
+def test_method_fingerprint_without_evidence_or_deviation_is_rejected(make_plan, evidence_repository) -> None:
+    report = validate_question_plan(
+        make_plan(method_evidence=False), evidence_repository=evidence_repository
+    )
     assert "UNGROUNDED_METHOD_FINGERPRINT" in {item.code for item in report.issues}
 
 
@@ -64,9 +71,30 @@ def test_undisclosed_method_fingerprint_difference_is_rejected(make_plan) -> Non
     assert "UNDISCLOSED_METHOD_DIFFERENCE" in {item.code for item in report.issues}
 
 
-def test_dag_cycle_is_rejected(make_plan) -> None:
+def test_false_disclosure_cannot_hide_method_difference(make_plan) -> None:
+    left = make_plan(plan_id="left")
+    right = make_plan(plan_id="right").model_copy(
+        update={
+            "method_fingerprint": left.method_fingerprint.model_copy(
+                update={"attributes": {"comparison_rule": "changed"}}
+            ),
+            "fingerprint_differences": (
+                FingerprintDifference(
+                    field="comparison_rule",
+                    left="fixed",
+                    right="changed",
+                    disclosed_deviation=False,
+                ),
+            ),
+        }
+    )
+    report = compare_method_fingerprints(left, right)
+    assert "UNDISCLOSED_METHOD_DIFFERENCE" in {item.code for item in report.issues}
+
+
+def test_dag_cycle_is_rejected(make_plan, evidence_repository) -> None:
     plan = make_plan(task_overrides={"depends_on": ("task-1",)})
-    report = validate_question_plan(plan)
+    report = validate_question_plan(plan, evidence_repository=evidence_repository)
     assert "DAG_CYCLE" in {item.code for item in report.issues}
 
 
@@ -85,3 +113,20 @@ def test_single_reasonable_candidate_is_valid(make_plan) -> None:
 
 def test_content_hash_is_deterministic(make_plan) -> None:
     assert content_hash(make_plan()) == content_hash(make_plan())
+
+
+def test_nested_mutable_fingerprint_fields_are_prevented() -> None:
+    source = {"surface": {"layers": [1, 2, 3]}}
+    fingerprint = SystemFingerprint(
+        fingerprint_id="system-nested",
+        attributes=source,
+        evidence_refs=("ev-1",),
+    )
+    source["surface"]["layers"].append(4)
+    assert fingerprint.attributes["surface"]["layers"] == (1, 2, 3)
+    with pytest.raises(TypeError):
+        fingerprint.attributes["surface"]["layers"][0] = 9
+    with pytest.raises(TypeError):
+        fingerprint.attributes["surface"]["new"] = "mutable"
+    with pytest.raises(TypeError):
+        fingerprint.attributes._data["surface"] = "mutable"

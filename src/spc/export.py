@@ -1,23 +1,35 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from .domains import DomainPackLoader
 from .models import (
     AgentHandoffPackage,
     ApprovalVerdict,
     ExportManifest,
     GateVerdict,
+    PlanValidationRecord,
     ScientificQuestionPlan,
 )
 from .serialization import content_hash, dump_json, dump_yaml, file_sha256, require_safe_path_component
-from .validators import ValidationIssue, ValidationReport, validate_export, validate_handoff_package
+from .validators import (
+    EvidenceSpanRepository,
+    ValidationIssue,
+    ValidationReport,
+    validate_export,
+    validate_handoff_package,
+    validate_plan_validation_record,
+    validate_question_plan,
+)
 
 
 class AgentAdapter(Protocol):
     target_agent: str
+    supported_domains: tuple[str, ...]
 
     def build_handoff(self, plan: ScientificQuestionPlan, export_id: str) -> AgentHandoffPackage: ...
 
@@ -29,14 +41,22 @@ class ExportError(RuntimeError):
 
 
 class GenericExportService:
-    def __init__(self, exports_root: Path) -> None:
+    def __init__(
+        self,
+        exports_root: Path,
+        evidence_repository: EvidenceSpanRepository,
+        domain_loader: DomainPackLoader | None = None,
+    ) -> None:
         self.exports_root = exports_root
+        self.evidence_repository = evidence_repository
+        self.domain_loader = domain_loader or DomainPackLoader()
 
     def export(
         self,
         *,
         plan: ScientificQuestionPlan,
         verdict: ApprovalVerdict,
+        validation_record: PlanValidationRecord,
         gate: GateVerdict,
         human_selected: bool,
         adapter: AgentAdapter,
@@ -47,19 +67,66 @@ class GenericExportService:
         destination = self.exports_root / adapter.target_agent / export_id
         if destination.exists():
             raise FileExistsError(f"refusing to overwrite immutable export: {destination}")
+        try:
+            domain_pack = self.domain_loader.load(plan.domain)
+        except (FileNotFoundError, ValueError) as error:
+            raise ExportError(
+                ValidationReport(
+                    valid=False,
+                    issues=(ValidationIssue(code="DOMAIN_PACK_UNAVAILABLE", message=str(error)),),
+                )
+            ) from error
+        preflight_issues: list[ValidationIssue] = []
+        if plan.domain not in adapter.supported_domains:
+            preflight_issues.append(
+                ValidationIssue(
+                    code="TARGET_DOMAIN_MISMATCH",
+                    message=(
+                        f"adapter {adapter.target_agent!r} does not support plan domain {plan.domain!r}"
+                    ),
+                )
+            )
+        if domain_pack.profile.version != plan.domain_pack_version:
+            preflight_issues.append(
+                ValidationIssue(
+                    code="DOMAIN_PACK_VERSION_MISMATCH",
+                    message=(
+                        f"plan requires domain pack {plan.domain!r} version "
+                        f"{plan.domain_pack_version!r}, loaded {domain_pack.profile.version!r}"
+                    ),
+                )
+            )
+        plan_report = validate_question_plan(
+            plan,
+            domain_pack.capabilities,
+            self.evidence_repository,
+        )
+        preflight_issues.extend(plan_report.issues)
+        preflight_issues.extend(
+            validate_plan_validation_record(plan, validation_record, plan_report).issues
+        )
         handoff = adapter.build_handoff(plan, export_id)
-        report = validate_handoff_package(plan, verdict, gate, handoff, human_selected=human_selected)
-        if not report.valid:
-            raise ExportError(report)
+        preflight_issues.extend(
+            validate_handoff_package(
+                plan,
+                verdict,
+                validation_record,
+                gate,
+                handoff,
+                human_selected=human_selected,
+            ).issues
+        )
+        if preflight_issues:
+            raise ExportError(ValidationReport(valid=False, issues=tuple(preflight_issues)))
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=f".{export_id}-", dir=destination.parent) as temporary:
             staging = Path(temporary) / "package"
             staging.mkdir()
-            self._write_package(staging, plan, verdict, gate, handoff)
-            staging.rename(destination)
-        verification = validate_export(destination)
-        if not verification.valid:
-            raise ExportError(verification)
+            self._write_package(staging, plan, verdict, validation_record, gate, handoff)
+            staging_verification = validate_export(staging)
+            if not staging_verification.valid:
+                raise ExportError(staging_verification)
+            os.replace(staging, destination)
         return destination
 
     @staticmethod
@@ -67,6 +134,7 @@ class GenericExportService:
         root: Path,
         plan: ScientificQuestionPlan,
         verdict: ApprovalVerdict,
+        validation_record: PlanValidationRecord,
         gate: GateVerdict,
         handoff: AgentHandoffPackage,
     ) -> None:
@@ -102,6 +170,7 @@ class GenericExportService:
         for fingerprint in (plan.intent_fingerprint, plan.system_fingerprint, plan.method_fingerprint):
             dump_yaml(root / "fingerprints" / f"{fingerprint.fingerprint_id}.yaml", fingerprint)
         dump_yaml(root / "approvals" / "plan-review.yaml", verdict)
+        dump_yaml(root / "approvals" / "plan-validation.yaml", validation_record)
         dump_yaml(root / "approvals" / "plan-gate.yaml", gate)
         dump_yaml(root / "capability-bindings.yaml", list(handoff.capability_bindings))
         dump_yaml(root / "execution-policy.yaml", handoff.execution_policy)

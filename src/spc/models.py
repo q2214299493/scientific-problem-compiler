@@ -4,11 +4,19 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+
+from .immutable import FrozenDict, deep_freeze, deep_thaw
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> StrictModel:
+        del deep
+        data = self.model_dump(mode="python")
+        data.update(update or {})
+        return type(self).model_validate(data)
 
 
 class EvidenceClassification(StrEnum):
@@ -144,13 +152,13 @@ class IntentFingerprint(StrictModel):
 
 class SystemFingerprint(StrictModel):
     fingerprint_id: str
-    attributes: dict[str, Any]
+    attributes: FrozenDict
     evidence_refs: tuple[str, ...] = ()
 
 
 class MethodFingerprint(StrictModel):
     fingerprint_id: str
-    attributes: dict[str, Any]
+    attributes: FrozenDict
     evidence_refs: tuple[str, ...] = ()
     proposed_deviation_refs: tuple[str, ...] = ()
 
@@ -160,6 +168,16 @@ class FingerprintDifference(StrictModel):
     left: Any = None
     right: Any = None
     disclosed_deviation: bool = False
+
+    @model_validator(mode="after")
+    def freeze_values(self) -> FingerprintDifference:
+        object.__setattr__(self, "left", deep_freeze(self.left))
+        object.__setattr__(self, "right", deep_freeze(self.right))
+        return self
+
+    @field_serializer("left", "right")
+    def serialize_frozen_values(self, value: Any) -> Any:
+        return deep_thaw(value)
 
 
 class RequiredHumanDecision(StrictModel):
@@ -230,6 +248,13 @@ class RequiredFix(StrictModel):
     blocking: bool = True
 
 
+class FixResolution(StrictModel):
+    fix_id: str
+    resolved: bool
+    resolution: str
+    evidence_refs: tuple[str, ...] = ()
+
+
 class ApprovalScores(StrictModel):
     intent_fidelity: int = Field(ge=0, le=5)
     evidence_grounding: int = Field(ge=0, le=5)
@@ -248,10 +273,23 @@ class ApprovalVerdict(StrictModel):
     scores: ApprovalScores
     hard_red_flags: tuple[str, ...] = ()
     required_fixes: tuple[RequiredFix, ...] = ()
+    fix_resolutions: tuple[FixResolution, ...] = ()
     human_decisions_required: tuple[str, ...] = ()
     decision: ApprovalDecision
     approver_id: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PlanValidationRecord(StrictModel):
+    validation_id: str
+    plan_id: str
+    plan_version: str
+    plan_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    domain: str
+    domain_pack_version: str
+    valid: bool
+    issue_codes: tuple[str, ...] = ()
+    validator_version: str = "1.1.0"
 
 
 class GateVerdict(StrictModel):
@@ -259,6 +297,10 @@ class GateVerdict(StrictModel):
     candidate_id: str
     candidate_version: str
     candidate_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approval_verdict_id: str
+    approval_verdict_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_validation_id: str
+    plan_validation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     passed: bool
     reasons: tuple[str, ...] = ()
 

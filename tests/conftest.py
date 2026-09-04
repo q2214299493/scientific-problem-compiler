@@ -11,6 +11,7 @@ from spc.models import (
     DAGTask,
     EvidenceClassification,
     EvidenceReference,
+    EvidenceSpan,
     FalsificationCriterion,
     GroundedStatement,
     Hypothesis,
@@ -22,6 +23,7 @@ from spc.models import (
     ScientificQuestionPlan,
     SystemFingerprint,
 )
+from spc.repositories import SourceEvidenceStore
 
 
 def statement(statement_id: str, text: str, *, evidence: bool = True) -> GroundedStatement:
@@ -31,6 +33,27 @@ def statement(statement_id: str, text: str, *, evidence: bool = True) -> Grounde
         classification=EvidenceClassification.EVIDENCE if evidence else EvidenceClassification.ASSUMPTION,
         evidence_refs=("ev-1",) if evidence else (),
     )
+
+
+@pytest.fixture
+def evidence_repository(tmp_path):
+    source = tmp_path / "source-1.txt"
+    content = "evidence text for the scientific plan"
+    source.write_text(content, encoding="utf-8")
+    store = SourceEvidenceStore(tmp_path / ".spc")
+    record = store.ingest(source, "source-1", "v1")
+    store.add_evidence(
+        EvidenceSpan(
+            evidence_id="ev-1",
+            source_id="source-1",
+            source_version="v1",
+            content_sha256=record.content_sha256,
+            start_offset=0,
+            end_offset=len(content),
+            text=content,
+        )
+    )
+    return store.evidence_records
 
 
 @pytest.fixture

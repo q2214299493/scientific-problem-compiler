@@ -21,9 +21,12 @@ from .models import (
     EvidenceReference,
     EvidenceSpan,
     ExportManifest,
+    FixResolution,
     GateVerdict,
     IntentFingerprint,
     MethodFingerprint,
+    PlanValidationRecord,
+    RequiredFix,
     ScientificCapability,
     ScientificQuestionPlan,
     SourceDocument,
@@ -31,8 +34,15 @@ from .models import (
 )
 from .providers import MockProvider
 from .repositories import SourceEvidenceStore, initialize_state
-from .serialization import dump_yaml, export_json_schemas, load_model, require_safe_path_component
+from .serialization import (
+    dump_yaml,
+    export_json_schemas,
+    load_data,
+    load_model,
+    require_safe_path_component,
+)
 from .validators import (
+    build_plan_validation_record,
     compare_method_fingerprints,
     validate_export,
     validate_question_plan,
@@ -69,7 +79,12 @@ def compile_command(
     request = request_file.read_text(encoding="utf-8")
     initialize_state(state_dir, domain=domain)
     plans = [load_model(path, ScientificQuestionPlan) for path in mock_plan]
-    result = ScientificProblemCompiler(MockProvider(plans), DomainPackLoader()).compile(request, domain)
+    evidence_repository = SourceEvidenceStore(state_dir).evidence_records
+    result = ScientificProblemCompiler(
+        MockProvider(plans),
+        DomainPackLoader(),
+        evidence_repository,
+    ).compile(request, domain)
     output_dir = state_dir / "candidates"
     for plan in result.candidates:
         require_safe_path_component(plan.plan_id, field="plan_id")
@@ -92,14 +107,29 @@ def compile_command(
 def validate(
     target: Annotated[Path, typer.Argument(exists=True)],
     kind: Annotated[str, typer.Option("--kind", help="plan or export")] = "plan",
-    domain: Annotated[str, typer.Option("--domain")] = "base",
+    domain: Annotated[str | None, typer.Option("--domain")] = None,
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    record_output: Annotated[Path | None, typer.Option("--record-output")] = None,
+    validation_id: Annotated[str, typer.Option("--validation-id")] = "validation-1",
 ) -> None:
     """Run deterministic plan or export validators."""
     if kind == "export":
         report = validate_export(target)
     elif kind == "plan":
         plan = load_model(target, ScientificQuestionPlan)
-        report = validate_question_plan(plan, DomainPackLoader().load(domain).capabilities)
+        if domain is not None and domain != plan.domain:
+            raise typer.BadParameter("--domain must match the plan domain")
+        pack = DomainPackLoader().load(plan.domain)
+        report = validate_question_plan(
+            plan,
+            pack.capabilities,
+            SourceEvidenceStore(state_dir).evidence_records,
+        )
+        if record_output is not None:
+            dump_yaml(
+                record_output,
+                build_plan_validation_record(plan, report, validation_id=validation_id),
+            )
     else:
         raise typer.BadParameter("kind must be 'plan' or 'export'")
     _emit_report(report)
@@ -115,12 +145,31 @@ def approve(
     verdict_id: Annotated[str, typer.Option("--verdict-id")],
     approver_id: Annotated[str, typer.Option("--approver-id")],
     score: Annotated[int, typer.Option("--score", min=0, max=5)] = 3,
+    required_fixes_file: Annotated[
+        Path | None, typer.Option("--required-fixes", exists=True, dir_okay=False)
+    ] = None,
+    fix_resolutions_file: Annotated[
+        Path | None, typer.Option("--fix-resolutions", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
     """Create an independent, hash-bound approval verdict without modifying the plan."""
     plan = load_model(plan_file, ScientificQuestionPlan)
     scores = ApprovalScores(**{name: score for name in ApprovalScores.model_fields})
+    required_fixes = tuple(
+        RequiredFix.model_validate(item)
+        for item in (load_data(required_fixes_file) if required_fixes_file else [])
+    )
+    fix_resolutions = tuple(
+        FixResolution.model_validate(item)
+        for item in (load_data(fix_resolutions_file) if fix_resolutions_file else [])
+    )
     verdict = ScientificPlanApprover(approver_id).bind_verdict(
-        plan, verdict_id=verdict_id, scores=scores, decision=decision
+        plan,
+        verdict_id=verdict_id,
+        scores=scores,
+        decision=decision,
+        required_fixes=required_fixes,
+        fix_resolutions=fix_resolutions,
     )
     dump_yaml(output, verdict)
     typer.echo(str(output))
@@ -144,10 +193,14 @@ def compare(
 def export(
     plan_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     verdict_file: Annotated[Path, typer.Option("--verdict", exists=True, dir_okay=False)],
+    validation_file: Annotated[
+        Path, typer.Option("--validation-record", exists=True, dir_okay=False)
+    ],
     gate_file: Annotated[Path, typer.Option("--gate", exists=True, dir_okay=False)],
     export_id: Annotated[str, typer.Option("--export-id")],
     target: Annotated[str, typer.Option("--target")] = "ft-agent",
     exports_dir: Annotated[Path, typer.Option("--exports-dir")] = Path("exports"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
     human_selected: Annotated[bool, typer.Option("--human-selected")] = False,
 ) -> None:
     """Create a planning-only immutable handoff package after both gates pass."""
@@ -155,11 +208,16 @@ def export(
         raise typer.BadParameter("phase 1 only provides the ft-agent adapter")
     plan = load_model(plan_file, ScientificQuestionPlan)
     verdict = load_model(verdict_file, ApprovalVerdict)
+    validation_record = load_model(validation_file, PlanValidationRecord)
     gate = load_model(gate_file, GateVerdict)
     try:
-        path = GenericExportService(exports_dir).export(
+        path = GenericExportService(
+            exports_dir,
+            SourceEvidenceStore(state_dir).evidence_records,
+        ).export(
             plan=plan,
             verdict=verdict,
+            validation_record=validation_record,
             gate=gate,
             human_selected=human_selected,
             adapter=FTAgentAdapter(),
@@ -187,6 +245,7 @@ def schema_command(
         DAGTask,
         ScientificQuestionPlan,
         ApprovalVerdict,
+        PlanValidationRecord,
         GateVerdict,
         DomainProfile,
         AgentCapabilityCatalog,
