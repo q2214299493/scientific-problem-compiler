@@ -1,0 +1,18 @@
+- capability_id: evidence_review
+  domain: base
+  scientific_goal: Review traceable evidence relevant to a scientific question
+  required_inputs: [source_query_manifest]
+  outputs: [evidence_assessment]
+  dag_expansion: [retrieve, assess, record]
+  validators: [validate_evidence_links]
+  limitations: [Does not establish new experimental or computational results]
+  failure_branches: [insufficient_evidence]
+- capability_id: comparative_analysis
+  domain: base
+  scientific_goal: Compare predefined models or baselines using declared observables
+  required_inputs: [model, observable, baseline]
+  outputs: [comparison_record]
+  dag_expansion: [prepare, compare, evaluate]
+  validators: [validate_question_plan]
+  limitations: [Planning only in phase 1]
+  failure_branches: [incomparable_methods, missing_observable]

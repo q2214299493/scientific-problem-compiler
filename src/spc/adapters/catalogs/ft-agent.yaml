@@ -1,0 +1,17 @@
+agent_id: ft-agent
+version: 1.0.0
+capabilities:
+  - capability_id: ft.review_evidence
+    version: 1.0.0
+    supports_scientific_capability_ids: [ft_evidence_review]
+    input_contract:
+      requires: [source_query_manifest, reaction_scope]
+    output_contract:
+      produces: [mechanistic_evidence_assessment]
+  - capability_id: ft.plan_pathway_comparison
+    version: 1.0.0
+    supports_scientific_capability_ids: [ft_pathway_comparison_plan]
+    input_contract:
+      requires: [hypotheses, model, observables, baseline]
+    output_contract:
+      produces: [pathway_comparison_specification]

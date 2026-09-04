@@ -1,0 +1,1 @@
+"""Static downstream capability catalogs."""

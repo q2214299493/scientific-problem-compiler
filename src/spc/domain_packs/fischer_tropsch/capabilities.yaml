@@ -1,0 +1,18 @@
+- capability_id: ft_evidence_review
+  domain: fischer_tropsch
+  scientific_goal: Review evidence for a Fischer-Tropsch mechanistic claim
+  required_inputs: [source_query_manifest, reaction_scope]
+  outputs: [mechanistic_evidence_assessment]
+  dag_expansion: [retrieve, assess, record]
+  validators: [validate_evidence_links]
+  limitations: [Literature evidence cannot substitute for local calculations]
+  failure_branches: [insufficient_evidence, conflicting_evidence]
+- capability_id: ft_pathway_comparison_plan
+  domain: fischer_tropsch
+  scientific_goal: Plan a falsifiable comparison of Fischer-Tropsch pathway hypotheses
+  required_inputs: [hypotheses, model, observables, baseline]
+  outputs: [pathway_comparison_specification]
+  dag_expansion: [define_endpoints, define_observables, define_acceptance]
+  validators: [validate_question_plan, validate_dag]
+  limitations: [Does not execute electronic-structure or kinetic calculations]
+  failure_branches: [incompatible_methods, missing_baseline]

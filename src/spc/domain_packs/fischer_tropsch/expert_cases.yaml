@@ -1,0 +1,16 @@
+- case_id: ft-co-activation-001
+  domain: fischer_tropsch
+  vague_request: Explain whether CO activation or chain growth controls the proposed trend.
+  translated_questions:
+    - Which declared observable distinguishes the CO-activation hypothesis from the chain-growth hypothesis?
+    - Does the comparison remain valid under one method and system fingerprint?
+  positive: true
+  rationale: Separates adjacent mechanistic concerns and requires a falsifying comparison.
+  evidence_refs: []
+- case_id: ft-adjacent-question-negative-001
+  domain: fischer_tropsch
+  vague_request: A reviewer asks about CO activation, but the plan only compares product selectivity.
+  translated_questions: []
+  positive: false
+  rationale: Product selectivity alone may answer an adjacent question without testing CO activation.
+  evidence_refs: []

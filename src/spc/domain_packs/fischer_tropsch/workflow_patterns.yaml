@@ -1,0 +1,6 @@
+- pattern_id: ft-mechanism-discrimination-001
+  domain: fischer_tropsch
+  trigger: Competing claims about CO activation and chain-growth control
+  workflow_capabilities: [ft_evidence_review, ft_pathway_comparison_plan]
+  limitations: [Requires compatible local evidence before reporting energetic differences]
+  evidence_refs: []

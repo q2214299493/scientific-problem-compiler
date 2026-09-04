@@ -1,0 +1,8 @@
+domain_id: base
+version: 1.0.0
+name: Generic Scientific Planning
+terminology: {}
+ontology:
+  entities: []
+  observables: []
+validators: []
