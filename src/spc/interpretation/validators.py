@@ -11,6 +11,7 @@ from ..models import (
     ReportedResult,
     ScientificContextPacket,
     ScientificEvidencePacket,
+    SourceQuote,
 )
 from ..serialization import content_hash
 from ..validators import EvidenceSpanRepository, ValidationIssue, ValidationReport
@@ -86,13 +87,98 @@ def validate_claim_evidence_refs(
     return _report(issues)
 
 
+def _source_quote_issues(
+    packet: ScientificEvidencePacket,
+    context: ScientificContextPacket,
+    evidence_repository: EvidenceSpanRepository,
+) -> tuple[list[ValidationIssue], dict[str, SourceQuote]]:
+    issues: list[ValidationIssue] = []
+    quotes_by_id = {quote.quote_id: quote for quote in packet.source_quotes}
+    source_document_hashes: dict[str, str] = {}
+    if len(quotes_by_id) != len(packet.source_quotes):
+        issues.append(
+            ValidationIssue(
+                code="DUPLICATE_SOURCE_QUOTE_ID",
+                message="SourceQuote IDs must be unique",
+                path="source_quotes",
+            )
+        )
+    for index, quote in enumerate(packet.source_quotes):
+        path = f"source_quotes[{index}]"
+        if quote.evidence_ref not in _context_evidence_ids(context):
+            issues.append(
+                ValidationIssue(
+                    code="SOURCE_QUOTE_NOT_RETRIEVED",
+                    message=f"SourceQuote evidence was not retrieved: {quote.evidence_ref}",
+                    path=path,
+                )
+            )
+            continue
+        try:
+            evidence = evidence_repository.get(quote.evidence_ref)
+            source = evidence_repository.verify_evidence_integrity(evidence)
+            source_document_hashes[f"{source.source_id}@{source.version}"] = content_hash(source)
+        except (FileNotFoundError, KeyError, OSError, ValueError) as error:
+            issues.append(
+                ValidationIssue(
+                    code="SOURCE_QUOTE_INTEGRITY_FAILURE",
+                    message=f"cannot verify SourceQuote: {error}",
+                    path=path,
+                )
+            )
+            continue
+        if quote.text != evidence.text:
+            issues.append(
+                ValidationIssue(
+                    code="SOURCE_QUOTE_TEXT_MISMATCH",
+                    message="SourceQuote text must exactly equal its EvidenceSpan text",
+                    path=path,
+                )
+            )
+        if (
+            quote.source_id,
+            quote.source_version,
+            quote.source_role,
+            quote.source_type,
+        ) != (
+            source.source_id,
+            source.version,
+            source.source_role,
+            source.source_type,
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="SOURCE_QUOTE_PROVENANCE_MISMATCH",
+                    message="SourceQuote provenance does not match SourceDocument",
+                    path=path,
+                )
+            )
+    if packet.provenance_manifest.get("source_document_hashes") != source_document_hashes:
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_DOCUMENT_PROVENANCE_MISMATCH",
+                message="packet provenance does not bind the referenced SourceDocument records",
+                path="provenance_manifest.source_document_hashes",
+            )
+        )
+    return issues, quotes_by_id
+
+
+def validate_source_quotes(
+    packet: ScientificEvidencePacket,
+    context: ScientificContextPacket,
+    evidence_repository: EvidenceSpanRepository,
+) -> ValidationReport:
+    issues, _ = _source_quote_issues(packet, context, evidence_repository)
+    return _report(issues)
+
+
 def validate_claim_source_binding(
     packet: ScientificEvidencePacket,
     context: ScientificContextPacket,
     evidence_repository: EvidenceSpanRepository,
 ) -> ValidationReport:
-    del context
-    issues: list[ValidationIssue] = []
+    issues, quotes_by_id = _source_quote_issues(packet, context, evidence_repository)
     for index, claim in enumerate(packet.source_claims):
         if claim.source_role.casefold() in {"spc", "agent", "mock", "interpreter"} and (
             claim.epistemic_status != EpistemicStatus.SOURCE_INTERPRETATION
@@ -120,19 +206,38 @@ def validate_claim_source_binding(
                     path=f"source_claims[{index}]",
                 )
             )
-        for evidence_id in claim.evidence_refs:
-            try:
-                evidence = evidence_repository.get(evidence_id)
-            except (FileNotFoundError, KeyError, OSError, ValueError):
-                continue
-            if claim.epistemic_status != EpistemicStatus.SOURCE_INTERPRETATION and claim.text not in evidence.text:
-                issues.append(
-                    ValidationIssue(
-                        code="CLAIM_SOURCE_TEXT_MISMATCH",
-                        message=f"claim text is not present in EvidenceSpan {evidence_id}",
-                        path=f"source_claims[{index}]",
-                    )
+        referenced_quotes = [
+            quotes_by_id[quote_id]
+            for quote_id in claim.source_quote_refs
+            if quote_id in quotes_by_id
+        ]
+        if len(referenced_quotes) != len(claim.source_quote_refs) or not referenced_quotes:
+            issues.append(
+                ValidationIssue(
+                    code="UNKNOWN_SOURCE_QUOTE_REF",
+                    message="SourceClaim must reference existing SourceQuote records",
+                    path=f"source_claims[{index}]",
                 )
+            )
+        elif set(claim.evidence_refs) != {quote.evidence_ref for quote in referenced_quotes}:
+            issues.append(
+                ValidationIssue(
+                    code="CLAIM_QUOTE_EVIDENCE_MISMATCH",
+                    message="SourceClaim evidence_refs must match its SourceQuote evidence",
+                    path=f"source_claims[{index}]",
+                )
+            )
+        explicit_roles = {
+            quote.source_role for quote in referenced_quotes if quote.source_role != "unspecified"
+        }
+        if len(explicit_roles) == 1 and claim.source_role not in explicit_roles:
+            issues.append(
+                ValidationIssue(
+                    code="CLAIM_SOURCE_ROLE_MISMATCH",
+                    message="SourceClaim role does not match SourceDocument provenance",
+                    path=f"source_claims[{index}]",
+                )
+            )
     return _report(issues)
 
 
@@ -199,6 +304,78 @@ def validate_result_provenance(
                 ValidationIssue(
                     code="RESULT_NOT_PRESENT_IN_SOURCE",
                     message=f"reported value and unit are not present in referenced evidence: {result.result_id}",
+                    path=path,
+                )
+            )
+    return _report(issues)
+
+
+def validate_result_context(packet: ScientificEvidencePacket) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    method_facts = {fact.fact_id: fact for fact in packet.method_facts}
+    model_facts = {fact.fact_id: fact for fact in packet.model_facts}
+    for index, result in enumerate(packet.reported_results):
+        path = f"reported_results[{index}].result_context"
+        result_context = result.result_context
+        if result_context is None:
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_RESULT_CONTEXT",
+                    message="reported results require a ResultContext",
+                    path=path,
+                )
+            )
+            continue
+        if (
+            result_context.system_context != result.system_context
+            or result_context.method_context != result.method_context
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="RESULT_CONTEXT_MISMATCH",
+                    message="ResultContext must preserve the result system and method context",
+                    path=path,
+                )
+            )
+        if not set(result_context.method_fact_refs).issubset(method_facts):
+            issues.append(
+                ValidationIssue(
+                    code="UNKNOWN_RESULT_METHOD_FACT",
+                    message="ResultContext references an unknown MethodFact",
+                    path=path,
+                )
+            )
+        if not set(result_context.model_fact_refs).issubset(model_facts):
+            issues.append(
+                ValidationIssue(
+                    code="UNKNOWN_RESULT_MODEL_FACT",
+                    message="ResultContext references an unknown ModelFact",
+                    path=path,
+                )
+            )
+        applicable_methods = {
+            fact.fact_id
+            for fact in method_facts.values()
+            if set(fact.evidence_refs) & set(result.evidence_refs)
+        }
+        applicable_models = {
+            fact.fact_id
+            for fact in model_facts.values()
+            if set(fact.evidence_refs) & set(result.evidence_refs)
+        }
+        if not applicable_methods.issubset(set(result_context.method_fact_refs)):
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_RESULT_METHOD_FACT_REF",
+                    message="ResultContext omits an applicable MethodFact",
+                    path=path,
+                )
+            )
+        if not applicable_models.issubset(set(result_context.model_fact_refs)):
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_RESULT_MODEL_FACT_REF",
+                    message="ResultContext omits an applicable ModelFact",
                     path=path,
                 )
             )
@@ -417,6 +594,7 @@ def validate_evidence_packet_integrity(
     issues.extend(validate_claim_source_binding(packet, context, evidence_repository).issues)
     issues.extend(validate_result_units(packet).issues)
     issues.extend(validate_result_provenance(packet, context, evidence_repository).issues)
+    issues.extend(validate_result_context(packet).issues)
     issues.extend(validate_result_comparability(packet).issues)
     issues.extend(validate_conflict_sets(packet).issues)
     issues.extend(validate_comparison_constraints(packet, context, evidence_repository).issues)

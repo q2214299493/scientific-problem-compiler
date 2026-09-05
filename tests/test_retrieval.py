@@ -206,6 +206,15 @@ def test_context_packet_preserves_complete_retrieval_provenance(tmp_path) -> Non
     )
     with pytest.raises(ValidationError, match="query_id is not content-bound"):
         packet.retrieval_query.model_copy(update={"raw_request": "tampered request"})
+    serialized = packet.model_dump(mode="json")
+    assert "retrieved_statements" in serialized
+    assert "known_facts" not in serialized
+    legacy = dict(serialized)
+    legacy["known_facts"] = legacy.pop("retrieved_statements")
+    legacy["content_hash"] = content_hash(
+        {key: value for key, value in legacy.items() if key != "content_hash"}
+    )
+    assert ScientificContextPacket.model_validate(legacy).retrieved_statements
 
 
 def test_prompt_injection_is_retrieved_only_as_data(tmp_path, monkeypatch) -> None:

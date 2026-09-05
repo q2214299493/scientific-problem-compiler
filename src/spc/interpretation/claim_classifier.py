@@ -10,7 +10,7 @@ def classify_claim(text: str) -> tuple[str, str, str, EpistemicStatus]:
     normalized = text.casefold()
     if "reviewer" in normalized or text.strip().endswith("?"):
         return "reviewer_question", "reviewer", "unresolved", EpistemicStatus.UNRESOLVED
-    if re.search(r"\b(hypothes(?:is|ize|ized)|we propose|may|might|could)\b", normalized):
+    if re.search(r"\b(hypothes(?:is|ize|izes|ized)|we propose|may|might|could)\b", normalized):
         return "hypothesis", "author", "tentative", EpistemicStatus.SOURCE_HYPOTHESIS
     if re.search(r"\b(game|bep|model|descriptor|scaling relation)\b", normalized):
         return "model_statement", "author", "source_reported", EpistemicStatus.MODEL_STATEMENT

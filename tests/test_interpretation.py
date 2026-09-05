@@ -23,12 +23,25 @@ from spc.retrieval import ScientificContextBuilder
 from spc.serialization import content_hash, dump_yaml, load_model
 
 
-def add_evidence(tmp_path, evidence_id: str, text: str) -> SourceEvidenceStore:
+def add_evidence(
+    tmp_path,
+    evidence_id: str,
+    text: str,
+    *,
+    source_role: str = "unspecified",
+    source_type: str = "unspecified",
+) -> SourceEvidenceStore:
     state_dir = tmp_path / ".spc"
     source_path = tmp_path / f"{evidence_id}.txt"
     source_path.write_text(text, encoding="utf-8")
     store = SourceEvidenceStore(state_dir)
-    source = store.ingest(source_path, f"source-{evidence_id}", "v1")
+    source = store.ingest(
+        source_path,
+        f"source-{evidence_id}",
+        "v1",
+        source_role=source_role,
+        source_type=source_type,
+    )
     store.add_evidence(
         EvidenceSpan(
             evidence_id=evidence_id,
@@ -91,6 +104,8 @@ def test_reported_dft_barrier_becomes_reported_result(tmp_path) -> None:
     assert result.method_context["method_family"] == "DFT"
     assert result.result_status == ResultStatus.COMPUTED_REPORTED
     assert result.evidence_refs == ("ev-dft",)
+    assert result.result_context is not None
+    assert result.result_context.method_fact_refs == (packet.method_facts[0].fact_id,)
 
 
 def test_game_bep_prediction_is_not_mislabeled_dft_truth(tmp_path) -> None:
@@ -100,6 +115,8 @@ def test_game_bep_prediction_is_not_mislabeled_dft_truth(tmp_path) -> None:
     assert result.result_status == ResultStatus.PREDICTED_REPORTED
     assert result.method_context["method_family"] == "model_prediction"
     assert packet.model_facts[0].epistemic_status == EpistemicStatus.MODEL_STATEMENT
+    assert result.result_context is not None
+    assert result.result_context.model_fact_refs == (packet.model_facts[0].fact_id,)
 
 
 def test_conflicting_mechanism_claims_create_conflict_set(tmp_path) -> None:
@@ -221,3 +238,149 @@ def test_interpret_cli_writes_valid_packet_offline(tmp_path, monkeypatch) -> Non
     loaded = load_model(output, ScientificEvidencePacket)
     assert loaded.context_id == context.context_id
     assert loaded.reported_results[0].result_status == ResultStatus.COMPUTED_REPORTED
+
+
+def test_temperature_pressure_and_barrier_use_local_value_context(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-multi-value",
+        "At 500 K and 1 bar, the DFT activation barrier on Fe(110) is 1.20 eV.",
+    )
+    _, packet, _ = build_packet(tmp_path, "500 K 1 bar DFT activation barrier Fe(110)")
+    values = {(result.value, result.unit): result.quantity for result in packet.reported_results}
+    assert values[(500.0, "K")] == "temperature"
+    assert values[(1.0, "bar")] == "pressure"
+    assert values[(1.2, "eV")] == "activation_barrier"
+
+
+def test_500_k_is_not_confused_with_1_2_ev_barrier(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-temperature-barrier",
+        "At 500 K, the DFT activation barrier on Fe(110) is 1.20 eV.",
+    )
+    _, packet, _ = build_packet(tmp_path, "500 K DFT activation barrier 1.20 eV Fe(110)")
+    assert [(result.quantity, result.unit) for result in packet.reported_results] == [
+        ("temperature", "K"),
+        ("activation_barrier", "eV"),
+    ]
+
+
+def test_two_energy_values_use_their_nearest_quantity_labels(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-two-energies",
+        "DFT gives an adsorption energy of -1.00 eV and an activation barrier of 1.20 eV on Fe(110).",
+    )
+    _, packet, _ = build_packet(tmp_path, "DFT adsorption energy activation barrier Fe(110)")
+    assert [(result.quantity, result.value) for result in packet.reported_results] == [
+        ("adsorption_energy", -1.0),
+        ("activation_barrier", 1.2),
+    ]
+
+
+def test_paraphrased_claim_can_retain_an_exact_source_quote(tmp_path) -> None:
+    quote_text = "The authors hypothesize that CO activation controls chain growth."
+    add_evidence(tmp_path, "ev-paraphrase", quote_text)
+    context, packet, store = build_packet(tmp_path, "CO activation controls chain growth")
+    claim = packet.source_claims[0].model_copy(
+        update={"text": "Chain growth is proposed to be controlled through CO activation."}
+    )
+    changed = rebind_packet(packet, source_claims=(claim,))
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert report.valid
+    assert changed.source_quotes[0].text == quote_text
+    assert changed.source_claims[0].text not in quote_text
+
+
+def test_reviewer_statement_without_question_mark_retains_provenance(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-reviewer-statement",
+        "Reviewer requests evidence that CO activation controls chain growth.",
+        source_role="reviewer",
+        source_type="reviewer_comment",
+    )
+    _, packet, _ = build_packet(tmp_path, "CO activation controls chain growth evidence")
+    claim = packet.source_claims[0]
+    quote = packet.source_quotes[0]
+    assert claim.epistemic_status == EpistemicStatus.UNRESOLVED
+    assert claim.source_role == "reviewer"
+    assert quote.source_role == "reviewer"
+    assert quote.source_type == "reviewer_comment"
+
+
+def test_author_response_and_reviewer_comment_provenance_are_distinct(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-author-response",
+        "The author response reports CO activation evidence.",
+        source_role="author",
+        source_type="author_response",
+    )
+    add_evidence(
+        tmp_path,
+        "ev-reviewer-comment",
+        "The reviewer requests CO activation evidence.",
+        source_role="reviewer",
+        source_type="reviewer_comment",
+    )
+    _, packet, _ = build_packet(tmp_path, "CO activation evidence")
+    provenance = {
+        quote.evidence_ref: (quote.source_role, quote.source_type)
+        for quote in packet.source_quotes
+    }
+    assert provenance["ev-author-response"] == ("author", "author_response")
+    assert provenance["ev-reviewer-comment"] == ("reviewer", "reviewer_comment")
+
+
+def test_two_results_share_one_method_fact(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-shared-method",
+        "Using DFT-PBE on Fe(110), barriers of 1.00 eV and 1.20 eV were reported.",
+    )
+    _, packet, _ = build_packet(tmp_path, "DFT PBE Fe(110) barriers 1.00 eV 1.20 eV")
+    assert len(packet.reported_results) == 2
+    assert len(packet.method_facts) == 1
+    shared_ref = packet.method_facts[0].fact_id
+    assert all(
+        result.result_context is not None
+        and result.result_context.method_fact_refs == (shared_ref,)
+        for result in packet.reported_results
+    )
+
+
+def test_claim_cannot_cite_quote_text_absent_from_evidence_span(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-exact-quote", "CO activation remains unresolved.")
+    context, packet, store = build_packet(tmp_path, "CO activation unresolved")
+    forged_quote = packet.source_quotes[0].model_copy(
+        update={"text": "This quote is absent from the EvidenceSpan."}
+    )
+    changed = rebind_packet(packet, source_quotes=(forged_quote,))
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert not report.valid
+    assert "SOURCE_QUOTE_TEXT_MISMATCH" in {issue.code for issue in report.issues}
+
+
+def test_phase_2b_packet_without_hardening_fields_still_loads(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-legacy-packet", "The DFT barrier on Fe(110) is 1.00 eV.")
+    _, packet, _ = build_packet(tmp_path, "DFT barrier Fe(110)")
+    legacy = packet.model_dump(mode="json")
+    legacy.pop("source_quotes")
+    for claim in legacy["source_claims"]:
+        claim.pop("source_quote_refs")
+    for result in legacy["reported_results"]:
+        result.pop("result_context")
+    identity = {
+        key: value
+        for key, value in legacy.items()
+        if key not in {"packet_id", "content_hash"}
+    }
+    legacy["packet_id"] = f"evidence-packet-{content_hash(identity)[:24]}"
+    legacy["content_hash"] = content_hash(
+        {key: value for key, value in legacy.items() if key != "content_hash"}
+    )
+    loaded = ScientificEvidencePacket.model_validate(legacy)
+    assert loaded.source_quotes == ()
+    assert loaded.reported_results[0].result_context is None

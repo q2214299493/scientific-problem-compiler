@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from pydantic import (
     AfterValidator,
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -99,6 +100,8 @@ class SourceDocument(StrictModel):
     media_type: str = "text/plain"
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     stored_path: str
+    source_role: NonBlankStr = "unspecified"
+    source_type: NonBlankStr = "unspecified"
     ingested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     read_only: bool = True
 
@@ -617,7 +620,10 @@ class ScientificContextPacket(StrictModel):
     expert_case_hits: tuple[RetrievalHit, ...] = ()
     workflow_pattern_hits: tuple[RetrievalHit, ...] = ()
     capability_hits: tuple[RetrievalHit, ...] = ()
-    known_facts: tuple[GroundedStatement, ...] = ()
+    retrieved_statements: tuple[GroundedStatement, ...] = Field(
+        default=(),
+        validation_alias=AliasChoices("retrieved_statements", "known_facts"),
+    )
     assumptions: tuple[AssumptionRecord, ...] = ()
     conflicting_evidence: tuple[NonBlankStr, ...] = ()
     unknowns: tuple[UnknownRecord, ...] = ()
@@ -664,8 +670,29 @@ class ScientificContextPacket(StrictModel):
         expected_hash = content_hash(
             self.model_dump(mode="json", exclude={"content_hash"})
         )
-        if self.content_hash != expected_hash:
+        legacy_payload = self.model_dump(mode="json", exclude={"content_hash"})
+        legacy_payload["known_facts"] = legacy_payload.pop("retrieved_statements")
+        legacy_hash = content_hash(legacy_payload)
+        if self.content_hash not in {expected_hash, legacy_hash}:
             raise ValueError("ScientificContextPacket content hash is invalid")
+        return self
+
+
+class SourceQuote(StrictModel):
+    quote_id: NonBlankStr
+    text: NonBlankStr
+    evidence_ref: NonBlankStr
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    source_role: NonBlankStr
+    source_type: NonBlankStr
+
+    @model_validator(mode="after")
+    def validate_quote_id(self) -> SourceQuote:
+        from .serialization import content_hash
+
+        if self.quote_id != f"quote-{content_hash({'evidence_ref': self.evidence_ref})[:24]}":
+            raise ValueError("SourceQuote quote_id is not evidence-bound")
         return self
 
 
@@ -675,8 +702,26 @@ class SourceClaim(StrictModel):
     claim_type: NonBlankStr
     source_role: NonBlankStr
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    source_quote_refs: tuple[NonBlankStr, ...] = ()
     claim_strength: NonBlankStr
     epistemic_status: EpistemicStatus
+
+
+class ResultContext(StrictModel):
+    context_id: NonBlankStr
+    system_context: FrozenDict
+    method_context: FrozenDict
+    method_fact_refs: tuple[NonBlankStr, ...] = ()
+    model_fact_refs: tuple[NonBlankStr, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_context_id(self) -> ResultContext:
+        from .serialization import content_hash
+
+        identity = self.model_dump(mode="json", exclude={"context_id"})
+        if self.context_id != f"result-context-{content_hash(identity)[:24]}":
+            raise ValueError("ResultContext context_id is not content-bound")
+        return self
 
 
 class ReportedResult(StrictModel):
@@ -686,6 +731,7 @@ class ReportedResult(StrictModel):
     unit: NonBlankStr
     system_context: FrozenDict
     method_context: FrozenDict
+    result_context: ResultContext | None = None
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
     result_status: ResultStatus
 
@@ -781,6 +827,7 @@ class ScientificEvidencePacket(StrictModel):
     packet_id: NonBlankStr
     context_id: NonBlankStr
     context_hash: Sha256Str
+    source_quotes: tuple[SourceQuote, ...] = ()
     source_claims: tuple[SourceClaim, ...] = ()
     reported_results: tuple[ReportedResult, ...] = ()
     method_facts: tuple[MethodFact, ...] = ()
@@ -800,11 +847,22 @@ class ScientificEvidencePacket(StrictModel):
         from .serialization import content_hash
 
         identity = self.model_dump(mode="json", exclude={"packet_id", "content_hash"})
-        if self.packet_id != f"evidence-packet-{content_hash(identity)[:24]}":
+        legacy_identity = self.model_dump(mode="json", exclude={"packet_id", "content_hash"})
+        legacy_identity.pop("source_quotes", None)
+        for claim in legacy_identity["source_claims"]:
+            claim.pop("source_quote_refs", None)
+        for result in legacy_identity["reported_results"]:
+            result.pop("result_context", None)
+        valid_ids = {
+            f"evidence-packet-{content_hash(identity)[:24]}",
+            f"evidence-packet-{content_hash(legacy_identity)[:24]}",
+        }
+        if self.packet_id not in valid_ids:
             raise ValueError("ScientificEvidencePacket packet_id is not content-bound")
         expected_hash = content_hash(
             self.model_dump(mode="json", exclude={"content_hash"})
         )
-        if self.content_hash != expected_hash:
+        legacy_payload = {"packet_id": self.packet_id, **legacy_identity}
+        if self.content_hash not in {expected_hash, content_hash(legacy_payload)}:
             raise ValueError("ScientificEvidencePacket content hash is invalid")
         return self

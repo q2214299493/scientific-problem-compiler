@@ -143,7 +143,16 @@ class SourceEvidenceStore:
             raise ValueError("EvidenceSpan differs from its repository record")
         return self._verify_evidence_against_source(stored_evidence)
 
-    def ingest(self, source_path: Path, source_id: str, version: str, title: str | None = None) -> SourceDocument:
+    def ingest(
+        self,
+        source_path: Path,
+        source_id: str,
+        version: str,
+        title: str | None = None,
+        *,
+        source_role: str = "unspecified",
+        source_type: str = "unspecified",
+    ) -> SourceDocument:
         require_safe_path_component(source_id, field="source_id")
         require_safe_path_component(version, field="version")
         content = source_path.read_bytes()
@@ -157,6 +166,8 @@ class SourceEvidenceStore:
                 existing.content_sha256 == sha256
                 and existing.title == (title or source_path.name)
                 and existing.stored_path == destination.relative_to(self.state_root).as_posix()
+                and existing.source_role == source_role
+                and existing.source_type == source_type
             ):
                 return existing
             raise FileExistsError(f"source version already exists with different metadata: {record_path}")
@@ -172,6 +183,8 @@ class SourceEvidenceStore:
             title=title or source_path.name,
             content_sha256=sha256,
             stored_path=destination.relative_to(self.state_root).as_posix(),
+            source_role=source_role,
+            source_type=source_type,
         )
         self.source_records.put(record_key, record)
         return record

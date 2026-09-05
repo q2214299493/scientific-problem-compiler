@@ -43,11 +43,13 @@ from .models import (
     RetrievalManifest,
     RetrievalQuery,
     ReportedResult,
+    ResultContext,
     ScientificCapability,
     ScientificContextPacket,
     ScientificEvidencePacket,
     ScientificQuestionPlan,
     SourceClaim,
+    SourceQuote,
     SourceDocument,
     SystemFingerprint,
     ConflictSet,
@@ -84,9 +86,18 @@ def ingest(
     version: Annotated[str, typer.Option("--version")],
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
     title: Annotated[str | None, typer.Option("--title")] = None,
+    source_role: Annotated[str, typer.Option("--source-role")] = "unspecified",
+    source_type: Annotated[str, typer.Option("--source-type")] = "unspecified",
 ) -> None:
     """Copy a source into the versioned, read-only evidence store."""
-    record = SourceEvidenceStore(state_dir).ingest(source, source_id, version, title)
+    record = SourceEvidenceStore(state_dir).ingest(
+        source,
+        source_id,
+        version,
+        title,
+        source_role=source_role,
+        source_type=source_type,
+    )
     typer.echo(record.model_dump_json(indent=2))
 
 
@@ -343,8 +354,10 @@ def schema_command(
         RetrievalManifest,
         ScientificContextPacket,
         SourceClaim,
+        SourceQuote,
         EvidenceAssessment,
         ReportedResult,
+        ResultContext,
         MethodFact,
         ModelFact,
         ConflictSet,

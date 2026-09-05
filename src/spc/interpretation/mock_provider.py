@@ -24,7 +24,9 @@ class MockInterpretationProvider:
 
     def interpret(self, context: ScientificContextPacket) -> InterpretationProposal:
         claims = extract_source_claims(context)
-        results = extract_reported_results(claims)
+        method_facts = extract_method_facts(claims)
+        model_facts = extract_model_facts(claims)
+        results = extract_reported_results(claims, method_facts, model_facts)
         conflicts = detect_conflicts(claims, context)
         conflict_claims = {claim_id for conflict in conflicts for claim_id in conflict.claim_refs}
         assessments = tuple(
@@ -63,8 +65,8 @@ class MockInterpretationProvider:
             "provider_version": self.provider_version,
             "source_claims": claims,
             "reported_results": results,
-            "method_facts": extract_method_facts(claims),
-            "model_facts": extract_model_facts(claims),
+            "method_facts": method_facts,
+            "model_facts": model_facts,
             "evidence_assessments": assessments,
             "conflict_sets": conflicts,
             "comparison_constraints": analyze_comparisons(results),

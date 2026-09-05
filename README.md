@@ -44,7 +44,7 @@ The resulting `ScientificContextPacket` binds the query hash, Domain Pack versio
 
 ## Phase 2B interpretation
 
-Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The initial `MockInterpretationProvider` is deterministic and offline. Retrieved text is represented as a source claim rather than an established fact; hypotheses, reviewer questions, model predictions, reported numerical results, method statements, conflicts, comparison constraints, and evidence gaps retain distinct epistemic labels.
+Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The initial `MockInterpretationProvider` is deterministic and offline. Phase 2B.1 separates exact `SourceQuote` text from normalized or paraphrased `SourceClaim` text. Every quote must equal its `EvidenceSpan` exactly and carries the corresponding `SourceDocument` role and type; a claim remains bound through explicit quote and evidence references rather than substring matching. Retrieved statements are never promoted to established facts.
 
 ```powershell
 spc interpret context.yaml `
@@ -53,4 +53,4 @@ spc interpret context.yaml `
   --output evidence-packet.yaml
 ```
 
-Interpretation validation reopens every referenced `EvidenceSpan`, verifies its source file and Phase 2A snapshot hash, and rejects unretrieved or fabricated references. Numerical results retain units and structured system/method context. Facet or method mismatches produce explicit comparison constraints, source conflicts remain unresolved, and predictive models are not relabeled as DFT results. Phase 2B does not generate a `ScientificQuestionPlan` and does not execute scientific software.
+Interpretation validation reopens every referenced `EvidenceSpan`, verifies its source file and Phase 2A snapshot hash, and rejects unretrieved, fabricated, or inexact quotes. Numerical results retain units and a `ResultContext` that references applicable `MethodFact` and `ModelFact` records. Quantity extraction uses each value's local context so a temperature, pressure, and barrier in one sentence remain distinct. Facet or method mismatches produce explicit comparison constraints, source conflicts remain unresolved, and predictive models are not relabeled as DFT results. Phase 2B does not generate a `ScientificQuestionPlan` and does not execute scientific software.

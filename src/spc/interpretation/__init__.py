@@ -9,8 +9,10 @@ from .validators import (
     validate_evidence_packet_integrity,
     validate_gap_capabilities,
     validate_result_comparability,
+    validate_result_context,
     validate_result_provenance,
     validate_result_units,
+    validate_source_quotes,
 )
 
 __all__ = [
@@ -25,6 +27,8 @@ __all__ = [
     "validate_evidence_packet_integrity",
     "validate_gap_capabilities",
     "validate_result_comparability",
+    "validate_result_context",
     "validate_result_provenance",
     "validate_result_units",
+    "validate_source_quotes",
 ]

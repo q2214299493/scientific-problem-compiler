@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from ..immutable import FrozenDict
-from ..models import ReportedResult, ResultStatus, SourceClaim
+from ..models import MethodFact, ModelFact, ReportedResult, ResultContext, ResultStatus, SourceClaim
 from ..serialization import content_hash
 
 _VALUE_UNIT = re.compile(
@@ -13,20 +13,35 @@ _VALUE_UNIT = re.compile(
 _FACET = re.compile(r"\b([A-Z][a-z]?)\s*\(\s*(\d{3})\s*\)")
 
 
-def _quantity(text: str, unit: str) -> str:
-    lowered = text.casefold()
-    if "barrier" in lowered or "activation energ" in lowered:
-        return "activation_barrier"
-    if "reaction energ" in lowered:
-        return "reaction_energy"
-    if "adsorption energ" in lowered:
-        return "adsorption_energy"
-    if unit.casefold() == "k":
+_QUANTITY_LABELS = (
+    (
+        re.compile(r"\b(?:activation barriers?|activation energ(?:y|ies)|barriers?)\b", re.I),
+        "activation_barrier",
+    ),
+    (re.compile(r"\breaction energ(?:y|ies)\b", re.I), "reaction_energy"),
+    (re.compile(r"\badsorption energ(?:y|ies)\b", re.I), "adsorption_energy"),
+)
+
+
+def _quantity(text: str, unit: str, value_start: int) -> str:
+    normalized_unit = unit.casefold()
+    if normalized_unit == "k":
         return "temperature"
-    if unit.casefold() in {"bar", "pa", "atm"}:
+    if normalized_unit in {"bar", "pa", "atm"}:
         return "pressure"
     if unit == "%":
         return "percentage"
+    labels = [
+        (match.start(), match.end(), quantity)
+        for pattern, quantity in _QUANTITY_LABELS
+        for match in pattern.finditer(text)
+    ]
+    preceding = [item for item in labels if item[1] <= value_start]
+    if preceding:
+        return max(preceding, key=lambda item: item[1])[2]
+    following = [item for item in labels if item[0] > value_start]
+    if following and min(following, key=lambda item: item[0])[0] - value_start <= 60:
+        return min(following, key=lambda item: item[0])[2]
     return "reported_quantity"
 
 
@@ -62,12 +77,37 @@ def _method_context_and_status(text: str) -> tuple[FrozenDict, ResultStatus]:
     return FrozenDict({"method_family": "not specified"}), ResultStatus.UNKNOWN_ORIGIN
 
 
-def extract_reported_results(claims: tuple[SourceClaim, ...]) -> tuple[ReportedResult, ...]:
+def extract_reported_results(
+    claims: tuple[SourceClaim, ...],
+    method_facts: tuple[MethodFact, ...] = (),
+    model_facts: tuple[ModelFact, ...] = (),
+) -> tuple[ReportedResult, ...]:
     results: list[ReportedResult] = []
     for claim in claims:
         for index, match in enumerate(_VALUE_UNIT.finditer(claim.text), start=1):
             unit = re.sub(r"\s+", "", match.group("unit"))
             method_context, status = _method_context_and_status(claim.text)
+            system_context = _system_context(claim.text)
+            method_fact_refs = tuple(
+                fact.fact_id
+                for fact in method_facts
+                if set(fact.evidence_refs) & set(claim.evidence_refs)
+            )
+            model_fact_refs = tuple(
+                fact.fact_id
+                for fact in model_facts
+                if set(fact.evidence_refs) & set(claim.evidence_refs)
+            )
+            result_context_identity = {
+                "system_context": dict(system_context),
+                "method_context": dict(method_context),
+                "method_fact_refs": method_fact_refs,
+                "model_fact_refs": model_fact_refs,
+            }
+            result_context = ResultContext(
+                context_id=f"result-context-{content_hash(result_context_identity)[:24]}",
+                **result_context_identity,
+            )
             identity = {
                 "claim_id": claim.claim_id,
                 "index": index,
@@ -77,11 +117,12 @@ def extract_reported_results(claims: tuple[SourceClaim, ...]) -> tuple[ReportedR
             results.append(
                 ReportedResult(
                     result_id=f"result-{content_hash(identity)[:24]}",
-                    quantity=_quantity(claim.text, unit),
+                    quantity=_quantity(claim.text, unit, match.start()),
                     value=float(match.group("value")),
                     unit=unit,
-                    system_context=_system_context(claim.text),
+                    system_context=system_context,
                     method_context=method_context,
+                    result_context=result_context,
                     evidence_refs=claim.evidence_refs,
                     result_status=status,
                 )

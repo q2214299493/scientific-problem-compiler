@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..models import ScientificContextPacket, ScientificEvidencePacket
+from ..models import ScientificContextPacket, ScientificEvidencePacket, SourceQuote
 from ..serialization import content_hash
 from ..validators import EvidenceSpanRepository, ValidationReport
 from .provider import InterpretationProvider
@@ -30,6 +30,38 @@ class ScientificEvidencePacketBuilder:
         if proposal.proposal_id != f"interpretation-{content_hash(proposal_payload)[:24]}":
             raise ValueError("InterpretationProposal proposal_id is not content-bound")
 
+        source_quotes: list[SourceQuote] = []
+        source_document_hashes: dict[str, str] = {}
+        for evidence_id in sorted({hit.record_id for hit in context.evidence_hits}):
+            evidence = evidence_repository.get(evidence_id)
+            source = evidence_repository.verify_evidence_integrity(evidence)
+            source_document_hashes[f"{source.source_id}@{source.version}"] = content_hash(source)
+            source_quotes.append(
+                SourceQuote(
+                    quote_id=f"quote-{content_hash({'evidence_ref': evidence_id})[:24]}",
+                    text=evidence.text,
+                    evidence_ref=evidence_id,
+                    source_id=source.source_id,
+                    source_version=source.version,
+                    source_role=source.source_role,
+                    source_type=source.source_type,
+                )
+            )
+        quotes_by_id = {quote.quote_id: quote for quote in source_quotes}
+        source_claims = []
+        for claim in proposal.source_claims:
+            explicit_roles = {
+                quotes_by_id[quote_id].source_role
+                for quote_id in claim.source_quote_refs
+                if quote_id in quotes_by_id
+                and quotes_by_id[quote_id].source_role != "unspecified"
+            }
+            source_claims.append(
+                claim.model_copy(update={"source_role": next(iter(explicit_roles))})
+                if len(explicit_roles) == 1
+                else claim
+            )
+
         manifest = {
             "context_id": context.context_id,
             "context_hash": context.content_hash,
@@ -39,11 +71,13 @@ class ScientificEvidencePacketBuilder:
             "provider_version": proposal.provider_version,
             "proposal_id": proposal.proposal_id,
             "evidence_record_ids": tuple(hit.record_id for hit in context.evidence_hits),
+            "source_document_hashes": source_document_hashes,
         }
         identity = {
             "context_id": context.context_id,
             "context_hash": context.content_hash,
-            "source_claims": proposal.source_claims,
+            "source_quotes": tuple(source_quotes),
+            "source_claims": tuple(source_claims),
             "reported_results": proposal.reported_results,
             "method_facts": proposal.method_facts,
             "model_facts": proposal.model_facts,

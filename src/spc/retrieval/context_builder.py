@@ -69,9 +69,9 @@ class ScientificContextBuilder:
             timestamp=datetime.now(timezone.utc),
             **retrieval_binding,
         )
-        known_facts = tuple(
+        retrieved_statements = tuple(
             GroundedStatement(
-                statement_id=f"retrieved-fact-{index}",
+                statement_id=f"retrieved-statement-{index}",
                 text=evidence_store.get(hit.record_id).text,
                 classification=EvidenceClassification.EVIDENCE,
                 evidence_refs=(hit.record_id,),
@@ -87,7 +87,7 @@ class ScientificContextBuilder:
             "expert_case_hits": expert_case_hits,
             "workflow_pattern_hits": workflow_hits,
             "capability_hits": capability_hits,
-            "known_facts": known_facts,
+            "retrieved_statements": retrieved_statements,
             "assumptions": (),
             "conflicting_evidence": (),
             "unknowns": (),
