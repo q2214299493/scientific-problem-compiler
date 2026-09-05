@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Protocol
+from typing import Iterable
 
-from .models import (
+from ..models import (
     ApprovalScores,
     ApprovalVerdict,
     FixResolution,
@@ -14,17 +14,13 @@ from .models import (
     ScientificCapability,
     ScientificQuestionPlan,
 )
-from .serialization import content_hash
-from .validators import EvidenceSpanRepository, ValidationReport, validate_question_plan
-
-
-class ApprovalPolicy(Protocol):
-    def review(self, plan: ScientificQuestionPlan, report: ValidationReport) -> tuple[ApprovalScores, tuple[str, ...], tuple[RequiredFix, ...], str]: ...
+from ..serialization import content_hash
+from ..validators import EvidenceSpanRepository, ValidationReport, validate_question_plan
 
 
 @dataclass(frozen=True)
 class ScientificPlanApprover:
-    """Independent review boundary; emits a verdict and never returns a modified plan."""
+    """Authoritative verdict binder; it never returns or modifies a candidate plan."""
 
     approver_id: str
 

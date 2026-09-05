@@ -8,7 +8,16 @@ from typing import Annotated
 import typer
 
 from .adapters.ft_agent import FTAgentAdapter
-from .approval import ScientificPlanApprover
+from .approval import (
+    ApprovalContextError,
+    ApprovalContextResolver,
+    ApprovalResponseError,
+    ApprovalStructuredOutputError,
+    IndependentApprovalService,
+    MockApprovalProvider,
+    ScientificPlanApprover,
+    StructuredLLMApprovalProvider,
+)
 from .compiler import ScientificProblemCompiler
 from .domains import DomainPackLoader
 from .export import ExportError, GenericExportService
@@ -22,6 +31,12 @@ from .models import (
     AgentCapabilityCatalog,
     AgentHandoffPackage,
     ApprovalScores,
+    ApprovalDimensionScore,
+    ApprovalHardRedFlag,
+    ApprovalLLMResponse,
+    ApprovalReviewInput,
+    ApprovalReviewRecord,
+    ApprovalReviewScores,
     ApprovalVerdict,
     CandidatePlanDraft,
     CandidateTaskDraft,
@@ -327,6 +342,114 @@ def validate(
 
 
 @app.command()
+def review(
+    context_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    evidence_packet_file: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False)
+    ],
+    planning_input_file: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False)
+    ],
+    candidate_plan_file: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False)
+    ],
+    validation_record_file: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False)
+    ],
+    output: Annotated[Path, typer.Option("--output")],
+    provider: Annotated[str, typer.Option("--provider")] = "mock",
+    verdict_output: Annotated[
+        Path | None, typer.Option("--verdict-output")
+    ] = None,
+    approver_id: Annotated[
+        str, typer.Option("--approver-id")
+    ] = "independent-scientific-approver",
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[
+        Path, typer.Option("--knowledge-dir")
+    ] = Path("knowledge"),
+    llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
+    llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
+    llm_api_key_env: Annotated[
+        str, typer.Option("--llm-api-key-env")
+    ] = "SPC_LLM_API_KEY",
+    temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
+    max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
+) -> None:
+    """Independently review one candidate without modifying or gating it."""
+    context = load_model(context_file, ScientificContextPacket)
+    evidence_packet = load_model(evidence_packet_file, ScientificEvidencePacket)
+    planning_input = load_model(planning_input_file, ScientificPlanningInput)
+    candidate_plan = load_model(candidate_plan_file, ScientificQuestionPlan)
+    validation_record = load_model(validation_record_file, PlanValidationRecord)
+    evidence_repository = SourceEvidenceStore(state_dir)
+    try:
+        review_input = ApprovalContextResolver().resolve(
+            context,
+            evidence_packet,
+            planning_input,
+            candidate_plan,
+            validation_record,
+            KnowledgeRepositories(knowledge_dir),
+            evidence_repository,
+        )
+        if provider == "mock":
+            approval_provider = MockApprovalProvider()
+        elif provider == "llm":
+            if llm_endpoint is None or llm_model is None:
+                raise typer.BadParameter(
+                    "--provider llm requires --llm-endpoint and --llm-model"
+                )
+            approval_provider = StructuredLLMApprovalProvider(
+                HTTPJSONLLMTransport(
+                    llm_endpoint,
+                    llm_model,
+                    api_key=os.getenv(llm_api_key_env),
+                ),
+                temperature=temperature,
+                max_attempts=max_attempts,
+            )
+        else:
+            raise typer.BadParameter("--provider must be 'mock' or 'llm'")
+        result = IndependentApprovalService(
+            approval_provider,
+            approver_id=approver_id,
+        ).review(review_input)
+    except (
+        ApprovalContextError,
+        ApprovalResponseError,
+        ApprovalStructuredOutputError,
+    ) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+
+    final_verdict_output = verdict_output or output.with_name("approval-verdict.yaml")
+    existing = tuple(path for path in (output, final_verdict_output) if path.exists())
+    if existing:
+        raise typer.BadParameter(
+            "refusing to overwrite approval outputs: "
+            + ", ".join(str(path) for path in existing)
+        )
+    dump_yaml(output, result.review)
+    dump_yaml(final_verdict_output, result.verdict)
+    typer.echo(
+        json.dumps(
+            {
+                "review_input_id": review_input.review_input_id,
+                "review_id": result.review.review_id,
+                "verdict_id": result.verdict.verdict_id,
+                "decision": result.verdict.decision,
+                "review_output": str(output),
+                "verdict_output": str(final_verdict_output),
+                "plan_gate_passed": False,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+@app.command()
 def approve(
     plan_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     output: Annotated[Path, typer.Option("--output")],
@@ -481,6 +604,12 @@ def schema_command(
         ScientificEvidencePacket,
         ScientificPlanningInput,
         PlanningLLMResponse,
+        ApprovalDimensionScore,
+        ApprovalReviewScores,
+        ApprovalHardRedFlag,
+        ApprovalLLMResponse,
+        ApprovalReviewInput,
+        ApprovalReviewRecord,
         IntentInterpretation,
         AmbiguityAssessment,
         ObservableDraft,

@@ -69,3 +69,18 @@ spc plan context.yaml evidence-packet.yaml `
 ```
 
 `StructuredLLMPlanningProvider` accepts a replaceable `LLMTransport`, sends the non-authoritative `PlanningLLMResponse` JSON Schema, records the model and generation configuration, and retries malformed structured output within a fixed bound. SPC—not the model—binds proposal IDs, planning-input hashes, and provider identity. Normal CI uses only `FakeLLMTransport`; no API key or network access is required. The LLM path has no tool, shell, file, or scientific-execution access, and source text is passed only as untrusted evidence data.
+
+## Phase 2D independent approval
+
+Phase 2D reconstructs an immutable `ApprovalReviewInput` from the original request, primary evidence, interpreted evidence, planning context, candidate, and current deterministic validation. It revalidates the evidence store, Domain Pack, knowledge snapshot, candidate provenance, candidate hash, and `PlanValidationRecord` before review. A separate `ApprovalProvider` emits only a non-authoritative `ApprovalLLMResponse`; deterministic `ApprovalPolicy` prevents scores from overriding failed validation, blocking red flags, or unresolved human decisions. SPC then binds the exact candidate to an authoritative `ApprovalVerdict` without modifying the plan or passing the Plan Gate.
+
+```powershell
+spc review context.yaml evidence-packet.yaml planning-input.yaml `
+  candidate-plan.yaml validation-record.yaml `
+  --provider mock `
+  --state-dir .spc `
+  --knowledge-dir knowledge `
+  --output approval-review.yaml
+```
+
+`StructuredLLMApprovalProvider` reuses the vendor-neutral transport but has a separate protocol, prompt, response schema, and provider identity from planning. Normal CI remains offline through `FakeLLMTransport`.

@@ -1,6 +1,9 @@
 """Scientific Problem Compiler public API."""
 
 from .models import (
+    ApprovalLLMResponse,
+    ApprovalReviewInput,
+    ApprovalReviewRecord,
     ApprovalVerdict,
     PlanValidationRecord,
     PlanningLLMResponse,
@@ -10,6 +13,9 @@ from .models import (
 )
 
 __all__ = [
+    "ApprovalLLMResponse",
+    "ApprovalReviewInput",
+    "ApprovalReviewRecord",
     "ApprovalVerdict",
     "PlanValidationRecord",
     "PlanningLLMResponse",
