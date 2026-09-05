@@ -797,6 +797,15 @@ def validate_export(export_dir: Path) -> ValidationReport:
     issues: list[ValidationIssue] = []
     export_root = export_dir.resolve()
     checksums_path = export_dir / "checksums.json"
+    if checksums_path.is_symlink():
+        return _report(
+            [
+                ValidationIssue(
+                    code="UNSAFE_EXPORT_SYMLINK",
+                    message="checksums.json cannot be a symlink",
+                )
+            ]
+        )
     if not checksums_path.is_file():
         return _report([ValidationIssue(code="MISSING_CHECKSUMS", message="checksums.json is missing")])
     try:

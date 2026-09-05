@@ -8,6 +8,7 @@ from spc.compiler import ScientificProblemCompiler
 from spc.models import EvidenceSpan
 from spc.providers import MockProvider
 from spc.repositories import STATE_DIRECTORIES, SourceEvidenceStore
+from spc.serialization import dump_json
 from spc.validators import validate_question_plan
 
 
@@ -96,3 +97,34 @@ def test_plan_validation_detects_tampered_original_source(
         make_plan(), evidence_repository=evidence_repository
     )
     assert "SOURCE_INTEGRITY_FAILURE" in {item.code for item in report.issues}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("source_id", "different-source"), ("version", "v2")),
+)
+def test_source_document_identity_must_match_evidence_span(
+    tmp_path, field, value
+) -> None:
+    source_path = tmp_path / "paper.txt"
+    content = "trusted evidence"
+    source_path.write_text(content, encoding="utf-8")
+    state = tmp_path / ".spc"
+    store = SourceEvidenceStore(state)
+    source = store.ingest(source_path, "paper", "v1")
+    evidence = EvidenceSpan(
+        evidence_id="ev-identity",
+        source_id="paper",
+        source_version="v1",
+        content_sha256=source.content_sha256,
+        start_offset=0,
+        end_offset=len(content),
+        text=content,
+    )
+    store.add_evidence(evidence)
+    dump_json(
+        state / "sources" / "paper--v1.json",
+        source.model_copy(update={field: value}),
+    )
+    with pytest.raises(ValueError, match="source_id/version"):
+        store.verify_evidence_integrity(evidence)

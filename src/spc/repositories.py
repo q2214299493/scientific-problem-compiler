@@ -95,6 +95,11 @@ class SourceEvidenceStore:
         require_safe_path_component(evidence.source_id, field="evidence source_id")
         require_safe_path_component(evidence.source_version, field="evidence source_version")
         source = self.source_records.get(f"{evidence.source_id}--{evidence.source_version}")
+        if (source.source_id, source.version) != (
+            evidence.source_id,
+            evidence.source_version,
+        ):
+            raise ValueError("SourceDocument source_id/version does not match EvidenceSpan")
         if not source.read_only:
             raise ValueError("SourceDocument must be marked read_only")
         if source.content_sha256 != evidence.content_sha256:

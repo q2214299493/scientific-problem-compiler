@@ -335,6 +335,24 @@ def test_unsafe_checksum_path_is_rejected(tmp_path, make_plan, evidence_reposito
     assert "UNSAFE_CHECKSUM_PATH" in {item.code for item in report.issues}
 
 
+def test_checksums_file_symlink_is_rejected(
+    tmp_path, make_plan, evidence_repository
+) -> None:
+    plan = make_plan()
+    verdict, validation_record, gate = approved_inputs(plan, evidence_repository)
+    output = run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
+    checksums_path = output / "checksums.json"
+    target = tmp_path / "real-checksums.json"
+    target.write_bytes(checksums_path.read_bytes())
+    checksums_path.unlink()
+    try:
+        checksums_path.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlinks are unavailable: {error}")
+    report = validate_export(output)
+    assert "UNSAFE_EXPORT_SYMLINK" in {item.code for item in report.issues}
+
+
 def test_extra_export_file_is_detected(tmp_path, make_plan, evidence_repository) -> None:
     plan = make_plan()
     verdict, validation_record, gate = approved_inputs(plan, evidence_repository)

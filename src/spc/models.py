@@ -2,11 +2,32 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_serializer,
+    model_validator,
+)
 
 from .immutable import FrozenDict, deep_freeze, deep_thaw
+
+
+def _require_non_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("text must not be blank")
+    return value
+
+
+NonBlankStr = Annotated[
+    str,
+    StringConstraints(min_length=1),
+    AfterValidator(_require_non_blank),
+]
 
 
 class StrictModel(BaseModel):
@@ -39,7 +60,7 @@ class ApprovalDecision(StrEnum):
 class SourceDocument(StrictModel):
     source_id: str
     version: str
-    title: str
+    title: NonBlankStr
     media_type: str = "text/plain"
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     stored_path: str
@@ -54,7 +75,7 @@ class EvidenceSpan(StrictModel):
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     start_offset: int = Field(ge=0)
     end_offset: int = Field(gt=0)
-    text: str
+    text: NonBlankStr
     locator: str | None = None
 
     @model_validator(mode="after")
@@ -72,7 +93,7 @@ class EvidenceReference(StrictModel):
 
 class GroundedStatement(StrictModel):
     statement_id: str
-    text: str
+    text: NonBlankStr
     classification: EvidenceClassification
     evidence_refs: tuple[str, ...] = ()
 
@@ -90,7 +111,7 @@ class Hypothesis(StrictModel):
 
 class ScientificQuestion(StrictModel):
     question_id: str
-    text: str
+    text: NonBlankStr
     evidence_refs: tuple[str, ...] = ()
 
 
@@ -103,7 +124,7 @@ class ModelDefinition(StrictModel):
 class ObservableDefinition(StrictModel):
     observable_id: str
     description: GroundedStatement
-    unit: str | None = None
+    unit: NonBlankStr | None = None
 
 
 class ComparisonBaseline(StrictModel):
@@ -113,41 +134,41 @@ class ComparisonBaseline(StrictModel):
 
 class AcceptanceCriterion(StrictModel):
     criterion_id: str
-    statement: str
+    statement: NonBlankStr
     observable_id: str
 
 
 class FalsificationCriterion(StrictModel):
     criterion_id: str
-    statement: str
+    statement: NonBlankStr
     observable_id: str
 
 
 class AssumptionRecord(StrictModel):
     assumption_id: str
-    statement: str
-    impact: str
+    statement: NonBlankStr
+    impact: NonBlankStr
 
 
 class UnknownRecord(StrictModel):
     unknown_id: str
-    statement: str
-    resolution: str
+    statement: NonBlankStr
+    resolution: NonBlankStr
 
 
 class ProposedDeviation(StrictModel):
     deviation_id: str
-    statement: str
+    statement: NonBlankStr
     baseline_ref: str
-    rationale: str
+    rationale: NonBlankStr
     evidence_refs: tuple[str, ...] = ()
 
 
 class IntentFingerprint(StrictModel):
     fingerprint_id: str
-    objective: str
-    constraints: tuple[str, ...] = ()
-    requested_outputs: tuple[str, ...] = ()
+    objective: NonBlankStr
+    constraints: tuple[NonBlankStr, ...] = ()
+    requested_outputs: tuple[NonBlankStr, ...] = ()
 
 
 class SystemFingerprint(StrictModel):
@@ -164,7 +185,7 @@ class MethodFingerprint(StrictModel):
 
 
 class FingerprintDifference(StrictModel):
-    field: str
+    field: NonBlankStr
     left: Any = None
     right: Any = None
     disclosed_deviation: bool = False
@@ -182,25 +203,25 @@ class FingerprintDifference(StrictModel):
 
 class RequiredHumanDecision(StrictModel):
     decision_id: str
-    question: str
-    options: tuple[str, ...]
+    question: NonBlankStr
+    options: tuple[NonBlankStr, ...]
     required_before: str
 
 
 class DAGTask(StrictModel):
     task_id: str
-    scientific_objective: str
+    scientific_objective: NonBlankStr
     capability_id: str
     inputs: dict[str, Any] = Field(default_factory=dict)
-    outputs: tuple[str, ...] = ()
+    outputs: tuple[NonBlankStr, ...] = ()
     depends_on: tuple[str, ...] = ()
-    success_criteria: tuple[str, ...] = ()
-    falsification_relevance: str
+    success_criteria: tuple[NonBlankStr, ...] = ()
+    falsification_relevance: NonBlankStr
     evidence_refs: tuple[str, ...] = ()
     release_gates: tuple[str, ...] = ()
-    failure_policy: str
-    provenance_requirements: tuple[str, ...] = ()
-    cost_estimate: str = "unknown"
+    failure_policy: NonBlankStr
+    provenance_requirements: tuple[NonBlankStr, ...] = ()
+    cost_estimate: NonBlankStr = "unknown"
     runnable: bool = False
 
 
@@ -209,9 +230,9 @@ class ScientificQuestionPlan(StrictModel):
     version: str
     domain: str
     domain_pack_version: str
-    original_question: str
+    original_question: NonBlankStr
     original_comment_id: str | None = None
-    latent_concern: str
+    latent_concern: NonBlankStr
     atomic_questions: tuple[ScientificQuestion, ...]
     hypothesis: Hypothesis
     model: ModelDefinition
@@ -230,12 +251,12 @@ class ScientificQuestionPlan(StrictModel):
     proposed_deviations: tuple[ProposedDeviation, ...] = ()
     scientific_capability_ids: tuple[str, ...]
     tasks: tuple[DAGTask, ...]
-    distinguishing_axis: str | None = None
+    distinguishing_axis: NonBlankStr | None = None
     cost_tier: str
-    risks: tuple[str, ...] = ()
-    limitations: tuple[str, ...] = ()
+    risks: tuple[NonBlankStr, ...] = ()
+    limitations: tuple[NonBlankStr, ...] = ()
     required_human_decisions: tuple[RequiredHumanDecision, ...] = ()
-    source_query_manifest: tuple[str, ...] = ()
+    source_query_manifest: tuple[NonBlankStr, ...] = ()
     target_agent_capability_requirements: tuple[str, ...] = ()
     wave_id: str = "wave-1"
     follow_up_of: str | None = None
@@ -312,22 +333,22 @@ class ScientificQuestionPlan(StrictModel):
 
 class RequiredFix(StrictModel):
     fix_id: str
-    description: str
+    description: NonBlankStr
     blocking: bool = True
 
 
 class FixResolution(StrictModel):
     fix_id: str
     resolved: bool
-    resolution: str
+    resolution: NonBlankStr
     evidence_refs: tuple[str, ...] = ()
 
 
 class HumanDecisionResolution(StrictModel):
     decision_id: str
     resolved: bool
-    selected_option: str
-    rationale: str
+    selected_option: NonBlankStr
+    rationale: NonBlankStr
 
 
 class ApprovalScores(StrictModel):
@@ -346,7 +367,7 @@ class ApprovalVerdict(StrictModel):
     candidate_version: str
     candidate_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     scores: ApprovalScores
-    hard_red_flags: tuple[str, ...] = ()
+    hard_red_flags: tuple[NonBlankStr, ...] = ()
     required_fixes: tuple[RequiredFix, ...] = ()
     fix_resolutions: tuple[FixResolution, ...] = ()
     human_decisions_required: tuple[str, ...] = ()
@@ -365,7 +386,7 @@ class PlanValidationRecord(StrictModel):
     domain_pack_version: str
     valid: bool
     issue_codes: tuple[str, ...] = ()
-    validator_version: str = "1.2.0"
+    validator_version: str = "1.2.1"
 
 
 class GateVerdict(StrictModel):
@@ -378,44 +399,44 @@ class GateVerdict(StrictModel):
     plan_validation_id: str
     plan_validation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     passed: bool
-    reasons: tuple[str, ...] = ()
+    reasons: tuple[NonBlankStr, ...] = ()
 
 
 class ScientificCapability(StrictModel):
     capability_id: str
     domain: str = "base"
-    scientific_goal: str
-    required_inputs: tuple[str, ...] = ()
-    outputs: tuple[str, ...] = ()
-    dag_expansion: tuple[str, ...] = ()
+    scientific_goal: NonBlankStr
+    required_inputs: tuple[NonBlankStr, ...] = ()
+    outputs: tuple[NonBlankStr, ...] = ()
+    dag_expansion: tuple[NonBlankStr, ...] = ()
     validators: tuple[str, ...] = ()
-    limitations: tuple[str, ...] = ()
-    failure_branches: tuple[str, ...] = ()
+    limitations: tuple[NonBlankStr, ...] = ()
+    failure_branches: tuple[NonBlankStr, ...] = ()
 
 
 class ExpertCase(StrictModel):
     case_id: str
     domain: str
-    vague_request: str
-    translated_questions: tuple[str, ...]
+    vague_request: NonBlankStr
+    translated_questions: tuple[NonBlankStr, ...]
     positive: bool
-    rationale: str
+    rationale: NonBlankStr
     evidence_refs: tuple[str, ...] = ()
 
 
 class LiteratureWorkflowPattern(StrictModel):
     pattern_id: str
     domain: str
-    trigger: str
+    trigger: NonBlankStr
     workflow_capabilities: tuple[str, ...]
-    limitations: tuple[str, ...] = ()
+    limitations: tuple[NonBlankStr, ...] = ()
     evidence_refs: tuple[str, ...] = ()
 
 
 class DomainProfile(StrictModel):
     domain_id: str
     version: str
-    name: str
+    name: NonBlankStr
     terminology: dict[str, str] = Field(default_factory=dict)
     ontology: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     validators: tuple[str, ...] = ()
@@ -439,7 +460,7 @@ class CapabilityBinding(StrictModel):
     scientific_capability_id: str
     target_capability_id: str | None = None
     status: str
-    reason: str | None = None
+    reason: NonBlankStr | None = None
 
 
 class ExecutionPolicy(StrictModel):
