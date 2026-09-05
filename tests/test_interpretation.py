@@ -89,6 +89,12 @@ def test_author_hypothesis_is_not_converted_to_fact(tmp_path) -> None:
     assert not packet.evidence_assessments[0].assessment.value == "supported"
 
 
+def test_mock_provider_version_identifies_atomic_quote_algorithm(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-version", "CO activation remains unresolved.")
+    _, packet, _ = build_packet(tmp_path, "CO activation")
+    assert packet.provenance_manifest["provider_version"] == "mock-interpretation-2.0.0"
+
+
 def test_reviewer_question_is_not_converted_to_fact(tmp_path) -> None:
     add_evidence(tmp_path, "ev-reviewer", "Reviewer asks whether CO activation controls chain growth.")
     _, packet, _ = build_packet(tmp_path, "CO activation controls chain growth")

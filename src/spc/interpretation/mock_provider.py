@@ -16,7 +16,7 @@ from .method_fact_extractor import extract_method_facts
 from .model_fact_extractor import extract_model_facts
 from .result_extractor import extract_reported_results
 
-MOCK_PROVIDER_VERSION = "mock-interpretation-1.0.0"
+MOCK_PROVIDER_VERSION = "mock-interpretation-2.0.0"
 
 
 class MockInterpretationProvider:

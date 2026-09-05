@@ -40,11 +40,11 @@ spc retrieve request.txt `
   --output context.yaml
 ```
 
-The resulting `ScientificContextPacket` binds the query hash, Domain Pack version, deterministic knowledge snapshot ID, record hashes, evidence source versions, ordered result IDs, and the corresponding ordered `RetrievalHit` hashes. Its content hash is semantic: `KnowledgeSnapshot.created_at` and `RetrievalManifest.timestamp` remain audit metadata but do not change retrieval, context, or content identity. Retrieval remains planning-only and never invokes an LLM or scientific execution backend.
+The resulting `ScientificContextPacket` binds the query hash, Domain Pack version, deterministic knowledge snapshot ID, record hashes, evidence source versions, ordered result IDs, and the corresponding ordered `RetrievalHit` hashes. `result_hashes` is mandatory; legacy manifests that omit it or use an identity computed without it are rejected. Its content hash is semantic: `KnowledgeSnapshot.created_at` and `RetrievalManifest.timestamp` remain audit metadata but do not change retrieval, context, or content identity. Retrieval remains planning-only and never invokes an LLM or scientific execution backend.
 
 ## Phase 2B interpretation
 
-Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The initial `MockInterpretationProvider` is deterministic and offline. Phase 2B.2 separates atomic, exact `SourceQuote` text from normalized or paraphrased `SourceClaim` text. Every quote records relative offsets whose slice must exactly recover its text from one integrity-verified `EvidenceSpan`; its ID binds the evidence ID, offsets, and quote-text hash. A claim remains bound through explicit quote and evidence references rather than substring matching. Retrieved statements are never promoted to established facts.
+Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The `MockInterpretationProvider` is deterministic and offline; the atomic-quote implementation reports provider version `mock-interpretation-2.0.0` so its provenance cannot be confused with the earlier algorithm. Phase 2B.2 separates atomic, exact `SourceQuote` text from normalized or paraphrased `SourceClaim` text. Every quote records relative offsets whose slice must exactly recover its text from one integrity-verified `EvidenceSpan`; its ID binds the evidence ID, offsets, and quote-text hash. A claim remains bound through explicit quote and evidence references rather than substring matching. Retrieved statements are never promoted to established facts.
 
 ```powershell
 spc interpret context.yaml `

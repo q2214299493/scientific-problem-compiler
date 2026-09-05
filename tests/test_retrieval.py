@@ -231,7 +231,23 @@ def test_context_packet_preserves_complete_retrieval_provenance(tmp_path) -> Non
     legacy["content_hash"] = content_hash(
         {key: value for key, value in legacy.items() if key != "content_hash"}
     )
-    assert ScientificContextPacket.model_validate(legacy).retrieved_statements
+    with pytest.raises(ValidationError, match="result_hashes"):
+        ScientificContextPacket.model_validate(legacy)
+
+
+def test_legacy_retrieval_id_cannot_bypass_result_hash_binding(tmp_path) -> None:
+    packet = build_context(tmp_path, "CO activation mechanism")
+    manifest = packet.retrieval_manifest
+    legacy_identity = manifest.model_dump(
+        mode="json", exclude={"retrieval_id", "timestamp", "result_hashes"}
+    )
+    with pytest.raises(ValidationError, match="retrieval_id is not content-bound"):
+        RetrievalManifest(
+            retrieval_id=f"retrieval-{content_hash(legacy_identity)[:24]}",
+            timestamp=manifest.timestamp,
+            result_hashes=(),
+            **legacy_identity,
+        )
 
 
 def test_prompt_injection_is_retrieved_only_as_data(tmp_path, monkeypatch) -> None:

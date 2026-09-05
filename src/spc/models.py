@@ -628,25 +628,18 @@ class RetrievalManifest(StrictModel):
     retriever_version: NonBlankStr
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     result_ids: tuple[NonBlankStr, ...]
-    result_hashes: tuple[Sha256Str, ...] = ()
+    result_hashes: tuple[Sha256Str, ...]
 
     @model_validator(mode="after")
     def validate_retrieval_id(self) -> RetrievalManifest:
         from .serialization import content_hash
 
         identity = self.model_dump(mode="json", exclude={"retrieval_id", "timestamp"})
-        legacy_identity = self.model_dump(
-            mode="json", exclude={"retrieval_id", "timestamp", "result_hashes"}
-        )
         current_id = f"retrieval-{content_hash(identity)[:24]}"
-        legacy_id = f"retrieval-{content_hash(legacy_identity)[:24]}"
-        valid_ids = {current_id, legacy_id}
-        if self.retrieval_id not in valid_ids:
+        if self.retrieval_id != current_id:
             raise ValueError("RetrievalManifest retrieval_id is not content-bound")
-        if self.retrieval_id == current_id and len(self.result_ids) != len(self.result_hashes):
+        if len(self.result_ids) != len(self.result_hashes):
             raise ValueError("RetrievalManifest result IDs and hashes must have equal length")
-        if self.retrieval_id == legacy_id and self.result_hashes:
-            raise ValueError("legacy RetrievalManifest cannot include result hashes")
         return self
 
 
@@ -703,14 +696,7 @@ class ScientificContextPacket(StrictModel):
         if result_ids != self.retrieval_manifest.result_ids:
             raise ValueError("retrieval manifest result IDs do not match context hits")
         result_hashes = tuple(content_hash(hit) for hits, _ in categorized for hit in hits)
-        legacy_manifest_identity = self.retrieval_manifest.model_dump(
-            mode="json", exclude={"retrieval_id", "timestamp", "result_hashes"}
-        )
-        legacy_retrieval_id = f"retrieval-{content_hash(legacy_manifest_identity)[:24]}"
-        if (
-            self.retrieval_manifest.retrieval_id != legacy_retrieval_id
-            and self.retrieval_manifest.result_hashes != result_hashes
-        ):
+        if self.retrieval_manifest.result_hashes != result_hashes:
             raise ValueError("retrieval manifest result hashes do not match context hits")
         if self.retrieval_manifest.knowledge_snapshot_id != self.knowledge_snapshot.snapshot_id:
             raise ValueError("retrieval manifest does not bind the included knowledge snapshot")
