@@ -3,6 +3,7 @@
 from .models import (
     ApprovalVerdict,
     PlanValidationRecord,
+    PlanningLLMResponse,
     PlanningProposalSet,
     ScientificPlanningInput,
     ScientificQuestionPlan,
@@ -11,6 +12,7 @@ from .models import (
 __all__ = [
     "ApprovalVerdict",
     "PlanValidationRecord",
+    "PlanningLLMResponse",
     "PlanningProposalSet",
     "ScientificPlanningInput",
     "ScientificQuestionPlan",

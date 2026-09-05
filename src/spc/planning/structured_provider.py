@@ -6,9 +6,7 @@ import math
 from pydantic import ValidationError
 
 from ..models import (
-    AmbiguityAssessment,
-    CandidatePlanDraft,
-    IntentInterpretation,
+    PlanningLLMResponse,
     PlanningProposalSet,
     ScientificPlanningInput,
 )
@@ -16,9 +14,9 @@ from .llm_transport import LLMTransport
 from .mock_provider import build_proposal_set
 from .validators import validate_planning_proposal_set
 
-STRUCTURED_LLM_PROVIDER_VERSION = "structured-llm-planning-1.0.0"
+STRUCTURED_LLM_PROVIDER_VERSION = "structured-llm-planning-1.1.0"
 SYSTEM_PROMPT = """You are a planning-only scientific reasoning provider.
-Return only JSON that conforms to the supplied PlanningProposalSet schema.
+Return only JSON that conforms to the supplied PlanningLLMResponse schema.
 Do not execute tools, shell commands, scientific software, or external actions.
 Use only IDs present in the supplied allowlists.
 Preserve unresolved conflicts and blocking evidence gaps explicitly.
@@ -52,7 +50,7 @@ class StructuredLLMPlanningProvider:
 
     def propose(self, planning_input: ScientificPlanningInput) -> PlanningProposalSet:
         input_payload = planning_input.model_dump(mode="json")
-        schema = PlanningProposalSet.model_json_schema()
+        schema = PlanningLLMResponse.model_json_schema()
         last_error: Exception | None = None
         for _ in range(self.max_attempts):
             try:
@@ -65,14 +63,7 @@ class StructuredLLMPlanningProvider:
                 data = json.loads(raw)
                 if not isinstance(data, dict):
                     raise TypeError("structured response must be a JSON object")
-                intent = IntentInterpretation.model_validate(data["intent"])
-                ambiguity = AmbiguityAssessment.model_validate(
-                    data["ambiguity_assessment"]
-                )
-                candidates = tuple(
-                    CandidatePlanDraft.model_validate(item)
-                    for item in data["candidates"]
-                )
+                response = PlanningLLMResponse.model_validate(data)
                 proposal = build_proposal_set(
                     planning_input,
                     provider_id=self.provider_id,
@@ -83,9 +74,9 @@ class StructuredLLMPlanningProvider:
                         "max_attempts": self.max_attempts,
                         "structured_output": True,
                     },
-                    intent=intent,
-                    ambiguity_assessment=ambiguity,
-                    candidates=candidates,
+                    intent=response.intent,
+                    ambiguity_assessment=response.ambiguity_assessment,
+                    candidates=response.candidates,
                 )
                 report = validate_planning_proposal_set(proposal, planning_input)
                 if not report.valid:

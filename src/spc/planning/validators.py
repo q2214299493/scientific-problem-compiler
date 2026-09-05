@@ -76,6 +76,29 @@ def validate_planning_proposal_set(
                     path=f"{prefix}.human_decisions_required",
                 )
             )
+        baseline_keys = {
+            baseline.baseline_key for baseline in candidate.comparison_baselines
+        }
+        for deviation_index, deviation in enumerate(candidate.proposed_deviations):
+            deviation_path = f"{prefix}.proposed_deviations[{deviation_index}]"
+            if deviation.baseline_ref not in baseline_keys:
+                issues.append(
+                    ValidationIssue(
+                        code="UNKNOWN_DEVIATION_BASELINE_REF",
+                        message=(
+                            "proposed deviation baseline_ref does not identify a candidate baseline"
+                        ),
+                        path=f"{deviation_path}.baseline_ref",
+                    )
+                )
+            if not set(deviation.evidence_refs).issubset(allowed_evidence):
+                issues.append(
+                    ValidationIssue(
+                        code="FABRICATED_EVIDENCE_ID",
+                        message="proposed deviation contains non-allowlisted evidence",
+                        path=f"{deviation_path}.evidence_refs",
+                    )
+                )
         task_keys = {task.task_key for task in candidate.task_drafts}
         if len(task_keys) != len(candidate.task_drafts):
             issues.append(

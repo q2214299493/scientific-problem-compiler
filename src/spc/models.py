@@ -1050,8 +1050,12 @@ class AmbiguityAssessment(StrictModel):
 
     @model_validator(mode="after")
     def validate_axes(self) -> AmbiguityAssessment:
-        if self.multiple_candidates_required and len(self.scientifically_distinct_axes) < 2:
-            raise ValueError("multiple candidates require at least two scientific axes")
+        if self.multiple_candidates_required and not self.scientifically_distinct_axes:
+            raise ValueError("multiple candidates require at least one scientific axis")
+        if len(set(self.scientifically_distinct_axes)) != len(
+            self.scientifically_distinct_axes
+        ):
+            raise ValueError("scientifically distinct axes must be unique")
         return self
 
 
@@ -1107,6 +1111,7 @@ class CandidatePlanDraft(StrictModel):
     candidate_key: NonBlankStr
     strategy_class: PlanningStrategyClass
     distinguishing_axis: NonBlankStr
+    distinguishing_value: NonBlankStr
     primary_hypothesis: NonBlankStr
     null_hypothesis: NonBlankStr
     model_definition: NonBlankStr
@@ -1125,6 +1130,12 @@ class CandidatePlanDraft(StrictModel):
     risks: tuple[NonBlankStr, ...] = ()
     limitations: tuple[NonBlankStr, ...] = ()
     human_decisions_required: tuple[NonBlankStr, ...] = ()
+
+
+class PlanningLLMResponse(StrictModel):
+    intent: IntentInterpretation
+    ambiguity_assessment: AmbiguityAssessment
+    candidates: tuple[CandidatePlanDraft, ...] = Field(min_length=1, max_length=4)
 
 
 class PlanningProposalSet(StrictModel):
@@ -1149,6 +1160,16 @@ class PlanningProposalSet(StrictModel):
         multiple = len(self.candidates) > 1
         if self.ambiguity_assessment.multiple_candidates_required != multiple:
             raise ValueError("ambiguity assessment does not match candidate count")
+        candidate_distinctions = tuple(
+            (candidate.distinguishing_axis, candidate.distinguishing_value)
+            for candidate in self.candidates
+        )
+        if len(set(candidate_distinctions)) != len(candidate_distinctions):
+            raise ValueError("candidate distinguishing axis/value pairs must be unique")
+        declared_axes = set(self.ambiguity_assessment.scientifically_distinct_axes)
+        candidate_axes = {candidate.distinguishing_axis for candidate in self.candidates}
+        if multiple and declared_axes != candidate_axes:
+            raise ValueError("ambiguity assessment axes do not match candidate axes")
         identity = self.model_dump(mode="json", exclude={"proposal_id"})
         if self.proposal_id != f"planning-proposal-{content_hash(identity)[:24]}":
             raise ValueError("PlanningProposalSet proposal_id is not content-bound")

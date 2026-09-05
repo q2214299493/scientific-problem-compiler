@@ -231,6 +231,18 @@ def validate_question_plan(
     for criterion in (*plan.acceptance_criteria, *plan.falsification_criteria):
         if criterion.observable_id not in observable_ids:
             issues.append(ValidationIssue(code="UNKNOWN_OBSERVABLE", message=f"criterion references unknown observable: {criterion.observable_id}"))
+    baseline_ids = {baseline.baseline_id for baseline in plan.comparison_baselines}
+    for index, deviation in enumerate(plan.proposed_deviations):
+        if deviation.baseline_ref not in baseline_ids:
+            issues.append(
+                ValidationIssue(
+                    code="UNKNOWN_DEVIATION_BASELINE_REF",
+                    message=(
+                        "proposed deviation baseline_ref does not identify a plan baseline"
+                    ),
+                    path=f"proposed_deviations[{index}].baseline_ref",
+                )
+            )
     task_capabilities = {task.capability_id for task in plan.tasks}
     if not task_capabilities.issubset(set(plan.scientific_capability_ids)):
         issues.append(ValidationIssue(code="UNDECLARED_CAPABILITY", message="a DAG task uses a capability not declared by the plan"))

@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import TypeVar
 
 from ..domains import DomainPackLoader
+from ..interpretation.validators import validate_evidence_packet_integrity
 from ..models import (
     ExpertCase,
     LiteratureWorkflowPattern,
@@ -16,8 +17,9 @@ from ..models import (
 )
 from ..repositories import KnowledgeRepositories, ModelRepository
 from ..serialization import content_hash
+from ..validators import EvidenceSpanRepository
 
-RESOLVER_VERSION = "planning-context-resolver-1.0.0"
+RESOLVER_VERSION = "planning-context-resolver-1.1.0"
 RecordT = TypeVar("RecordT", ExpertCase, LiteratureWorkflowPattern, ScientificCapability)
 
 
@@ -73,7 +75,19 @@ class PlanningContextResolver:
         context: ScientificContextPacket,
         evidence_packet: ScientificEvidencePacket,
         knowledge: KnowledgeRepositories,
+        evidence_repository: EvidenceSpanRepository,
     ) -> ScientificPlanningInput:
+        integrity_report = validate_evidence_packet_integrity(
+            evidence_packet, context, evidence_repository
+        )
+        if not integrity_report.valid:
+            codes = tuple(issue.code for issue in integrity_report.issues)
+            if "EVIDENCE_PACKET_CONTEXT_MISMATCH" not in codes:
+                raise PlanningContextError(
+                    "EVIDENCE_PACKET_INTEGRITY_FAILURE",
+                    "ScientificEvidencePacket failed SourceEvidenceStore revalidation: "
+                    + ", ".join(codes),
+                )
         if (
             evidence_packet.context_id != context.context_id
             or evidence_packet.context_hash != context.content_hash

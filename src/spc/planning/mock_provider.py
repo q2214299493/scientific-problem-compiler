@@ -15,7 +15,7 @@ from ..models import (
 )
 from ..serialization import content_hash
 
-MOCK_PLANNING_PROVIDER_VERSION = "mock-planning-1.0.0"
+MOCK_PLANNING_PROVIDER_VERSION = "mock-planning-1.1.0"
 
 
 def build_proposal_set(
@@ -163,13 +163,20 @@ class MockPlanningProvider:
             )
             if unresolved_conflicts:
                 strategy = PlanningStrategyClass.MECHANISM_DISCRIMINATION
-                axis = f"competing scientific claim {claim_group[0]}"
+                axis = "competing scientific claim"
+                value = claim_group[0]
             elif unresolved_gap_ids:
                 strategy = PlanningStrategyClass.EVIDENCE_GAP_RESOLUTION
-                axis = "resolution of the blocking evidence gap"
+                axis = "evidence gap resolution strategy"
+                value = (
+                    f"address with {selected_capability}"
+                    if addresses_gaps
+                    else "retain for human decision"
+                )
             else:
                 strategy = PlanningStrategyClass.MINIMAL_DECISIVE_TEST
-                axis = "single evidence-grounded decisive test"
+                axis = "scientific strategy"
+                value = "single evidence-grounded decisive test"
             observable = ObservableDraft(
                 observable_key="observable-1",
                 description=f"Measure or assess {observable_names[0]} for hypothesis discrimination.",
@@ -208,6 +215,7 @@ class MockPlanningProvider:
                     candidate_key=f"candidate-{index}",
                     strategy_class=strategy,
                     distinguishing_axis=axis,
+                    distinguishing_value=value,
                     primary_hypothesis=(
                         primary_claim.text
                         if primary_claim is not None
@@ -250,7 +258,9 @@ class MockPlanningProvider:
                 )
             )
 
-        axes = tuple(candidate.distinguishing_axis for candidate in candidates)
+        axes = tuple(
+            dict.fromkeys(candidate.distinguishing_axis for candidate in candidates)
+        )
         ambiguity = AmbiguityAssessment(
             multiple_candidates_required=len(candidates) > 1,
             rationale=(

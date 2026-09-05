@@ -57,7 +57,7 @@ Interpretation validation reopens every referenced `EvidenceSpan`, verifies its 
 
 ## Phase 2C grounded planning
 
-Phase 2C resolves every retrieved knowledge record against the hash-bound `KnowledgeSnapshot`, builds an immutable `ScientificPlanningInput`, and asks a separate `PlanningProvider` for one to four grounded `CandidatePlanDraft` objects. The deterministic `PlanMaterializer` assigns all authoritative IDs, fingerprints, DAG task IDs, and plan identities. Source hypotheses and reviewer requests remain non-factual, unresolved conflicts remain explicit, blocking evidence gaps must be addressed or propagated, and all tasks remain `runnable: false`.
+Phase 2C resolves every retrieved knowledge record against the hash-bound `KnowledgeSnapshot`, revalidates the interpreted packet against `SourceEvidenceStore`, builds an immutable `ScientificPlanningInput`, and asks a separate `PlanningProvider` for one to four grounded `CandidatePlanDraft` objects. The deterministic `PlanMaterializer` assigns all authoritative IDs, fingerprints, DAG task IDs, and plan identities. Candidate distinctions use an axis/value pair, claim references remain in final plan provenance, and proposed deviations must bind an existing comparison baseline. Source hypotheses and reviewer requests remain non-factual, unresolved conflicts remain explicit, blocking evidence gaps must be addressed or propagated, and all tasks remain `runnable: false`.
 
 ```powershell
 spc plan context.yaml evidence-packet.yaml `
@@ -68,4 +68,4 @@ spc plan context.yaml evidence-packet.yaml `
   --output-dir .spc/candidates
 ```
 
-`StructuredLLMPlanningProvider` accepts a replaceable `LLMTransport`, sends the `PlanningProposalSet` JSON Schema, records the model and generation configuration, and retries malformed structured output within a fixed bound. Normal CI uses only `FakeLLMTransport`; no API key or network access is required. The LLM path has no tool, shell, file, or scientific-execution access, and source text is passed only as untrusted evidence data.
+`StructuredLLMPlanningProvider` accepts a replaceable `LLMTransport`, sends the non-authoritative `PlanningLLMResponse` JSON Schema, records the model and generation configuration, and retries malformed structured output within a fixed bound. SPC—not the model—binds proposal IDs, planning-input hashes, and provider identity. Normal CI uses only `FakeLLMTransport`; no API key or network access is required. The LLM path has no tool, shell, file, or scientific-execution access, and source text is passed only as untrusted evidence data.

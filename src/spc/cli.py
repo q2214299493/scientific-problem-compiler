@@ -48,6 +48,7 @@ from .models import (
     ModelFact,
     ObservableDraft,
     PlanValidationRecord,
+    PlanningLLMResponse,
     PlanningProposalSet,
     ProposedDeviationDraft,
     RequiredFix,
@@ -194,6 +195,7 @@ def plan(
             context,
             evidence_packet,
             KnowledgeRepositories(knowledge_dir),
+            evidence_repository,
         )
         if provider == "mock":
             planning_provider = MockPlanningProvider()
@@ -478,6 +480,7 @@ def schema_command(
         InterpretationProposal,
         ScientificEvidencePacket,
         ScientificPlanningInput,
+        PlanningLLMResponse,
         IntentInterpretation,
         AmbiguityAssessment,
         ObservableDraft,

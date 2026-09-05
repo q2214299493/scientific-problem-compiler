@@ -30,7 +30,7 @@ from ..models import (
 )
 from ..serialization import content_hash
 
-MATERIALIZER_VERSION = "plan-materializer-1.0.0"
+MATERIALIZER_VERSION = "plan-materializer-1.1.0"
 
 
 def _entity_id(prefix: str, value: Any) -> str:
@@ -152,6 +152,16 @@ class PlanMaterializer:
         }
         if len(baseline_ids) != len(candidate.comparison_baselines):
             raise ValueError("comparison baseline keys must be unique")
+        unknown_baselines = tuple(
+            item.baseline_ref
+            for item in candidate.proposed_deviations
+            if item.baseline_ref not in baseline_ids
+        )
+        if unknown_baselines:
+            raise ValueError(
+                "proposed deviation references unknown comparison baseline: "
+                + ", ".join(unknown_baselines)
+            )
         baselines = tuple(
             ComparisonBaseline(
                 baseline_id=baseline_ids[item.baseline_key],
@@ -209,7 +219,7 @@ class PlanMaterializer:
                     },
                 ),
                 statement=item.statement,
-                baseline_ref=baseline_ids.get(item.baseline_ref, item.baseline_ref),
+                baseline_ref=baseline_ids[item.baseline_ref],
                 rationale=item.rationale,
                 evidence_refs=item.evidence_refs,
             )
@@ -382,7 +392,9 @@ class PlanMaterializer:
             "proposed_deviations": deviations,
             "scientific_capability_ids": candidate.capability_ids,
             "tasks": tasks,
-            "distinguishing_axis": candidate.distinguishing_axis,
+            "distinguishing_axis": (
+                f"{candidate.distinguishing_axis}: {candidate.distinguishing_value}"
+            ),
             "cost_tier": candidate.cost_tier,
             "risks": candidate.risks,
             "limitations": candidate.limitations,
@@ -393,6 +405,9 @@ class PlanMaterializer:
                 planning_input.planning_input_id,
                 proposal.proposal_id,
                 MATERIALIZER_VERSION,
+                f"distinguishing-axis:{candidate.distinguishing_axis}",
+                f"distinguishing-value:{candidate.distinguishing_value}",
+                *(f"claim:{claim_id}" for claim_id in candidate.claim_refs),
             ),
             "target_agent_capability_requirements": candidate.capability_ids,
             "wave_id": "wave-1",
