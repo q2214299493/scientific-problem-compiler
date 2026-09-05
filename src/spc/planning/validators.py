@@ -33,6 +33,7 @@ def validate_planning_proposal_set(
     allowed_decisions = {
         decision.decision_id for decision in planning_input.required_human_decisions
     }
+    claims_by_id = {claim.claim_id: claim for claim in planning_input.source_claims}
     intent_basis = set(proposal.intent.evidence_basis)
     if not intent_basis.issubset(allowed_evidence | allowed_claims):
         issues.append(
@@ -44,7 +45,8 @@ def validate_planning_proposal_set(
         )
     for index, candidate in enumerate(proposal.candidates):
         prefix = f"candidates[{index}]"
-        if not set(candidate.evidence_refs).issubset(allowed_evidence):
+        candidate_evidence = set(candidate.evidence_refs)
+        if not candidate_evidence.issubset(allowed_evidence):
             issues.append(
                 ValidationIssue(
                     code="FABRICATED_EVIDENCE_ID",
@@ -58,6 +60,22 @@ def validate_planning_proposal_set(
                     code="FABRICATED_CLAIM_ID",
                     message="candidate contains a non-allowlisted SourceClaim ID",
                     path=f"{prefix}.claim_refs",
+                )
+            )
+        claim_evidence = {
+            evidence_id
+            for claim_id in candidate.claim_refs
+            if claim_id in claims_by_id
+            for evidence_id in claims_by_id[claim_id].evidence_refs
+        }
+        if not claim_evidence.issubset(candidate_evidence):
+            issues.append(
+                ValidationIssue(
+                    code="CLAIM_EVIDENCE_MISMATCH",
+                    message=(
+                        "candidate evidence_refs do not cover all evidence bound to its claims"
+                    ),
+                    path=f"{prefix}.evidence_refs",
                 )
             )
         if not set(candidate.capability_ids).issubset(allowed_capabilities):
@@ -79,6 +97,32 @@ def validate_planning_proposal_set(
         baseline_keys = {
             baseline.baseline_key for baseline in candidate.comparison_baselines
         }
+        for observable_index, observable in enumerate(candidate.observables):
+            if not set(observable.evidence_refs).issubset(candidate_evidence):
+                issues.append(
+                    ValidationIssue(
+                        code="OBSERVABLE_EVIDENCE_OUTSIDE_CANDIDATE",
+                        message=(
+                            "observable evidence_refs must be declared by its candidate"
+                        ),
+                        path=(
+                            f"{prefix}.observables[{observable_index}].evidence_refs"
+                        ),
+                    )
+                )
+        for baseline_index, baseline in enumerate(candidate.comparison_baselines):
+            if not set(baseline.evidence_refs).issubset(candidate_evidence):
+                issues.append(
+                    ValidationIssue(
+                        code="BASELINE_EVIDENCE_OUTSIDE_CANDIDATE",
+                        message=(
+                            "comparison baseline evidence_refs must be declared by its candidate"
+                        ),
+                        path=(
+                            f"{prefix}.comparison_baselines[{baseline_index}].evidence_refs"
+                        ),
+                    )
+                )
         for deviation_index, deviation in enumerate(candidate.proposed_deviations):
             deviation_path = f"{prefix}.proposed_deviations[{deviation_index}]"
             if deviation.baseline_ref not in baseline_keys:
@@ -96,6 +140,16 @@ def validate_planning_proposal_set(
                     ValidationIssue(
                         code="FABRICATED_EVIDENCE_ID",
                         message="proposed deviation contains non-allowlisted evidence",
+                        path=f"{deviation_path}.evidence_refs",
+                    )
+                )
+            if not set(deviation.evidence_refs).issubset(candidate_evidence):
+                issues.append(
+                    ValidationIssue(
+                        code="DEVIATION_EVIDENCE_OUTSIDE_CANDIDATE",
+                        message=(
+                            "proposed deviation evidence_refs must be declared by its candidate"
+                        ),
                         path=f"{deviation_path}.evidence_refs",
                     )
                 )
@@ -131,6 +185,14 @@ def validate_planning_proposal_set(
                     ValidationIssue(
                         code="FABRICATED_EVIDENCE_ID",
                         message="task contains a non-allowlisted evidence ID",
+                        path=f"{task_path}.evidence_refs",
+                    )
+                )
+            if not set(task.evidence_refs).issubset(candidate_evidence):
+                issues.append(
+                    ValidationIssue(
+                        code="TASK_EVIDENCE_OUTSIDE_CANDIDATE",
+                        message="task evidence_refs must be declared by its candidate",
                         path=f"{task_path}.evidence_refs",
                     )
                 )

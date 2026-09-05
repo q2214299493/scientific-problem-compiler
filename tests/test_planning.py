@@ -151,6 +151,46 @@ def llm_response_payload(proposal: PlanningProposalSet) -> dict[str, object]:
     ).model_dump(mode="json")
 
 
+def build_two_evidence_candidate(tmp_path: Path):
+    *_, planning_input, proposal, _ = build_grounded_inputs(
+        tmp_path,
+        evidence_records=(
+            {
+                "evidence_id": "ev-a",
+                "text": "CO activation requires an evidence-grounded pathway comparison.",
+            },
+            {
+                "evidence_id": "ev-b",
+                "text": "CO cleavage requires a separate evidence-grounded observable.",
+            },
+        ),
+    )
+    claim_a = next(
+        claim for claim in planning_input.source_claims if "ev-a" in claim.evidence_refs
+    )
+    candidate = proposal.candidates[0]
+    candidate_a = candidate.model_copy(
+        update={
+            "claim_refs": (claim_a.claim_id,),
+            "evidence_refs": ("ev-a",),
+            "observables": tuple(
+                observable.model_copy(update={"evidence_refs": ("ev-a",)})
+                for observable in candidate.observables
+            ),
+            "comparison_baselines": tuple(
+                baseline.model_copy(update={"evidence_refs": ("ev-a",)})
+                for baseline in candidate.comparison_baselines
+            ),
+            "task_drafts": tuple(
+                task.model_copy(update={"evidence_refs": ("ev-a",)})
+                for task in candidate.task_drafts
+            ),
+            "proposed_deviations": (),
+        }
+    )
+    return planning_input, proposal, claim_a, candidate_a
+
+
 def test_vague_reviewer_request_becomes_latent_scientific_concern(tmp_path) -> None:
     reviewer_text = "Additional pathway comparison evidence for CO activation should be provided."
     *_, planning_input, proposal, result = build_grounded_inputs(
@@ -256,6 +296,102 @@ def test_fabricated_candidate_references_are_rejected(
         ScientificProblemCompiler(
             StaticPlanningProvider(invalid), evidence_repository=store
         ).compile(planning_input)
+
+
+def test_claim_evidence_mismatch_is_rejected(tmp_path) -> None:
+    planning_input, proposal, claim_a, candidate_a = build_two_evidence_candidate(
+        tmp_path
+    )
+    candidate = candidate_a.model_copy(
+        update={
+            "evidence_refs": ("ev-b",),
+            "observables": tuple(
+                item.model_copy(update={"evidence_refs": ("ev-b",)})
+                for item in candidate_a.observables
+            ),
+            "comparison_baselines": tuple(
+                item.model_copy(update={"evidence_refs": ("ev-b",)})
+                for item in candidate_a.comparison_baselines
+            ),
+            "task_drafts": tuple(
+                item.model_copy(update={"evidence_refs": ("ev-b",)})
+                for item in candidate_a.task_drafts
+            ),
+        }
+    )
+    assert candidate.claim_refs == (claim_a.claim_id,)
+    invalid = rebind_proposal(planning_input, proposal, candidates=(candidate,))
+
+    report = validate_planning_proposal_set(invalid, planning_input)
+
+    assert "CLAIM_EVIDENCE_MISMATCH" in {issue.code for issue in report.issues}
+
+
+def test_candidate_may_include_claim_evidence_and_additional_evidence(tmp_path) -> None:
+    planning_input, proposal, _, candidate_a = build_two_evidence_candidate(tmp_path)
+    candidate = candidate_a.model_copy(
+        update={"evidence_refs": ("ev-a", "ev-b")}
+    )
+    valid = rebind_proposal(planning_input, proposal, candidates=(candidate,))
+
+    assert validate_planning_proposal_set(valid, planning_input).valid
+
+
+def test_task_evidence_outside_candidate_is_rejected(tmp_path) -> None:
+    planning_input, proposal, _, candidate_a = build_two_evidence_candidate(tmp_path)
+    task = candidate_a.task_drafts[0].model_copy(
+        update={"evidence_refs": ("ev-b",)}
+    )
+    candidate = candidate_a.model_copy(update={"task_drafts": (task,)})
+    invalid = rebind_proposal(planning_input, proposal, candidates=(candidate,))
+
+    report = validate_planning_proposal_set(invalid, planning_input)
+
+    assert "TASK_EVIDENCE_OUTSIDE_CANDIDATE" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_deviation_evidence_outside_candidate_is_rejected(tmp_path) -> None:
+    planning_input, proposal, _, candidate_a = build_two_evidence_candidate(tmp_path)
+    deviation = ProposedDeviationDraft(
+        field="method_context.functional",
+        statement="Use an alternate functional for sensitivity analysis.",
+        baseline_ref=candidate_a.comparison_baselines[0].baseline_key,
+        rationale="Test method sensitivity.",
+        evidence_refs=("ev-b",),
+    )
+    candidate = candidate_a.model_copy(update={"proposed_deviations": (deviation,)})
+    invalid = rebind_proposal(planning_input, proposal, candidates=(candidate,))
+
+    report = validate_planning_proposal_set(invalid, planning_input)
+
+    assert "DEVIATION_EVIDENCE_OUTSIDE_CANDIDATE" in {
+        issue.code for issue in report.issues
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "expected_code"),
+    (
+        ("observables", "OBSERVABLE_EVIDENCE_OUTSIDE_CANDIDATE"),
+        ("comparison_baselines", "BASELINE_EVIDENCE_OUTSIDE_CANDIDATE"),
+    ),
+)
+def test_nested_draft_evidence_must_belong_to_candidate(
+    tmp_path, field, expected_code
+) -> None:
+    planning_input, proposal, _, candidate_a = build_two_evidence_candidate(tmp_path)
+    changed_items = tuple(
+        item.model_copy(update={"evidence_refs": ("ev-b",)})
+        for item in getattr(candidate_a, field)
+    )
+    candidate = candidate_a.model_copy(update={field: changed_items})
+    invalid = rebind_proposal(planning_input, proposal, candidates=(candidate,))
+
+    report = validate_planning_proposal_set(invalid, planning_input)
+
+    assert expected_code in {issue.code for issue in report.issues}
 
 
 @pytest.mark.parametrize(
