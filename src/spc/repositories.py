@@ -10,13 +10,22 @@ from typing import Generic, Iterable, TypeVar
 from pydantic import BaseModel
 
 from .models import (
+    DomainProfile,
     EvidenceSpan,
     ExpertCase,
+    KnowledgeSnapshot,
     LiteratureWorkflowPattern,
     ScientificCapability,
     SourceDocument,
 )
-from .serialization import dump_json, dump_yaml, load_data, load_model, require_safe_path_component
+from .serialization import (
+    content_hash,
+    dump_json,
+    dump_yaml,
+    load_data,
+    load_model,
+    require_safe_path_component,
+)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -172,12 +181,121 @@ class SourceEvidenceStore:
         return self.evidence_records.put(evidence.evidence_id, evidence)
 
 
+class ExpertCaseRepository(ModelRepository[ExpertCase]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(knowledge_root / "expert_cases", ExpertCase)
+
+    def put(self, key: str, model: ExpertCase) -> Path:
+        if key != model.case_id:
+            raise ValueError("expert case repository key must equal case_id")
+        return super().put(key, model)
+
+    def get(self, key: str) -> ExpertCase:
+        record = super().get(key)
+        if record.case_id != key:
+            raise ValueError("stored expert case ID does not match repository key")
+        return record
+
+    def list(self) -> tuple[ExpertCase, ...]:
+        records = super().list()
+        if len({record.case_id for record in records}) != len(records):
+            raise ValueError("expert case repository contains duplicate record IDs")
+        for record in records:
+            self.get(record.case_id)
+        return records
+
+
+class LiteratureWorkflowRepository(ModelRepository[LiteratureWorkflowPattern]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(knowledge_root / "workflow_patterns", LiteratureWorkflowPattern)
+
+    def put(self, key: str, model: LiteratureWorkflowPattern) -> Path:
+        if key != model.pattern_id:
+            raise ValueError("workflow repository key must equal pattern_id")
+        return super().put(key, model)
+
+    def get(self, key: str) -> LiteratureWorkflowPattern:
+        record = super().get(key)
+        if record.pattern_id != key:
+            raise ValueError("stored workflow pattern ID does not match repository key")
+        return record
+
+    def list(self) -> tuple[LiteratureWorkflowPattern, ...]:
+        records = super().list()
+        if len({record.pattern_id for record in records}) != len(records):
+            raise ValueError("workflow repository contains duplicate record IDs")
+        for record in records:
+            self.get(record.pattern_id)
+        return records
+
+
+class ScientificCapabilityRepository(ModelRepository[ScientificCapability]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(knowledge_root / "capabilities", ScientificCapability)
+
+    def put(self, key: str, model: ScientificCapability) -> Path:
+        if key != model.capability_id:
+            raise ValueError("capability repository key must equal capability_id")
+        return super().put(key, model)
+
+    def get(self, key: str) -> ScientificCapability:
+        record = super().get(key)
+        if record.capability_id != key:
+            raise ValueError("stored capability ID does not match repository key")
+        return record
+
+    def list(self) -> tuple[ScientificCapability, ...]:
+        records = super().list()
+        if len({record.capability_id for record in records}) != len(records):
+            raise ValueError("capability repository contains duplicate record IDs")
+        for record in records:
+            self.get(record.capability_id)
+        return records
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
-        self.expert_cases = ModelRepository(root / "expert_cases", ExpertCase)
-        self.workflow_patterns = ModelRepository(root / "workflow_patterns", LiteratureWorkflowPattern)
-        self.capabilities = ModelRepository(root / "capabilities", ScientificCapability)
+        self.expert_cases = ExpertCaseRepository(root)
+        self.workflow_patterns = LiteratureWorkflowRepository(root)
+        self.capabilities = ScientificCapabilityRepository(root)
+
+    def load_expert_cases(self, records: Iterable[ExpertCase]) -> None:
+        for record in records:
+            self.expert_cases.put(record.case_id, record)
+
+    def load_workflow_patterns(self, records: Iterable[LiteratureWorkflowPattern]) -> None:
+        for record in records:
+            self.workflow_patterns.put(record.pattern_id, record)
 
     def load_capabilities(self, records: Iterable[ScientificCapability]) -> None:
         for record in records:
             self.capabilities.put(record.capability_id, record)
+
+    def create_snapshot(
+        self,
+        evidence_store: SourceEvidenceStore,
+        domain_profile: DomainProfile,
+    ) -> KnowledgeSnapshot:
+        payload = {
+            "domain_profile_hash": content_hash(domain_profile),
+            "expert_case_hashes": {
+                item.case_id: content_hash(item) for item in self.expert_cases.list()
+            },
+            "workflow_pattern_hashes": {
+                item.pattern_id: content_hash(item) for item in self.workflow_patterns.list()
+            },
+            "capability_hashes": {
+                item.capability_id: content_hash(item) for item in self.capabilities.list()
+            },
+            "evidence_span_hashes": {
+                item.evidence_id: content_hash(item) for item in evidence_store.evidence_records.list()
+            },
+            "evidence_source_versions": {
+                f"{item.source_id}@{item.version}": item.content_sha256
+                for item in evidence_store.source_records.list()
+            },
+        }
+        return KnowledgeSnapshot(
+            snapshot_id=f"snapshot-{content_hash(payload)[:24]}",
+            **payload,
+        )

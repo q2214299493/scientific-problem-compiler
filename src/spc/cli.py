@@ -25,15 +25,21 @@ from .models import (
     GateVerdict,
     HumanDecisionResolution,
     IntentFingerprint,
+    KnowledgeSnapshot,
     MethodFingerprint,
     PlanValidationRecord,
     RequiredFix,
+    RetrievalHit,
+    RetrievalManifest,
+    RetrievalQuery,
     ScientificCapability,
+    ScientificContextPacket,
     ScientificQuestionPlan,
     SourceDocument,
     SystemFingerprint,
 )
 from .providers import MockProvider
+from .retrieval import ScientificContextBuilder
 from .repositories import SourceEvidenceStore, initialize_state
 from .serialization import (
     dump_yaml,
@@ -67,6 +73,25 @@ def ingest(
     """Copy a source into the versioned, read-only evidence store."""
     record = SourceEvidenceStore(state_dir).ingest(source, source_id, version, title)
     typer.echo(record.model_dump_json(indent=2))
+
+
+@app.command()
+def retrieve(
+    request_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    domain: Annotated[str, typer.Option("--domain")],
+    output: Annotated[Path, typer.Option("--output")],
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+) -> None:
+    """Build an offline, evidence-grounded ScientificContextPacket."""
+    packet = ScientificContextBuilder().build(
+        request_file.read_text(encoding="utf-8"),
+        domain,
+        state_dir=state_dir,
+        knowledge_dir=knowledge_dir,
+    )
+    dump_yaml(output, packet)
+    typer.echo(str(output))
 
 
 @app.command("compile")
@@ -274,6 +299,11 @@ def schema_command(
         AgentCapabilityCatalog,
         AgentHandoffPackage,
         ExportManifest,
+        RetrievalQuery,
+        RetrievalHit,
+        KnowledgeSnapshot,
+        RetrievalManifest,
+        ScientificContextPacket,
     )
     for path in export_json_schemas(output_dir, models):
         typer.echo(str(path))

@@ -28,6 +28,7 @@ NonBlankStr = Annotated[
     StringConstraints(min_length=1),
     AfterValidator(_require_non_blank),
 ]
+Sha256Str = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
 class StrictModel(BaseModel):
@@ -55,6 +56,13 @@ class ApprovalDecision(StrEnum):
     REQUEST_REVISION = "request_revision"
     REJECT = "reject"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class RetrievalSourceType(StrEnum):
+    EVIDENCE_SPAN = "evidence_span"
+    EXPERT_CASE = "expert_case"
+    WORKFLOW_PATTERN = "workflow_pattern"
+    SCIENTIFIC_CAPABILITY = "scientific_capability"
 
 
 class SourceDocument(StrictModel):
@@ -439,6 +447,11 @@ class DomainProfile(StrictModel):
     name: NonBlankStr
     terminology: dict[str, str] = Field(default_factory=dict)
     ontology: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    aliases: dict[NonBlankStr, tuple[NonBlankStr, ...]] = Field(default_factory=dict)
+    synonyms: dict[NonBlankStr, tuple[NonBlankStr, ...]] = Field(default_factory=dict)
+    ontology_relationships: dict[NonBlankStr, tuple[NonBlankStr, ...]] = Field(
+        default_factory=dict
+    )
     validators: tuple[str, ...] = ()
 
 
@@ -490,3 +503,140 @@ class ExportManifest(StrictModel):
     source_plan_version: str
     source_plan_hash: str
     files: tuple[str, ...]
+
+
+class RetrievalQuery(StrictModel):
+    query_id: NonBlankStr
+    raw_request: NonBlankStr
+    domain: NonBlankStr
+    concepts: tuple[NonBlankStr, ...] = ()
+    system_terms: tuple[NonBlankStr, ...] = ()
+    method_terms: tuple[NonBlankStr, ...] = ()
+    desired_observables: tuple[NonBlankStr, ...] = ()
+    evidence_types: tuple[RetrievalSourceType, ...] = ()
+    exclusions: tuple[NonBlankStr, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_query_id(self) -> RetrievalQuery:
+        from .serialization import content_hash
+
+        expected = f"query-{content_hash(self.model_dump(mode='json', exclude={'query_id'}))[:24]}"
+        if self.query_id != expected:
+            raise ValueError("RetrievalQuery query_id is not content-bound")
+        return self
+
+
+class RetrievalHit(StrictModel):
+    hit_id: NonBlankStr
+    source_type: RetrievalSourceType
+    record_id: NonBlankStr
+    score: float = Field(ge=0, allow_inf_nan=False)
+    matched_terms: tuple[NonBlankStr, ...] = Field(min_length=1)
+    rationale: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    retriever_version: NonBlankStr
+
+
+class KnowledgeSnapshot(StrictModel):
+    snapshot_id: NonBlankStr
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    domain_profile_hash: Sha256Str
+    expert_case_hashes: dict[NonBlankStr, Sha256Str]
+    workflow_pattern_hashes: dict[NonBlankStr, Sha256Str]
+    capability_hashes: dict[NonBlankStr, Sha256Str]
+    evidence_span_hashes: dict[NonBlankStr, Sha256Str]
+    evidence_source_versions: dict[NonBlankStr, Sha256Str]
+
+    @model_validator(mode="after")
+    def validate_snapshot_id(self) -> KnowledgeSnapshot:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"snapshot_id", "created_at"}
+        )
+        if self.snapshot_id != f"snapshot-{content_hash(identity)[:24]}":
+            raise ValueError("KnowledgeSnapshot snapshot_id is not content-bound")
+        return self
+
+
+class RetrievalManifest(StrictModel):
+    retrieval_id: NonBlankStr
+    query_hash: Sha256Str
+    domain_pack_id: NonBlankStr
+    domain_pack_version: NonBlankStr
+    knowledge_snapshot_id: NonBlankStr
+    retriever_version: NonBlankStr
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    result_ids: tuple[NonBlankStr, ...]
+
+    @model_validator(mode="after")
+    def validate_retrieval_id(self) -> RetrievalManifest:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"retrieval_id", "timestamp"}
+        )
+        if self.retrieval_id != f"retrieval-{content_hash(identity)[:24]}":
+            raise ValueError("RetrievalManifest retrieval_id is not content-bound")
+        return self
+
+
+class ScientificContextPacket(StrictModel):
+    context_id: NonBlankStr
+    original_request: NonBlankStr
+    domain: NonBlankStr
+    retrieval_query: RetrievalQuery
+    evidence_hits: tuple[RetrievalHit, ...] = ()
+    expert_case_hits: tuple[RetrievalHit, ...] = ()
+    workflow_pattern_hits: tuple[RetrievalHit, ...] = ()
+    capability_hits: tuple[RetrievalHit, ...] = ()
+    known_facts: tuple[GroundedStatement, ...] = ()
+    assumptions: tuple[AssumptionRecord, ...] = ()
+    conflicting_evidence: tuple[NonBlankStr, ...] = ()
+    unknowns: tuple[UnknownRecord, ...] = ()
+    retrieval_manifest: RetrievalManifest
+    knowledge_snapshot: KnowledgeSnapshot
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_retrieval_bindings(self) -> ScientificContextPacket:
+        categorized = (
+            (self.evidence_hits, RetrievalSourceType.EVIDENCE_SPAN),
+            (self.expert_case_hits, RetrievalSourceType.EXPERT_CASE),
+            (self.workflow_pattern_hits, RetrievalSourceType.WORKFLOW_PATTERN),
+            (self.capability_hits, RetrievalSourceType.SCIENTIFIC_CAPABILITY),
+        )
+        for hits, expected_type in categorized:
+            if any(hit.source_type != expected_type for hit in hits):
+                raise ValueError(f"context hit category does not match {expected_type}")
+        result_ids = tuple(hit.hit_id for hits, _ in categorized for hit in hits)
+        if result_ids != self.retrieval_manifest.result_ids:
+            raise ValueError("retrieval manifest result IDs do not match context hits")
+        if self.retrieval_manifest.knowledge_snapshot_id != self.knowledge_snapshot.snapshot_id:
+            raise ValueError("retrieval manifest does not bind the included knowledge snapshot")
+        if self.retrieval_query.domain != self.domain:
+            raise ValueError("retrieval query domain does not match context domain")
+        from .serialization import content_hash
+
+        if self.original_request != self.retrieval_query.raw_request:
+            raise ValueError("context request does not match RetrievalQuery raw_request")
+        if self.retrieval_manifest.query_hash != content_hash(self.retrieval_query):
+            raise ValueError("retrieval manifest query hash does not match RetrievalQuery")
+        if self.retrieval_manifest.domain_pack_id != self.domain:
+            raise ValueError("retrieval manifest Domain Pack does not match context domain")
+        if any(
+            hit.retriever_version != self.retrieval_manifest.retriever_version
+            for hits, _ in categorized
+            for hit in hits
+        ):
+            raise ValueError("retrieval hit version does not match retrieval manifest")
+        if len(set(result_ids)) != len(result_ids):
+            raise ValueError("retrieval result IDs must be unique")
+        if self.context_id != f"context-{self.retrieval_manifest.retrieval_id.removeprefix('retrieval-')}":
+            raise ValueError("context ID does not bind the retrieval manifest")
+        expected_hash = content_hash(
+            self.model_dump(mode="json", exclude={"content_hash"})
+        )
+        if self.content_hash != expected_hash:
+            raise ValueError("ScientificContextPacket content hash is invalid")
+        return self

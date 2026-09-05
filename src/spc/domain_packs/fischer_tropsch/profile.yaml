@@ -7,4 +7,13 @@ terminology:
 ontology:
   concerns: [CO_activation, chain_growth, selectivity]
   observables: [activation_barrier, reaction_free_energy, selectivity_metric]
+aliases:
+  CO dissociation: [CO activation, CO cleavage]
+  chain growth: [C-C coupling, carbon chain propagation]
+synonyms:
+  activation barrier: [energy barrier, reaction barrier]
+  reaction free energy: [free-energy change]
+ontology_relationships:
+  CO dissociation: [CO activation, surface carbon formation]
+  chain growth: [C-C coupling, carbon chain propagation]
 validators: []

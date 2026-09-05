@@ -27,3 +27,17 @@ Project planning state is stored under `.spc/`. Source content is copied into ve
 Core scientific text fields reject empty and whitespace-only values. Evidence validation explicitly matches each `EvidenceSpan` source ID and version to its `SourceDocument`, and export validation rejects a symlinked `checksums.json` before reading it.
 
 Phase 1 explicitly rejects runnable tasks and command-bearing execution policies. It does not generate VASP, NEB, Dimer, MKM, KMC, HPC, or other execution inputs.
+
+## Phase 2A retrieval
+
+Phase 2A adds deterministic, offline lexical retrieval without changing the frozen Phase 1 plan, approval, gate, or export contracts. It searches verified `EvidenceSpan` records and domain-compatible expert cases, workflow patterns, and scientific capabilities. Exact phrases, Domain Pack aliases/synonyms, and token overlap are scored in that order; every hit records its score, matched terms, rationale, source record ID, and retriever version.
+
+```powershell
+spc retrieve request.txt `
+  --domain fischer_tropsch `
+  --state-dir .spc `
+  --knowledge-dir knowledge `
+  --output context.yaml
+```
+
+The resulting `ScientificContextPacket` binds the query hash, Domain Pack version, deterministic knowledge snapshot ID, record hashes, evidence source versions, ordered result IDs, and its own content hash. Retrieval remains planning-only and never invokes an LLM or scientific execution backend.
