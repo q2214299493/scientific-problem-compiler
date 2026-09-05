@@ -940,3 +940,216 @@ class ScientificEvidencePacket(StrictModel):
         if self.content_hash not in {expected_hash, content_hash(legacy_payload)}:
             raise ValueError("ScientificEvidencePacket content hash is invalid")
         return self
+
+
+class PlanningStrategyClass(StrEnum):
+    MINIMAL_DECISIVE_TEST = "minimal_decisive_test"
+    MECHANISM_DISCRIMINATION = "mechanism_discrimination"
+    ROBUSTNESS_SENSITIVITY = "robustness_sensitivity"
+    MODEL_DISCRIMINATION = "model_discrimination"
+    EVIDENCE_GAP_RESOLUTION = "evidence_gap_resolution"
+
+
+class ScientificPlanningInput(StrictModel):
+    planning_input_id: NonBlankStr
+    original_request: NonBlankStr
+    domain: NonBlankStr
+    domain_pack_version: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    evidence_packet_id: NonBlankStr
+    evidence_packet_hash: Sha256Str
+    source_quotes: tuple[SourceQuote, ...] = ()
+    source_claims: tuple[SourceClaim, ...] = ()
+    reported_results: tuple[ReportedResult, ...] = ()
+    method_facts: tuple[MethodFact, ...] = ()
+    model_facts: tuple[ModelFact, ...] = ()
+    evidence_assessments: tuple[EvidenceAssessment, ...] = ()
+    conflict_sets: tuple[ConflictSet, ...] = ()
+    comparison_constraints: tuple[ComparisonConstraint, ...] = ()
+    evidence_gaps: tuple[EvidenceGap, ...] = ()
+    unknowns: tuple[NonBlankStr, ...] = ()
+    assumption_candidates: tuple[NonBlankStr, ...] = ()
+    expert_cases: tuple[ExpertCase, ...] = ()
+    workflow_patterns: tuple[LiteratureWorkflowPattern, ...] = ()
+    scientific_capabilities: tuple[ScientificCapability, ...] = ()
+    allowed_evidence_ids: tuple[NonBlankStr, ...] = ()
+    allowed_claim_ids: tuple[NonBlankStr, ...] = ()
+    allowed_capability_ids: tuple[NonBlankStr, ...] = ()
+    required_human_decisions: tuple[RequiredHumanDecision, ...] = ()
+    provenance_manifest: FrozenDict
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_allowlists(self) -> ScientificPlanningInput:
+        from .serialization import content_hash
+
+        for field_name in (
+            "allowed_evidence_ids",
+            "allowed_claim_ids",
+            "allowed_capability_ids",
+        ):
+            values = getattr(self, field_name)
+            if len(set(values)) != len(values):
+                raise ValueError(f"{field_name} must contain unique IDs")
+        if set(self.allowed_claim_ids) != {claim.claim_id for claim in self.source_claims}:
+            raise ValueError("allowed_claim_ids must match the included SourceClaim records")
+        if set(self.allowed_capability_ids) != {
+            capability.capability_id for capability in self.scientific_capabilities
+        }:
+            raise ValueError(
+                "allowed_capability_ids must match the included ScientificCapability records"
+            )
+        allowed_evidence = set(self.allowed_evidence_ids)
+        referenced_evidence = {
+            evidence_id
+            for records in (
+                self.source_quotes,
+                self.source_claims,
+                self.reported_results,
+                self.method_facts,
+                self.model_facts,
+                self.comparison_constraints,
+                self.evidence_gaps,
+            )
+            for record in records
+            for evidence_id in (
+                (record.evidence_ref,)
+                if isinstance(record, SourceQuote)
+                else record.evidence_refs
+            )
+        }
+        if not referenced_evidence.issubset(allowed_evidence):
+            raise ValueError("planning input contains evidence outside allowed_evidence_ids")
+        identity = self.model_dump(
+            mode="json", exclude={"planning_input_id", "content_hash"}
+        )
+        expected_id = f"planning-input-{content_hash(identity)[:24]}"
+        if self.planning_input_id != expected_id:
+            raise ValueError("ScientificPlanningInput planning_input_id is not content-bound")
+        payload = {"planning_input_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ScientificPlanningInput content_hash is invalid")
+        return self
+
+
+class IntentInterpretation(StrictModel):
+    target_claim: NonBlankStr
+    latent_concern: NonBlankStr
+    atomic_questions: tuple[NonBlankStr, ...] = Field(min_length=1)
+    excluded_substitutions: tuple[NonBlankStr, ...] = ()
+    decision_relevant_observables: tuple[NonBlankStr, ...] = Field(min_length=1)
+    evidence_basis: tuple[NonBlankStr, ...] = Field(min_length=1)
+    unresolved_points: tuple[NonBlankStr, ...] = ()
+
+
+class AmbiguityAssessment(StrictModel):
+    multiple_candidates_required: bool
+    rationale: NonBlankStr
+    scientifically_distinct_axes: tuple[NonBlankStr, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_axes(self) -> AmbiguityAssessment:
+        if self.multiple_candidates_required and len(self.scientifically_distinct_axes) < 2:
+            raise ValueError("multiple candidates require at least two scientific axes")
+        return self
+
+
+class ObservableDraft(StrictModel):
+    observable_key: NonBlankStr
+    description: NonBlankStr
+    unit: NonBlankStr | None = None
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+
+
+class ComparisonBaselineDraft(StrictModel):
+    baseline_key: NonBlankStr
+    description: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+
+
+class CriterionDraft(StrictModel):
+    statement: NonBlankStr
+    observable_key: NonBlankStr
+
+
+class ProposedDeviationDraft(StrictModel):
+    field: NonBlankStr
+    statement: NonBlankStr
+    baseline_ref: NonBlankStr
+    rationale: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+
+
+class CandidateTaskDraft(StrictModel):
+    task_key: NonBlankStr
+    scientific_objective: NonBlankStr
+    capability_id: NonBlankStr
+    inputs: FrozenDict = Field(default_factory=FrozenDict)
+    outputs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    depends_on: tuple[NonBlankStr, ...] = ()
+    success_criteria: tuple[NonBlankStr, ...] = Field(min_length=1)
+    falsification_relevance: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    release_gates: tuple[NonBlankStr, ...] = (
+        "deterministic-plan-validation",
+        "human-selection",
+    )
+    failure_policy: NonBlankStr = "stop and request review"
+    provenance_requirements: tuple[NonBlankStr, ...] = (
+        "planning input hash",
+        "evidence references",
+    )
+    cost_estimate: NonBlankStr = "unknown"
+
+
+class CandidatePlanDraft(StrictModel):
+    candidate_key: NonBlankStr
+    strategy_class: PlanningStrategyClass
+    distinguishing_axis: NonBlankStr
+    primary_hypothesis: NonBlankStr
+    null_hypothesis: NonBlankStr
+    model_definition: NonBlankStr
+    observables: tuple[ObservableDraft, ...] = Field(min_length=1)
+    comparison_baselines: tuple[ComparisonBaselineDraft, ...] = Field(min_length=1)
+    acceptance_criteria: tuple[CriterionDraft, ...] = Field(min_length=1)
+    falsification_criteria: tuple[CriterionDraft, ...] = Field(min_length=1)
+    assumptions: tuple[NonBlankStr, ...] = ()
+    unknowns: tuple[NonBlankStr, ...] = ()
+    proposed_deviations: tuple[ProposedDeviationDraft, ...] = ()
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    claim_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    capability_ids: tuple[NonBlankStr, ...] = Field(min_length=1)
+    task_drafts: tuple[CandidateTaskDraft, ...] = Field(min_length=1)
+    cost_tier: NonBlankStr
+    risks: tuple[NonBlankStr, ...] = ()
+    limitations: tuple[NonBlankStr, ...] = ()
+    human_decisions_required: tuple[NonBlankStr, ...] = ()
+
+
+class PlanningProposalSet(StrictModel):
+    proposal_id: NonBlankStr
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict = Field(default_factory=FrozenDict)
+    intent: IntentInterpretation
+    ambiguity_assessment: AmbiguityAssessment
+    candidates: tuple[CandidatePlanDraft, ...] = Field(min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_identity_and_candidates(self) -> PlanningProposalSet:
+        from .serialization import content_hash
+
+        if len({candidate.candidate_key for candidate in self.candidates}) != len(
+            self.candidates
+        ):
+            raise ValueError("candidate keys must be unique")
+        multiple = len(self.candidates) > 1
+        if self.ambiguity_assessment.multiple_candidates_required != multiple:
+            raise ValueError("ambiguity assessment does not match candidate count")
+        identity = self.model_dump(mode="json", exclude={"proposal_id"})
+        if self.proposal_id != f"planning-proposal-{content_hash(identity)[:24]}":
+            raise ValueError("PlanningProposalSet proposal_id is not content-bound")
+        return self

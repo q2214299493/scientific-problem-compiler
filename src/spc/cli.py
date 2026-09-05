@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -17,10 +18,17 @@ from .interpretation import (
     ScientificEvidencePacketBuilder,
 )
 from .models import (
+    AmbiguityAssessment,
     AgentCapabilityCatalog,
     AgentHandoffPackage,
     ApprovalScores,
     ApprovalVerdict,
+    CandidatePlanDraft,
+    CandidateTaskDraft,
+    ComparisonBaselineDraft,
+    ComparisonConstraint,
+    ConflictSet,
+    CriterionDraft,
     DAGTask,
     DomainProfile,
     EvidenceReference,
@@ -32,12 +40,16 @@ from .models import (
     GateVerdict,
     HumanDecisionResolution,
     IntentFingerprint,
+    IntentInterpretation,
     InterpretationProposal,
     KnowledgeSnapshot,
     MethodFingerprint,
     MethodFact,
     ModelFact,
+    ObservableDraft,
     PlanValidationRecord,
+    PlanningProposalSet,
+    ProposedDeviationDraft,
     RequiredFix,
     RetrievalHit,
     RetrievalManifest,
@@ -47,17 +59,25 @@ from .models import (
     ScientificCapability,
     ScientificContextPacket,
     ScientificEvidencePacket,
+    ScientificPlanningInput,
     ScientificQuestionPlan,
     SourceClaim,
     SourceQuote,
     SourceDocument,
     SystemFingerprint,
-    ConflictSet,
-    ComparisonConstraint,
+)
+from .planning import (
+    HTTPJSONLLMTransport,
+    MockPlanningProvider,
+    PlanningContextError,
+    PlanningContextResolver,
+    PlanningProposalError,
+    StructuredLLMPlanningProvider,
+    StructuredOutputError,
 )
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
-from .repositories import SourceEvidenceStore, initialize_state
+from .repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
 from .serialization import (
     dump_yaml,
     export_json_schemas,
@@ -72,7 +92,10 @@ from .validators import (
     validate_question_plan,
 )
 
-app = typer.Typer(no_args_is_help=True, help="Compile evidence-grounded scientific question plans offline.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Compile evidence-grounded scientific question plans without executing science.",
+)
 
 
 def _emit_report(report: object) -> None:
@@ -141,6 +164,95 @@ def interpret(
         raise typer.Exit(1) from error
     dump_yaml(output, packet)
     typer.echo(str(output))
+
+
+@app.command()
+def plan(
+    context_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    evidence_packet_file: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, readable=True)
+    ],
+    domain: Annotated[str, typer.Option("--domain")],
+    output_dir: Annotated[Path, typer.Option("--output-dir")],
+    provider: Annotated[str, typer.Option("--provider")] = "mock",
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
+    llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
+    llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
+    temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
+    max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
+) -> None:
+    """Compile trusted context and evidence into validated candidate plans."""
+    context = load_model(context_file, ScientificContextPacket)
+    evidence_packet = load_model(evidence_packet_file, ScientificEvidencePacket)
+    if context.domain != domain:
+        raise typer.BadParameter("--domain must match the ScientificContextPacket domain")
+    evidence_repository = SourceEvidenceStore(state_dir)
+    try:
+        planning_input = PlanningContextResolver().resolve(
+            context,
+            evidence_packet,
+            KnowledgeRepositories(knowledge_dir),
+        )
+        if provider == "mock":
+            planning_provider = MockPlanningProvider()
+        elif provider == "llm":
+            if llm_endpoint is None or llm_model is None:
+                raise typer.BadParameter(
+                    "--provider llm requires --llm-endpoint and --llm-model"
+                )
+            planning_provider = StructuredLLMPlanningProvider(
+                HTTPJSONLLMTransport(
+                    llm_endpoint,
+                    llm_model,
+                    api_key=os.getenv(llm_api_key_env),
+                ),
+                temperature=temperature,
+                max_attempts=max_attempts,
+            )
+        else:
+            raise typer.BadParameter("--provider must be 'mock' or 'llm'")
+        result = ScientificProblemCompiler(
+            planning_provider,
+            evidence_repository=evidence_repository,
+        ).compile(planning_input)
+    except (PlanningContextError, PlanningProposalError, StructuredOutputError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+
+    if result.proposal_set is None:
+        raise RuntimeError("grounded planning did not return a PlanningProposalSet")
+    output_paths = (
+        output_dir / "planning-input.yaml",
+        output_dir / "planning-proposal.yaml",
+        output_dir / "validation-reports.yaml",
+        *(
+            output_dir / f"{candidate.plan_id}--{candidate.version}.yaml"
+            for candidate in result.candidates
+        ),
+    )
+    existing = tuple(path for path in output_paths if path.exists())
+    if existing:
+        raise typer.BadParameter(
+            "refusing to overwrite planning outputs: "
+            + ", ".join(str(path) for path in existing)
+        )
+    dump_yaml(output_paths[0], planning_input)
+    dump_yaml(output_paths[1], result.proposal_set)
+    for path, candidate in zip(output_paths[3:], result.candidates, strict=True):
+        require_safe_path_component(candidate.plan_id, field="plan_id")
+        dump_yaml(path, candidate)
+    validation_payload = {
+        "valid": all(report.valid for report in result.reports),
+        "reports": [report.model_dump(mode="json") for report in result.reports],
+        "candidate_plan_ids": [candidate.plan_id for candidate in result.candidates],
+        "approved": False,
+    }
+    dump_yaml(output_paths[2], validation_payload)
+    typer.echo(json.dumps(validation_payload, indent=2, ensure_ascii=False))
+    if not validation_payload["valid"]:
+        raise typer.Exit(1)
 
 
 @app.command("compile")
@@ -365,6 +477,16 @@ def schema_command(
         EvidenceGap,
         InterpretationProposal,
         ScientificEvidencePacket,
+        ScientificPlanningInput,
+        IntentInterpretation,
+        AmbiguityAssessment,
+        ObservableDraft,
+        ComparisonBaselineDraft,
+        CriterionDraft,
+        ProposedDeviationDraft,
+        CandidateTaskDraft,
+        CandidatePlanDraft,
+        PlanningProposalSet,
     )
     for path in export_json_schemas(output_dir, models):
         typer.echo(str(path))

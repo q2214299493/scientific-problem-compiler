@@ -54,3 +54,18 @@ spc interpret context.yaml `
 ```
 
 Interpretation validation reopens every referenced `EvidenceSpan`, verifies its source file and Phase 2A snapshot hash, and rejects unretrieved, fabricated, out-of-range, or inexact quotes. Source roles and types use central, domain-neutral enums; provenance overrides punctuation heuristics, so a question mark alone never creates reviewer provenance. Numerical results retain units and the existing `ResultContext` links to applicable `MethodFact` and `ModelFact` records. Facet or method mismatches produce explicit comparison constraints, source conflicts remain unresolved, and predictive models are not relabeled as DFT results. Phase 2B does not generate a `ScientificQuestionPlan` and does not execute scientific software.
+
+## Phase 2C grounded planning
+
+Phase 2C resolves every retrieved knowledge record against the hash-bound `KnowledgeSnapshot`, builds an immutable `ScientificPlanningInput`, and asks a separate `PlanningProvider` for one to four grounded `CandidatePlanDraft` objects. The deterministic `PlanMaterializer` assigns all authoritative IDs, fingerprints, DAG task IDs, and plan identities. Source hypotheses and reviewer requests remain non-factual, unresolved conflicts remain explicit, blocking evidence gaps must be addressed or propagated, and all tasks remain `runnable: false`.
+
+```powershell
+spc plan context.yaml evidence-packet.yaml `
+  --domain fischer_tropsch `
+  --state-dir .spc `
+  --knowledge-dir knowledge `
+  --provider mock `
+  --output-dir .spc/candidates
+```
+
+`StructuredLLMPlanningProvider` accepts a replaceable `LLMTransport`, sends the `PlanningProposalSet` JSON Schema, records the model and generation configuration, and retries malformed structured output within a fixed bound. Normal CI uses only `FakeLLMTransport`; no API key or network access is required. The LLM path has no tool, shell, file, or scientific-execution access, and source text is passed only as untrusted evidence data.
