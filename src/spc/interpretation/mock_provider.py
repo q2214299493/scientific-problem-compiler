@@ -7,7 +7,8 @@ from ..models import (
     ScientificContextPacket,
 )
 from ..serialization import content_hash
-from .claim_extractor import extract_source_claims
+from ..validators import EvidenceSpanRepository
+from .claim_extractor import extract_source_claims, extract_source_quotes
 from .comparison_analyzer import analyze_comparisons
 from .conflict_detector import detect_conflicts
 from .gap_analyzer import analyze_gaps
@@ -22,8 +23,17 @@ class MockInterpretationProvider:
     provider_id = "mock"
     provider_version = MOCK_PROVIDER_VERSION
 
+    def __init__(self, evidence_repository: EvidenceSpanRepository | None = None) -> None:
+        self._evidence_repository = evidence_repository
+
+    def bind_evidence_repository(self, repository: EvidenceSpanRepository) -> None:
+        self._evidence_repository = repository
+
     def interpret(self, context: ScientificContextPacket) -> InterpretationProposal:
-        claims = extract_source_claims(context)
+        if self._evidence_repository is None:
+            raise ValueError("MockInterpretationProvider requires an EvidenceSpan repository")
+        source_quotes = extract_source_quotes(context, self._evidence_repository)
+        claims = extract_source_claims(context, source_quotes)
         method_facts = extract_method_facts(claims)
         model_facts = extract_model_facts(claims)
         results = extract_reported_results(claims, method_facts, model_facts)
@@ -63,6 +73,7 @@ class MockInterpretationProvider:
             "context_hash": context.content_hash,
             "provider_id": self.provider_id,
             "provider_version": self.provider_version,
+            "source_quotes": source_quotes,
             "source_claims": claims,
             "reported_results": results,
             "method_facts": method_facts,

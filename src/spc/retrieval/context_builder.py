@@ -9,6 +9,7 @@ from ..models import (
     GroundedStatement,
     RetrievalManifest,
     ScientificContextPacket,
+    scientific_context_semantic_hash,
 )
 from ..repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
 from ..serialization import content_hash
@@ -55,6 +56,7 @@ class ScientificContextBuilder:
             capability_hits,
         )
         result_ids = tuple(hit.hit_id for hits in categorized_hits for hit in hits)
+        result_hashes = tuple(content_hash(hit) for hits in categorized_hits for hit in hits)
         query_hash = content_hash(query)
         retrieval_binding = {
             "query_hash": query_hash,
@@ -63,6 +65,7 @@ class ScientificContextBuilder:
             "domain_pack_version": pack.profile.version,
             "retriever_version": RETRIEVER_VERSION,
             "result_ids": result_ids,
+            "result_hashes": result_hashes,
         }
         retrieval_manifest = RetrievalManifest(
             retrieval_id=f"retrieval-{content_hash(retrieval_binding)[:24]}",
@@ -96,5 +99,5 @@ class ScientificContextBuilder:
         }
         return ScientificContextPacket(
             **packet_payload,
-            content_hash=content_hash(packet_payload),
+            content_hash=scientific_context_semantic_hash(packet_payload),
         )

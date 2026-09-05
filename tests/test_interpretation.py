@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import socket
 
+import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from spc.cli import app
@@ -17,10 +19,12 @@ from spc.models import (
     InterpretationProposal,
     ResultStatus,
     ScientificEvidencePacket,
+    SourceDocument,
 )
 from spc.repositories import SourceEvidenceStore
 from spc.retrieval import ScientificContextBuilder
 from spc.serialization import content_hash, dump_yaml, load_model
+from spc.interpretation.claim_extractor import source_quote_id
 
 
 def add_evidence(
@@ -297,11 +301,11 @@ def test_reviewer_statement_without_question_mark_retains_provenance(tmp_path) -
     add_evidence(
         tmp_path,
         "ev-reviewer-statement",
-        "Reviewer requests evidence that CO activation controls chain growth.",
+        "Additional calculations should be provided.",
         source_role="reviewer",
         source_type="reviewer_comment",
     )
-    _, packet, _ = build_packet(tmp_path, "CO activation controls chain growth evidence")
+    _, packet, _ = build_packet(tmp_path, "additional calculations")
     claim = packet.source_claims[0]
     quote = packet.source_quotes[0]
     assert claim.epistemic_status == EpistemicStatus.UNRESOLVED
@@ -353,17 +357,14 @@ def test_two_results_share_one_method_fact(tmp_path) -> None:
 
 def test_claim_cannot_cite_quote_text_absent_from_evidence_span(tmp_path) -> None:
     add_evidence(tmp_path, "ev-exact-quote", "CO activation remains unresolved.")
-    context, packet, store = build_packet(tmp_path, "CO activation unresolved")
-    forged_quote = packet.source_quotes[0].model_copy(
-        update={"text": "This quote is absent from the EvidenceSpan."}
-    )
-    changed = rebind_packet(packet, source_quotes=(forged_quote,))
-    report = validate_evidence_packet_integrity(changed, context, store)
-    assert not report.valid
-    assert "SOURCE_QUOTE_TEXT_MISMATCH" in {issue.code for issue in report.issues}
+    _, packet, _ = build_packet(tmp_path, "CO activation unresolved")
+    with pytest.raises(ValidationError, match="quote_id is not content-bound"):
+        packet.source_quotes[0].model_copy(
+            update={"text": "This quote is absent from the EvidenceSpan."}
+        )
 
 
-def test_phase_2b_packet_without_hardening_fields_still_loads(tmp_path) -> None:
+def test_phase_2b_packet_without_required_quote_binding_is_rejected(tmp_path) -> None:
     add_evidence(tmp_path, "ev-legacy-packet", "The DFT barrier on Fe(110) is 1.00 eV.")
     _, packet, _ = build_packet(tmp_path, "DFT barrier Fe(110)")
     legacy = packet.model_dump(mode="json")
@@ -381,6 +382,179 @@ def test_phase_2b_packet_without_hardening_fields_still_loads(tmp_path) -> None:
     legacy["content_hash"] = content_hash(
         {key: value for key, value in legacy.items() if key != "content_hash"}
     )
-    loaded = ScientificEvidencePacket.model_validate(legacy)
-    assert loaded.source_quotes == ()
-    assert loaded.reported_results[0].result_context is None
+    with pytest.raises(ValidationError, match="source_quote_refs"):
+        ScientificEvidencePacket.model_validate(legacy)
+
+
+def test_three_sentences_produce_three_atomic_source_quotes(tmp_path) -> None:
+    text = "CO activation is discussed. Chain growth is compared! Is the barrier reported?"
+    add_evidence(tmp_path, "ev-three-sentences", text)
+    _, packet, _ = build_packet(tmp_path, "CO activation chain growth barrier")
+    assert [quote.text for quote in packet.source_quotes] == [
+        "CO activation is discussed.",
+        "Chain growth is compared!",
+        "Is the barrier reported?",
+    ]
+    assert len(packet.source_claims) == 3
+
+
+def test_source_quote_offsets_recover_exact_text(tmp_path) -> None:
+    text = "  First CO activation sentence.  Second chain growth sentence."
+    add_evidence(tmp_path, "ev-offsets", text)
+    context, packet, store = build_packet(tmp_path, "CO activation chain growth")
+    evidence = store.get("ev-offsets")
+    assert context.evidence_hits
+    for quote in packet.source_quotes:
+        assert evidence.text[quote.relative_start_offset : quote.relative_end_offset] == quote.text
+
+
+def _replace_quote(packet, replacement):
+    original_id = packet.source_quotes[0].quote_id
+    claims = tuple(
+        claim.model_copy(
+            update={
+                "source_quote_refs": tuple(
+                    replacement.quote_id if quote_id == original_id else quote_id
+                    for quote_id in claim.source_quote_refs
+                )
+            }
+        )
+        for claim in packet.source_claims
+    )
+    return rebind_packet(
+        packet,
+        source_quotes=(replacement, *packet.source_quotes[1:]),
+        source_claims=claims,
+    )
+
+
+def test_content_bound_but_altered_quote_text_is_rejected(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-altered-text", "CO activation remains unresolved.")
+    context, packet, store = build_packet(tmp_path, "CO activation unresolved")
+    quote = packet.source_quotes[0]
+    altered_text = "CO activation is established."
+    replacement = quote.model_copy(
+        update={
+            "text": altered_text,
+            "quote_id": source_quote_id(
+                quote.evidence_ref,
+                quote.relative_start_offset,
+                quote.relative_end_offset,
+                altered_text,
+            ),
+        }
+    )
+    changed = _replace_quote(packet, replacement)
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert "SOURCE_QUOTE_TEXT_MISMATCH" in {issue.code for issue in report.issues}
+
+
+def test_content_bound_but_altered_quote_offsets_are_rejected(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-altered-offset", "Prefix CO activation remains unresolved.")
+    context, packet, store = build_packet(tmp_path, "CO activation unresolved")
+    quote = packet.source_quotes[0]
+    new_start = quote.relative_start_offset + 1
+    replacement = quote.model_copy(
+        update={
+            "relative_start_offset": new_start,
+            "quote_id": source_quote_id(
+                quote.evidence_ref,
+                new_start,
+                quote.relative_end_offset,
+                quote.text,
+            ),
+        }
+    )
+    changed = _replace_quote(packet, replacement)
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert "SOURCE_QUOTE_TEXT_MISMATCH" in {issue.code for issue in report.issues}
+
+
+def test_quote_offset_boundaries_are_rejected(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-offset-boundary", "CO activation remains unresolved.")
+    context, packet, store = build_packet(tmp_path, "CO activation unresolved")
+    quote = packet.source_quotes[0]
+    with pytest.raises(ValidationError):
+        quote.model_copy(update={"relative_start_offset": -1})
+    with pytest.raises(ValidationError):
+        quote.model_copy(update={"relative_end_offset": quote.relative_start_offset})
+    outside_end = quote.relative_end_offset + 1
+    outside = quote.model_copy(
+        update={
+            "relative_end_offset": outside_end,
+            "quote_id": source_quote_id(
+                quote.evidence_ref,
+                quote.relative_start_offset,
+                outside_end,
+                quote.text,
+            ),
+        }
+    )
+    changed = _replace_quote(packet, outside)
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert "SOURCE_QUOTE_OUT_OF_BOUNDS" in {issue.code for issue in report.issues}
+
+
+def test_claim_without_source_quote_is_rejected_by_schema(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-required-quote", "CO activation remains unresolved.")
+    _, packet, _ = build_packet(tmp_path, "CO activation unresolved")
+    with pytest.raises(ValidationError, match="source_quote_refs"):
+        packet.source_claims[0].model_copy(update={"source_quote_refs": ()})
+
+
+def test_claim_cannot_bind_unrelated_evidence_through_quote_ref(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-related", "CO activation remains unresolved.")
+    add_evidence(tmp_path, "ev-unrelated", "Chain growth remains unresolved.")
+    context, packet, store = build_packet(tmp_path, "CO activation chain growth unresolved")
+    claims = {claim.evidence_refs[0]: claim for claim in packet.source_claims}
+    quotes = {quote.evidence_ref: quote for quote in packet.source_quotes}
+    changed_claim = claims["ev-related"].model_copy(
+        update={"source_quote_refs": (quotes["ev-unrelated"].quote_id,)}
+    )
+    changed_claims = tuple(
+        changed_claim if claim.claim_id == changed_claim.claim_id else claim
+        for claim in packet.source_claims
+    )
+    changed = rebind_packet(packet, source_claims=changed_claims)
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert "CLAIM_QUOTE_EVIDENCE_MISMATCH" in {issue.code for issue in report.issues}
+
+
+def test_author_response_question_is_not_classified_as_reviewer(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-author-question",
+        "Could the reported barrier reflect another pathway?",
+        source_role="author",
+        source_type="author_response",
+    )
+    _, packet, _ = build_packet(tmp_path, "reported barrier another pathway")
+    assert packet.source_claims[0].source_role == "author"
+    assert packet.source_claims[0].claim_type == "source_question"
+
+
+def test_literature_article_question_is_not_classified_as_reviewer(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-literature-question",
+        "Does CO activation control the reported trend?",
+        source_role="literature_author",
+        source_type="literature_article",
+    )
+    _, packet, _ = build_packet(tmp_path, "CO activation reported trend")
+    assert packet.source_claims[0].source_role == "literature_author"
+    assert packet.source_claims[0].claim_type == "source_question"
+
+
+def test_source_document_rejects_noncanonical_provenance_values() -> None:
+    common = {
+        "source_id": "source-provenance",
+        "version": "v1",
+        "title": "Provenance source",
+        "content_sha256": "0" * 64,
+        "stored_path": "sources/source-provenance/v1/content",
+    }
+    with pytest.raises(ValidationError, match="source_role"):
+        SourceDocument(**common, source_role="guest", source_type="internal_note")
+    with pytest.raises(ValidationError, match="author_response"):
+        SourceDocument(**common, source_role="reviewer", source_type="author_response")

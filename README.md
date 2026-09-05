@@ -40,11 +40,11 @@ spc retrieve request.txt `
   --output context.yaml
 ```
 
-The resulting `ScientificContextPacket` binds the query hash, Domain Pack version, deterministic knowledge snapshot ID, record hashes, evidence source versions, ordered result IDs, and its own content hash. Retrieval remains planning-only and never invokes an LLM or scientific execution backend.
+The resulting `ScientificContextPacket` binds the query hash, Domain Pack version, deterministic knowledge snapshot ID, record hashes, evidence source versions, ordered result IDs, and the corresponding ordered `RetrievalHit` hashes. Its content hash is semantic: `KnowledgeSnapshot.created_at` and `RetrievalManifest.timestamp` remain audit metadata but do not change retrieval, context, or content identity. Retrieval remains planning-only and never invokes an LLM or scientific execution backend.
 
 ## Phase 2B interpretation
 
-Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The initial `MockInterpretationProvider` is deterministic and offline. Phase 2B.1 separates exact `SourceQuote` text from normalized or paraphrased `SourceClaim` text. Every quote must equal its `EvidenceSpan` exactly and carries the corresponding `SourceDocument` role and type; a claim remains bound through explicit quote and evidence references rather than substring matching. Retrieved statements are never promoted to established facts.
+Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The initial `MockInterpretationProvider` is deterministic and offline. Phase 2B.2 separates atomic, exact `SourceQuote` text from normalized or paraphrased `SourceClaim` text. Every quote records relative offsets whose slice must exactly recover its text from one integrity-verified `EvidenceSpan`; its ID binds the evidence ID, offsets, and quote-text hash. A claim remains bound through explicit quote and evidence references rather than substring matching. Retrieved statements are never promoted to established facts.
 
 ```powershell
 spc interpret context.yaml `
@@ -53,4 +53,4 @@ spc interpret context.yaml `
   --output evidence-packet.yaml
 ```
 
-Interpretation validation reopens every referenced `EvidenceSpan`, verifies its source file and Phase 2A snapshot hash, and rejects unretrieved, fabricated, or inexact quotes. Numerical results retain units and a `ResultContext` that references applicable `MethodFact` and `ModelFact` records. Quantity extraction uses each value's local context so a temperature, pressure, and barrier in one sentence remain distinct. Facet or method mismatches produce explicit comparison constraints, source conflicts remain unresolved, and predictive models are not relabeled as DFT results. Phase 2B does not generate a `ScientificQuestionPlan` and does not execute scientific software.
+Interpretation validation reopens every referenced `EvidenceSpan`, verifies its source file and Phase 2A snapshot hash, and rejects unretrieved, fabricated, out-of-range, or inexact quotes. Source roles and types use central, domain-neutral enums; provenance overrides punctuation heuristics, so a question mark alone never creates reviewer provenance. Numerical results retain units and the existing `ResultContext` links to applicable `MethodFact` and `ModelFact` records. Facet or method mismatches produce explicit comparison constraints, source conflicts remain unresolved, and predictive models are not relabeled as DFT results. Phase 2B does not generate a `ScientificQuestionPlan` and does not execute scientific software.

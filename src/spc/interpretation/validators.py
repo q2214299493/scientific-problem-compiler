@@ -11,7 +11,9 @@ from ..models import (
     ReportedResult,
     ScientificContextPacket,
     ScientificEvidencePacket,
+    SourceRole,
     SourceQuote,
+    SourceType,
 )
 from ..serialization import content_hash
 from ..validators import EvidenceSpanRepository, ValidationIssue, ValidationReport
@@ -127,11 +129,21 @@ def _source_quote_issues(
                 )
             )
             continue
-        if quote.text != evidence.text:
+        if quote.relative_end_offset > len(evidence.text):
+            issues.append(
+                ValidationIssue(
+                    code="SOURCE_QUOTE_OUT_OF_BOUNDS",
+                    message="SourceQuote offsets exceed its EvidenceSpan",
+                    path=path,
+                )
+            )
+        elif evidence.text[
+            quote.relative_start_offset : quote.relative_end_offset
+        ] != quote.text:
             issues.append(
                 ValidationIssue(
                     code="SOURCE_QUOTE_TEXT_MISMATCH",
-                    message="SourceQuote text must exactly equal its EvidenceSpan text",
+                    message="SourceQuote offsets must recover its exact text from EvidenceSpan",
                     path=path,
                 )
             )
@@ -180,16 +192,6 @@ def validate_claim_source_binding(
 ) -> ValidationReport:
     issues, quotes_by_id = _source_quote_issues(packet, context, evidence_repository)
     for index, claim in enumerate(packet.source_claims):
-        if claim.source_role.casefold() in {"spc", "agent", "mock", "interpreter"} and (
-            claim.epistemic_status != EpistemicStatus.SOURCE_INTERPRETATION
-        ):
-            issues.append(
-                ValidationIssue(
-                    code="AGENT_INTERPRETATION_MISLABELED",
-                    message="agent-created interpretation must be tagged source_interpretation",
-                    path=f"source_claims[{index}]",
-                )
-            )
         if claim.claim_type == "hypothesis" and claim.epistemic_status != EpistemicStatus.SOURCE_HYPOTHESIS:
             issues.append(
                 ValidationIssue(
@@ -228,13 +230,43 @@ def validate_claim_source_binding(
                 )
             )
         explicit_roles = {
-            quote.source_role for quote in referenced_quotes if quote.source_role != "unspecified"
+            quote.source_role
+            for quote in referenced_quotes
+            if quote.source_role != SourceRole.UNSPECIFIED
         }
         if len(explicit_roles) == 1 and claim.source_role not in explicit_roles:
             issues.append(
                 ValidationIssue(
                     code="CLAIM_SOURCE_ROLE_MISMATCH",
                     message="SourceClaim role does not match SourceDocument provenance",
+                    path=f"source_claims[{index}]",
+                )
+            )
+        source_types = {quote.source_type for quote in referenced_quotes}
+        if (
+            SourceRole.REVIEWER in explicit_roles
+            or SourceType.REVIEWER_COMMENT in source_types
+        ) and claim.epistemic_status != EpistemicStatus.UNRESOLVED:
+            issues.append(
+                ValidationIssue(
+                    code="REVIEWER_CLAIM_PROMOTED",
+                    message="reviewer provenance must remain epistemically unresolved",
+                    path=f"source_claims[{index}]",
+                )
+            )
+        if SourceType.AUTHOR_RESPONSE in source_types and claim.source_role != SourceRole.AUTHOR:
+            issues.append(
+                ValidationIssue(
+                    code="AUTHOR_RESPONSE_ROLE_MISMATCH",
+                    message="author_response provenance requires author source role",
+                    path=f"source_claims[{index}]",
+                )
+            )
+        if SourceType.LITERATURE_ARTICLE in source_types and claim.source_role == SourceRole.REVIEWER:
+            issues.append(
+                ValidationIssue(
+                    code="LITERATURE_ROLE_MISCLASSIFIED",
+                    message="literature_article punctuation cannot imply reviewer provenance",
                     path=f"source_claims[{index}]",
                 )
             )

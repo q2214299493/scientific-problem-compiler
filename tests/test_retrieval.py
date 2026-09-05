@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +13,9 @@ from spc.domains import DomainPackLoader
 from spc.models import (
     EvidenceSpan,
     ExpertCase,
+    RetrievalManifest,
     ScientificContextPacket,
+    scientific_context_semantic_hash,
 )
 from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
 from spc.retrieval import RetrievalIntegrityError, ScientificContextBuilder
@@ -119,6 +122,9 @@ def test_same_query_and_snapshot_have_deterministic_ranking(tmp_path) -> None:
         (hit.hit_id, hit.score, hit.matched_terms) for hit in second.expert_case_hits
     ]
     assert first.retrieval_manifest.result_ids == second.retrieval_manifest.result_ids
+    assert first.retrieval_manifest.retrieval_id == second.retrieval_manifest.retrieval_id
+    assert first.context_id == second.context_id
+    assert first.content_hash == second.content_hash
 
 
 def test_weighted_scoring_prioritizes_phrase_then_synonym_then_token() -> None:
@@ -201,15 +207,26 @@ def test_context_packet_preserves_complete_retrieval_provenance(tmp_path) -> Non
     assert packet.knowledge_snapshot.evidence_source_versions[
         "source-retrieval@v1"
     ]
-    assert packet.content_hash == content_hash(
-        packet.model_dump(mode="json", exclude={"content_hash"})
-    )
+    assert packet.content_hash == scientific_context_semantic_hash(packet)
     with pytest.raises(ValidationError, match="query_id is not content-bound"):
         packet.retrieval_query.model_copy(update={"raw_request": "tampered request"})
     serialized = packet.model_dump(mode="json")
     assert "retrieved_statements" in serialized
     assert "known_facts" not in serialized
     legacy = dict(serialized)
+    legacy["retrieval_manifest"] = dict(legacy["retrieval_manifest"])
+    legacy["retrieval_manifest"].pop("result_hashes")
+    legacy_retrieval_identity = {
+        key: value
+        for key, value in legacy["retrieval_manifest"].items()
+        if key not in {"retrieval_id", "timestamp"}
+    }
+    legacy["retrieval_manifest"]["retrieval_id"] = (
+        f"retrieval-{content_hash(legacy_retrieval_identity)[:24]}"
+    )
+    legacy["context_id"] = (
+        f"context-{legacy['retrieval_manifest']['retrieval_id'].removeprefix('retrieval-')}"
+    )
     legacy["known_facts"] = legacy.pop("retrieved_statements")
     legacy["content_hash"] = content_hash(
         {key: value for key, value in legacy.items() if key != "content_hash"}
@@ -275,3 +292,72 @@ def test_retrieve_cli_writes_context_packet(tmp_path) -> None:
     packet = load_model(output, ScientificContextPacket)
     assert packet.domain == "fischer_tropsch"
     assert packet.retrieval_manifest.result_ids
+
+
+def _ordered_hits(packet):
+    return (
+        *packet.evidence_hits,
+        *packet.expert_case_hits,
+        *packet.workflow_pattern_hits,
+        *packet.capability_hits,
+    )
+
+
+def test_retrieval_manifest_binds_ordered_hit_hashes(tmp_path) -> None:
+    add_evidence(tmp_path, "CO activation evidence")
+    packet = build_context(tmp_path, "CO activation mechanism")
+    hits = _ordered_hits(packet)
+    assert packet.retrieval_manifest.result_hashes == tuple(content_hash(hit) for hit in hits)
+    assert len(packet.retrieval_manifest.result_ids) == len(
+        packet.retrieval_manifest.result_hashes
+    )
+
+
+def test_retrieval_hit_score_change_changes_result_hash(tmp_path) -> None:
+    packet = build_context(tmp_path, "CO activation mechanism")
+    hit = _ordered_hits(packet)[0]
+    changed = hit.model_copy(update={"score": hit.score + 1.0})
+    assert content_hash(changed) != content_hash(hit)
+    with pytest.raises(ValidationError, match="result hashes"):
+        packet.model_copy(update={"expert_case_hits": (changed, *packet.expert_case_hits[1:])})
+
+
+def test_retrieval_hit_rationale_change_changes_result_hash(tmp_path) -> None:
+    packet = build_context(tmp_path, "CO activation mechanism")
+    hit = _ordered_hits(packet)[0]
+    changed = hit.model_copy(update={"rationale": f"{hit.rationale}; altered"})
+    assert content_hash(changed) != content_hash(hit)
+
+
+def test_context_semantic_hash_excludes_audit_timestamps(tmp_path) -> None:
+    packet = build_context(tmp_path, "CO activation mechanism")
+    changed_manifest = packet.retrieval_manifest.model_copy(
+        update={"timestamp": packet.retrieval_manifest.timestamp + timedelta(days=1)}
+    )
+    changed_snapshot = packet.knowledge_snapshot.model_copy(
+        update={"created_at": packet.knowledge_snapshot.created_at + timedelta(days=1)}
+    )
+    changed = packet.model_copy(
+        update={
+            "retrieval_manifest": changed_manifest,
+            "knowledge_snapshot": changed_snapshot,
+        }
+    )
+    assert changed.retrieval_manifest.retrieval_id == packet.retrieval_manifest.retrieval_id
+    assert changed.context_id == packet.context_id
+    assert changed.content_hash == packet.content_hash
+
+
+def test_different_retrieval_hit_order_changes_retrieval_identity(tmp_path) -> None:
+    packet = build_context(tmp_path, "CO activation chain growth mechanism")
+    manifest = packet.retrieval_manifest
+    assert len(manifest.result_ids) >= 2
+    identity = manifest.model_dump(mode="json", exclude={"retrieval_id", "timestamp"})
+    identity["result_ids"] = tuple(reversed(manifest.result_ids))
+    identity["result_hashes"] = tuple(reversed(manifest.result_hashes))
+    reordered = RetrievalManifest(
+        retrieval_id=f"retrieval-{content_hash(identity)[:24]}",
+        timestamp=manifest.timestamp,
+        **identity,
+    )
+    assert reordered.retrieval_id != manifest.retrieval_id

@@ -93,6 +93,26 @@ class EvidenceAssessmentStatus(StrEnum):
     INCOMPARABLE = "incomparable"
 
 
+class SourceRole(StrEnum):
+    AUTHOR = "author"
+    REVIEWER = "reviewer"
+    LITERATURE_AUTHOR = "literature_author"
+    INTERNAL_RESEARCHER = "internal_researcher"
+    SYSTEM = "system"
+    UNSPECIFIED = "unspecified"
+
+
+class SourceType(StrEnum):
+    MANUSCRIPT = "manuscript"
+    SUPPORTING_INFORMATION = "supporting_information"
+    REVIEWER_COMMENT = "reviewer_comment"
+    AUTHOR_RESPONSE = "author_response"
+    LITERATURE_ARTICLE = "literature_article"
+    CALCULATION_ARCHIVE = "calculation_archive"
+    INTERNAL_NOTE = "internal_note"
+    UNSPECIFIED = "unspecified"
+
+
 class SourceDocument(StrictModel):
     source_id: str
     version: str
@@ -100,10 +120,20 @@ class SourceDocument(StrictModel):
     media_type: str = "text/plain"
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     stored_path: str
-    source_role: NonBlankStr = "unspecified"
-    source_type: NonBlankStr = "unspecified"
+    source_role: SourceRole = SourceRole.UNSPECIFIED
+    source_type: SourceType = SourceType.UNSPECIFIED
     ingested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     read_only: bool = True
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> SourceDocument:
+        if self.source_type == SourceType.AUTHOR_RESPONSE and self.source_role != SourceRole.AUTHOR:
+            raise ValueError("author_response source_type requires author source_role")
+        if self.source_type == SourceType.REVIEWER_COMMENT and self.source_role != SourceRole.REVIEWER:
+            raise ValueError("reviewer_comment source_type requires reviewer source_role")
+        if self.source_type == SourceType.LITERATURE_ARTICLE and self.source_role == SourceRole.REVIEWER:
+            raise ValueError("literature_article cannot use reviewer source_role")
+        return self
 
 
 class EvidenceSpan(StrictModel):
@@ -598,17 +628,42 @@ class RetrievalManifest(StrictModel):
     retriever_version: NonBlankStr
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     result_ids: tuple[NonBlankStr, ...]
+    result_hashes: tuple[Sha256Str, ...] = ()
 
     @model_validator(mode="after")
     def validate_retrieval_id(self) -> RetrievalManifest:
         from .serialization import content_hash
 
-        identity = self.model_dump(
-            mode="json", exclude={"retrieval_id", "timestamp"}
+        identity = self.model_dump(mode="json", exclude={"retrieval_id", "timestamp"})
+        legacy_identity = self.model_dump(
+            mode="json", exclude={"retrieval_id", "timestamp", "result_hashes"}
         )
-        if self.retrieval_id != f"retrieval-{content_hash(identity)[:24]}":
+        current_id = f"retrieval-{content_hash(identity)[:24]}"
+        legacy_id = f"retrieval-{content_hash(legacy_identity)[:24]}"
+        valid_ids = {current_id, legacy_id}
+        if self.retrieval_id not in valid_ids:
             raise ValueError("RetrievalManifest retrieval_id is not content-bound")
+        if self.retrieval_id == current_id and len(self.result_ids) != len(self.result_hashes):
+            raise ValueError("RetrievalManifest result IDs and hashes must have equal length")
+        if self.retrieval_id == legacy_id and self.result_hashes:
+            raise ValueError("legacy RetrievalManifest cannot include result hashes")
         return self
+
+
+def scientific_context_semantic_hash(value: Any) -> str:
+    from .serialization import content_hash, to_primitive
+
+    payload = to_primitive(value)
+    if not isinstance(payload, dict):
+        raise TypeError("ScientificContextPacket semantic identity requires an object")
+    payload.pop("content_hash", None)
+    retrieval_manifest = payload.get("retrieval_manifest")
+    if isinstance(retrieval_manifest, dict):
+        retrieval_manifest.pop("timestamp", None)
+    knowledge_snapshot = payload.get("knowledge_snapshot")
+    if isinstance(knowledge_snapshot, dict):
+        knowledge_snapshot.pop("created_at", None)
+    return content_hash(payload)
 
 
 class ScientificContextPacket(StrictModel):
@@ -633,6 +688,8 @@ class ScientificContextPacket(StrictModel):
 
     @model_validator(mode="after")
     def validate_retrieval_bindings(self) -> ScientificContextPacket:
+        from .serialization import content_hash
+
         categorized = (
             (self.evidence_hits, RetrievalSourceType.EVIDENCE_SPAN),
             (self.expert_case_hits, RetrievalSourceType.EXPERT_CASE),
@@ -645,12 +702,20 @@ class ScientificContextPacket(StrictModel):
         result_ids = tuple(hit.hit_id for hits, _ in categorized for hit in hits)
         if result_ids != self.retrieval_manifest.result_ids:
             raise ValueError("retrieval manifest result IDs do not match context hits")
+        result_hashes = tuple(content_hash(hit) for hits, _ in categorized for hit in hits)
+        legacy_manifest_identity = self.retrieval_manifest.model_dump(
+            mode="json", exclude={"retrieval_id", "timestamp", "result_hashes"}
+        )
+        legacy_retrieval_id = f"retrieval-{content_hash(legacy_manifest_identity)[:24]}"
+        if (
+            self.retrieval_manifest.retrieval_id != legacy_retrieval_id
+            and self.retrieval_manifest.result_hashes != result_hashes
+        ):
+            raise ValueError("retrieval manifest result hashes do not match context hits")
         if self.retrieval_manifest.knowledge_snapshot_id != self.knowledge_snapshot.snapshot_id:
             raise ValueError("retrieval manifest does not bind the included knowledge snapshot")
         if self.retrieval_query.domain != self.domain:
             raise ValueError("retrieval query domain does not match context domain")
-        from .serialization import content_hash
-
         if self.original_request != self.retrieval_query.raw_request:
             raise ValueError("context request does not match RetrievalQuery raw_request")
         if self.retrieval_manifest.query_hash != content_hash(self.retrieval_query):
@@ -667,32 +732,46 @@ class ScientificContextPacket(StrictModel):
             raise ValueError("retrieval result IDs must be unique")
         if self.context_id != f"context-{self.retrieval_manifest.retrieval_id.removeprefix('retrieval-')}":
             raise ValueError("context ID does not bind the retrieval manifest")
-        expected_hash = content_hash(
-            self.model_dump(mode="json", exclude={"content_hash"})
-        )
+        expected_hash = scientific_context_semantic_hash(self)
         legacy_payload = self.model_dump(mode="json", exclude={"content_hash"})
+        legacy_payload["retrieval_manifest"].pop("result_hashes", None)
+        legacy_current_hash = content_hash(legacy_payload)
         legacy_payload["known_facts"] = legacy_payload.pop("retrieved_statements")
-        legacy_hash = content_hash(legacy_payload)
-        if self.content_hash not in {expected_hash, legacy_hash}:
+        legacy_known_facts_hash = content_hash(legacy_payload)
+        if self.content_hash not in {
+            expected_hash,
+            legacy_current_hash,
+            legacy_known_facts_hash,
+        }:
             raise ValueError("ScientificContextPacket content hash is invalid")
         return self
 
 
 class SourceQuote(StrictModel):
     quote_id: NonBlankStr
-    text: NonBlankStr
     evidence_ref: NonBlankStr
+    relative_start_offset: int = Field(ge=0)
+    relative_end_offset: int = Field(gt=0)
+    text: NonBlankStr
     source_id: NonBlankStr
     source_version: NonBlankStr
-    source_role: NonBlankStr
-    source_type: NonBlankStr
+    source_role: SourceRole
+    source_type: SourceType
 
     @model_validator(mode="after")
     def validate_quote_id(self) -> SourceQuote:
         from .serialization import content_hash
 
-        if self.quote_id != f"quote-{content_hash({'evidence_ref': self.evidence_ref})[:24]}":
-            raise ValueError("SourceQuote quote_id is not evidence-bound")
+        if self.relative_end_offset <= self.relative_start_offset:
+            raise ValueError("SourceQuote end offset must be greater than start offset")
+        identity = {
+            "evidence_ref": self.evidence_ref,
+            "relative_start_offset": self.relative_start_offset,
+            "relative_end_offset": self.relative_end_offset,
+            "text_hash": content_hash({"text": self.text}),
+        }
+        if self.quote_id != f"quote-{content_hash(identity)[:24]}":
+            raise ValueError("SourceQuote quote_id is not content-bound")
         return self
 
 
@@ -700,11 +779,19 @@ class SourceClaim(StrictModel):
     claim_id: NonBlankStr
     text: NonBlankStr
     claim_type: NonBlankStr
-    source_role: NonBlankStr
+    source_role: SourceRole
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
-    source_quote_refs: tuple[NonBlankStr, ...] = ()
+    source_quote_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
     claim_strength: NonBlankStr
     epistemic_status: EpistemicStatus
+
+    @model_validator(mode="after")
+    def validate_quote_bindings(self) -> SourceClaim:
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("SourceClaim evidence_refs must be unique")
+        if len(set(self.source_quote_refs)) != len(self.source_quote_refs):
+            raise ValueError("SourceClaim source_quote_refs must be unique")
+        return self
 
 
 class ResultContext(StrictModel):
@@ -810,6 +897,7 @@ class InterpretationProposal(StrictModel):
     context_hash: Sha256Str
     provider_id: NonBlankStr
     provider_version: NonBlankStr
+    source_quotes: tuple[SourceQuote, ...] = ()
     source_claims: tuple[SourceClaim, ...] = ()
     reported_results: tuple[ReportedResult, ...] = ()
     method_facts: tuple[MethodFact, ...] = ()
