@@ -65,6 +65,33 @@ class RetrievalSourceType(StrEnum):
     SCIENTIFIC_CAPABILITY = "scientific_capability"
 
 
+class EpistemicStatus(StrEnum):
+    SOURCE_REPORTED = "source_reported"
+    SOURCE_HYPOTHESIS = "source_hypothesis"
+    SOURCE_INTERPRETATION = "source_interpretation"
+    BACKGROUND_STATEMENT = "background_statement"
+    METHOD_STATEMENT = "method_statement"
+    MODEL_STATEMENT = "model_statement"
+    REPORTED_RESULT = "reported_result"
+    UNRESOLVED = "unresolved"
+
+
+class ResultStatus(StrEnum):
+    LITERATURE_REPORTED = "literature_reported"
+    EXPERIMENTAL_REPORTED = "experimental_reported"
+    COMPUTED_REPORTED = "computed_reported"
+    PREDICTED_REPORTED = "predicted_reported"
+    UNKNOWN_ORIGIN = "unknown_origin"
+
+
+class EvidenceAssessmentStatus(StrEnum):
+    SUPPORTED = "supported"
+    PARTIALLY_SUPPORTED = "partially_supported"
+    CONTRADICTED = "contradicted"
+    UNRESOLVED = "unresolved"
+    INCOMPARABLE = "incomparable"
+
+
 class SourceDocument(StrictModel):
     source_id: str
     version: str
@@ -639,4 +666,145 @@ class ScientificContextPacket(StrictModel):
         )
         if self.content_hash != expected_hash:
             raise ValueError("ScientificContextPacket content hash is invalid")
+        return self
+
+
+class SourceClaim(StrictModel):
+    claim_id: NonBlankStr
+    text: NonBlankStr
+    claim_type: NonBlankStr
+    source_role: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    claim_strength: NonBlankStr
+    epistemic_status: EpistemicStatus
+
+
+class ReportedResult(StrictModel):
+    result_id: NonBlankStr
+    quantity: NonBlankStr
+    value: float = Field(allow_inf_nan=False)
+    unit: NonBlankStr
+    system_context: FrozenDict
+    method_context: FrozenDict
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    result_status: ResultStatus
+
+
+class MethodFact(StrictModel):
+    fact_id: NonBlankStr
+    text: NonBlankStr
+    attributes: FrozenDict
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    epistemic_status: EpistemicStatus = EpistemicStatus.METHOD_STATEMENT
+
+    @model_validator(mode="after")
+    def validate_status(self) -> MethodFact:
+        if self.epistemic_status != EpistemicStatus.METHOD_STATEMENT:
+            raise ValueError("MethodFact must remain a method_statement")
+        return self
+
+
+class ModelFact(StrictModel):
+    fact_id: NonBlankStr
+    text: NonBlankStr
+    attributes: FrozenDict
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    epistemic_status: EpistemicStatus = EpistemicStatus.MODEL_STATEMENT
+
+    @model_validator(mode="after")
+    def validate_status(self) -> ModelFact:
+        if self.epistemic_status != EpistemicStatus.MODEL_STATEMENT:
+            raise ValueError("ModelFact must remain a model_statement")
+        return self
+
+
+class EvidenceAssessment(StrictModel):
+    assessment_id: NonBlankStr
+    claim_ref: NonBlankStr
+    supporting_evidence_refs: tuple[NonBlankStr, ...] = ()
+    contradicting_evidence_refs: tuple[NonBlankStr, ...] = ()
+    assessment: EvidenceAssessmentStatus
+    limitations: tuple[NonBlankStr, ...] = ()
+    confidence_basis: NonBlankStr
+
+
+class ConflictSet(StrictModel):
+    conflict_id: NonBlankStr
+    topic: NonBlankStr
+    claim_refs: tuple[NonBlankStr, ...] = Field(min_length=2)
+    conflict_type: NonBlankStr
+    possible_causes: tuple[NonBlankStr, ...] = ()
+    required_discrimination: tuple[NonBlankStr, ...] = Field(min_length=1)
+    resolution_status: NonBlankStr
+
+
+class ComparisonConstraint(StrictModel):
+    constraint_id: NonBlankStr
+    comparison_target: NonBlankStr
+    must_match_fields: tuple[NonBlankStr, ...] = Field(min_length=1)
+    may_vary_fields: tuple[NonBlankStr, ...] = ()
+    disclosure_required_fields: tuple[NonBlankStr, ...] = ()
+    rationale: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+
+
+class EvidenceGap(StrictModel):
+    gap_id: NonBlankStr
+    scientific_question: NonBlankStr
+    missing_evidence: NonBlankStr
+    why_it_matters: NonBlankStr
+    blocking: bool
+    candidate_capabilities: tuple[NonBlankStr, ...] = ()
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+
+
+class InterpretationProposal(StrictModel):
+    proposal_id: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    source_claims: tuple[SourceClaim, ...] = ()
+    reported_results: tuple[ReportedResult, ...] = ()
+    method_facts: tuple[MethodFact, ...] = ()
+    model_facts: tuple[ModelFact, ...] = ()
+    evidence_assessments: tuple[EvidenceAssessment, ...] = ()
+    conflict_sets: tuple[ConflictSet, ...] = ()
+    comparison_constraints: tuple[ComparisonConstraint, ...] = ()
+    evidence_gaps: tuple[EvidenceGap, ...] = ()
+    unknowns: tuple[NonBlankStr, ...] = ()
+    assumption_candidates: tuple[NonBlankStr, ...] = ()
+    capability_candidates: tuple[NonBlankStr, ...] = ()
+
+
+class ScientificEvidencePacket(StrictModel):
+    packet_id: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    source_claims: tuple[SourceClaim, ...] = ()
+    reported_results: tuple[ReportedResult, ...] = ()
+    method_facts: tuple[MethodFact, ...] = ()
+    model_facts: tuple[ModelFact, ...] = ()
+    evidence_assessments: tuple[EvidenceAssessment, ...] = ()
+    conflict_sets: tuple[ConflictSet, ...] = ()
+    comparison_constraints: tuple[ComparisonConstraint, ...] = ()
+    evidence_gaps: tuple[EvidenceGap, ...] = ()
+    unknowns: tuple[NonBlankStr, ...] = ()
+    assumption_candidates: tuple[NonBlankStr, ...] = ()
+    capability_candidates: tuple[NonBlankStr, ...] = ()
+    provenance_manifest: FrozenDict
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ScientificEvidencePacket:
+        from .serialization import content_hash
+
+        identity = self.model_dump(mode="json", exclude={"packet_id", "content_hash"})
+        if self.packet_id != f"evidence-packet-{content_hash(identity)[:24]}":
+            raise ValueError("ScientificEvidencePacket packet_id is not content-bound")
+        expected_hash = content_hash(
+            self.model_dump(mode="json", exclude={"content_hash"})
+        )
+        if self.content_hash != expected_hash:
+            raise ValueError("ScientificEvidencePacket content hash is invalid")
         return self

@@ -41,3 +41,16 @@ spc retrieve request.txt `
 ```
 
 The resulting `ScientificContextPacket` binds the query hash, Domain Pack version, deterministic knowledge snapshot ID, record hashes, evidence source versions, ordered result IDs, and its own content hash. Retrieval remains planning-only and never invokes an LLM or scientific execution backend.
+
+## Phase 2B interpretation
+
+Phase 2B converts a `ScientificContextPacket` into a hash-bound `ScientificEvidencePacket`. The initial `MockInterpretationProvider` is deterministic and offline. Retrieved text is represented as a source claim rather than an established fact; hypotheses, reviewer questions, model predictions, reported numerical results, method statements, conflicts, comparison constraints, and evidence gaps retain distinct epistemic labels.
+
+```powershell
+spc interpret context.yaml `
+  --provider mock `
+  --state-dir .spc `
+  --output evidence-packet.yaml
+```
+
+Interpretation validation reopens every referenced `EvidenceSpan`, verifies its source file and Phase 2A snapshot hash, and rejects unretrieved or fabricated references. Numerical results retain units and structured system/method context. Facet or method mismatches produce explicit comparison constraints, source conflicts remain unresolved, and predictive models are not relabeled as DFT results. Phase 2B does not generate a `ScientificQuestionPlan` and does not execute scientific software.

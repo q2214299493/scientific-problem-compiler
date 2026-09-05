@@ -11,6 +11,11 @@ from .approval import ScientificPlanApprover
 from .compiler import ScientificProblemCompiler
 from .domains import DomainPackLoader
 from .export import ExportError, GenericExportService
+from .interpretation import (
+    EvidencePacketIntegrityError,
+    MockInterpretationProvider,
+    ScientificEvidencePacketBuilder,
+)
 from .models import (
     AgentCapabilityCatalog,
     AgentHandoffPackage,
@@ -19,24 +24,34 @@ from .models import (
     DAGTask,
     DomainProfile,
     EvidenceReference,
+    EvidenceAssessment,
+    EvidenceGap,
     EvidenceSpan,
     ExportManifest,
     FixResolution,
     GateVerdict,
     HumanDecisionResolution,
     IntentFingerprint,
+    InterpretationProposal,
     KnowledgeSnapshot,
     MethodFingerprint,
+    MethodFact,
+    ModelFact,
     PlanValidationRecord,
     RequiredFix,
     RetrievalHit,
     RetrievalManifest,
     RetrievalQuery,
+    ReportedResult,
     ScientificCapability,
     ScientificContextPacket,
+    ScientificEvidencePacket,
     ScientificQuestionPlan,
+    SourceClaim,
     SourceDocument,
     SystemFingerprint,
+    ConflictSet,
+    ComparisonConstraint,
 )
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
@@ -90,6 +105,29 @@ def retrieve(
         state_dir=state_dir,
         knowledge_dir=knowledge_dir,
     )
+    dump_yaml(output, packet)
+    typer.echo(str(output))
+
+
+@app.command()
+def interpret(
+    context_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    output: Annotated[Path, typer.Option("--output")],
+    provider: Annotated[str, typer.Option("--provider")] = "mock",
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Build a validated ScientificEvidencePacket with an offline provider."""
+    if provider != "mock":
+        raise typer.BadParameter("Phase 2B only supports --provider mock")
+    context = load_model(context_file, ScientificContextPacket)
+    try:
+        packet = ScientificEvidencePacketBuilder(MockInterpretationProvider()).build(
+            context,
+            SourceEvidenceStore(state_dir),
+        )
+    except EvidencePacketIntegrityError as error:
+        _emit_report(error.report)
+        raise typer.Exit(1) from error
     dump_yaml(output, packet)
     typer.echo(str(output))
 
@@ -304,6 +342,16 @@ def schema_command(
         KnowledgeSnapshot,
         RetrievalManifest,
         ScientificContextPacket,
+        SourceClaim,
+        EvidenceAssessment,
+        ReportedResult,
+        MethodFact,
+        ModelFact,
+        ConflictSet,
+        ComparisonConstraint,
+        EvidenceGap,
+        InterpretationProposal,
+        ScientificEvidencePacket,
     )
     for path in export_json_schemas(output_dir, models):
         typer.echo(str(path))
