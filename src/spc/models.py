@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+from collections.abc import Mapping
 from typing import Annotated, Any
 
 from pydantic import (
@@ -404,6 +405,84 @@ class ScientificQuestionPlan(StrictModel):
         return self
 
 
+PROHIBITED_EXECUTION_PAYLOAD_KEYS = frozenset(
+    {
+        "command",
+        "commands",
+        "script",
+        "executable",
+        "submit_command",
+        "scheduler_command",
+        "shell_command",
+    }
+)
+
+
+def prohibited_execution_payload_paths(value: Any, path: str = "payload") -> tuple[str, ...]:
+    """Return paths to command-bearing keys nested in descriptive payloads."""
+
+    matches: list[str] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if str(key).strip().casefold() in PROHIBITED_EXECUTION_PAYLOAD_KEYS:
+                matches.append(child_path)
+            matches.extend(prohibited_execution_payload_paths(child, child_path))
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for index, child in enumerate(value):
+            matches.extend(
+                prohibited_execution_payload_paths(child, f"{path}[{index}]")
+            )
+    return tuple(matches)
+
+
+class ScientificTaskExecutionContext(StrictModel):
+    context_id: NonBlankStr
+    source_plan_id: NonBlankStr
+    source_plan_hash: Sha256Str
+    task_id: NonBlankStr
+    scientific_objective: NonBlankStr
+    task_inputs: FrozenDict = Field(default_factory=FrozenDict)
+    hypothesis: Hypothesis
+    model: ModelDefinition
+    observables: tuple[ObservableDefinition, ...]
+    comparison_baselines: tuple[ComparisonBaseline, ...]
+    intent_fingerprint_ref: NonBlankStr
+    system_fingerprint_ref: NonBlankStr
+    method_fingerprint_ref: NonBlankStr
+    acceptance_criteria: tuple[AcceptanceCriterion, ...]
+    falsification_criteria: tuple[FalsificationCriterion, ...]
+    evidence_refs: tuple[EvidenceReference, ...]
+    success_criteria: tuple[NonBlankStr, ...]
+    provenance_requirements: tuple[NonBlankStr, ...]
+    depends_on_task_ids: tuple[NonBlankStr, ...] = ()
+    source_query_manifest: tuple[NonBlankStr, ...] = ()
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_safety(self) -> ScientificTaskExecutionContext:
+        from .serialization import content_hash
+
+        unsafe_paths = prohibited_execution_payload_paths(
+            self.task_inputs, "task_inputs"
+        )
+        if unsafe_paths:
+            raise ValueError(
+                "ScientificTaskExecutionContext contains executable payload fields: "
+                + ", ".join(unsafe_paths)
+            )
+        identity = self.model_dump(
+            mode="json", exclude={"context_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"task-execution-context-{content_hash(identity)[:24]}"
+        if self.context_id != expected_id:
+            raise ValueError("ScientificTaskExecutionContext context_id is not content-bound")
+        payload = {"context_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ScientificTaskExecutionContext content_hash is invalid")
+        return self
+
+
 class RequiredFix(StrictModel):
     fix_id: str
     description: NonBlankStr
@@ -550,17 +629,48 @@ class DomainProfile(StrictModel):
 
 
 class AgentCapability(StrictModel):
-    capability_id: str
-    version: str
-    supports_scientific_capability_ids: tuple[str, ...]
+    capability_id: NonBlankStr
+    version: NonBlankStr
+    supports_scientific_capability_ids: tuple[NonBlankStr, ...]
     input_contract: dict[str, Any] = Field(default_factory=dict)
     output_contract: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_supported_capabilities(self) -> AgentCapability:
+        if len(set(self.supports_scientific_capability_ids)) != len(
+            self.supports_scientific_capability_ids
+        ):
+            raise ValueError("supported scientific capability IDs must be unique")
+        return self
+
 
 class AgentCapabilityCatalog(StrictModel):
-    agent_id: str
-    version: str
+    agent_id: NonBlankStr
+    version: NonBlankStr
     capabilities: tuple[AgentCapability, ...]
+
+    @model_validator(mode="after")
+    def validate_catalog_consistency(self) -> AgentCapabilityCatalog:
+        capability_ids = [item.capability_id for item in self.capabilities]
+        if len(set(capability_ids)) != len(capability_ids):
+            raise ValueError("agent capability IDs must be unique")
+        scientific_mappings: dict[str, set[str]] = {}
+        for capability in self.capabilities:
+            for scientific_id in capability.supports_scientific_capability_ids:
+                scientific_mappings.setdefault(scientific_id, set()).add(
+                    capability.capability_id
+                )
+        ambiguous = sorted(
+            scientific_id
+            for scientific_id, targets in scientific_mappings.items()
+            if len(targets) > 1
+        )
+        if ambiguous:
+            raise ValueError(
+                "scientific capabilities have ambiguous executable mappings: "
+                + ", ".join(ambiguous)
+            )
+        return self
 
 
 class CapabilityBinding(StrictModel):
@@ -1594,7 +1704,10 @@ class ExecutionProposal(StrictModel):
     approval_receipt_hash: Sha256Str
     plan_compilation_receipt_id: NonBlankStr
     plan_compilation_receipt_hash: Sha256Str
+    execution_context: ScientificTaskExecutionContext
+    execution_context_hash: Sha256Str
     task_id: NonBlankStr
+    depends_on_task_ids: tuple[NonBlankStr, ...] = ()
     scientific_capability_id: NonBlankStr
     executable_capability_id: NonBlankStr
     executable_capability_version: NonBlankStr
@@ -1606,6 +1719,7 @@ class ExecutionProposal(StrictModel):
     expected_outputs: tuple[NonBlankStr, ...] = ()
     execution_assumptions: tuple[NonBlankStr, ...] = ()
     resource_requirements: FrozenDict = Field(default_factory=FrozenDict)
+    output_reconciliation: FrozenDict = Field(default_factory=FrozenDict)
     validation_requirements: tuple[NonBlankStr, ...] = ()
     provenance_requirements: tuple[NonBlankStr, ...] = ()
     adapter_id: NonBlankStr
@@ -1620,6 +1734,32 @@ class ExecutionProposal(StrictModel):
 
         if self.authorized or self.runnable:
             raise ValueError("ExecutionProposal must remain unauthorized and non-runnable")
+        if self.execution_context_hash != self.execution_context.content_hash:
+            raise ValueError("execution_context_hash does not match execution_context")
+        if (
+            self.execution_context.source_plan_id,
+            self.execution_context.source_plan_hash,
+            self.execution_context.task_id,
+        ) != (self.source_plan_id, self.source_plan_hash, self.task_id):
+            raise ValueError("execution_context does not bind the proposal task and plan")
+        if self.depends_on_task_ids != self.execution_context.depends_on_task_ids:
+            raise ValueError("proposal dependencies do not match execution_context")
+        unsafe_paths = tuple(
+            path
+            for field_name in (
+                "required_inputs",
+                "resource_requirements",
+                "output_reconciliation",
+            )
+            for path in prohibited_execution_payload_paths(
+                getattr(self, field_name), field_name
+            )
+        )
+        if unsafe_paths:
+            raise ValueError(
+                "ExecutionProposal contains executable payload fields: "
+                + ", ".join(unsafe_paths)
+            )
         identity = self.model_dump(
             mode="json", exclude={"proposal_id", "content_hash"}, exclude_none=True
         )

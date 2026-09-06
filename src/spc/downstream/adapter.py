@@ -19,6 +19,18 @@ class AgentExecutionAdapter(Protocol):
         catalog: AgentCapabilityCatalog,
     ) -> str | None: ...
 
+    def input_bindings(
+        self,
+        executable_capability_id: str,
+    ) -> Mapping[str, str]: ...
+
+    def reconcile_outputs(
+        self,
+        executable_capability_id: str,
+        expected_outputs: tuple[str, ...],
+        declared_outputs: tuple[str, ...],
+    ) -> Mapping[str, str]: ...
+
     def resource_requirements(
         self,
         executable_capability_id: str,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable, TypeVar
 
@@ -19,10 +20,10 @@ def require_safe_path_component(value: str, *, field: str = "identifier") -> str
     return value
 
 
-def to_primitive(value: BaseModel | dict[str, Any] | list[Any]) -> Any:
+def to_primitive(value: BaseModel | Mapping[str, Any] | list[Any]) -> Any:
     if isinstance(value, BaseModel):
         return to_primitive(value.model_dump(mode="json", exclude_none=True))
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: to_primitive(child) for key, child in value.items()}
     if isinstance(value, (list, tuple)):
         return [to_primitive(child) for child in value]

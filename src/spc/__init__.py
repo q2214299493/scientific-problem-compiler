@@ -14,6 +14,7 @@ from .models import (
     ProjectTrustPolicy,
     ScientificPlanningInput,
     ScientificQuestionPlan,
+    ScientificTaskExecutionContext,
     SPCExportPackage,
 )
 
@@ -31,6 +32,7 @@ __all__ = [
     "ProjectTrustPolicy",
     "ScientificPlanningInput",
     "ScientificQuestionPlan",
+    "ScientificTaskExecutionContext",
     "SPCExportPackage",
 ]
 __version__ = "0.1.0"

@@ -92,3 +92,39 @@ class FTAgentAdapter:
             "environment": target_environment,
             "allocation": "not_authorized",
         }
+
+    def input_bindings(self, executable_capability_id: str) -> dict[str, str]:
+        bindings = {
+            "ft.review_evidence": {
+                "source_query_manifest": "source_query_manifest",
+                "reaction_scope": "scientific_objective",
+            },
+            "ft.plan_pathway_comparison": {
+                "hypotheses": "hypothesis",
+                "model": "model",
+                "observables": "observables",
+                "baseline": "comparison_baselines",
+            },
+        }
+        return bindings.get(executable_capability_id, {})
+
+    def reconcile_outputs(
+        self,
+        executable_capability_id: str,
+        expected_outputs: tuple[str, ...],
+        declared_outputs: tuple[str, ...],
+    ) -> dict[str, str]:
+        target_by_capability = {
+            "ft.review_evidence": "mechanistic_evidence_assessment",
+            "ft.plan_pathway_comparison": "pathway_comparison_specification",
+        }
+        target = target_by_capability.get(executable_capability_id)
+        if target is None or target not in declared_outputs:
+            return {}
+        compatible_outputs = {
+            "evidence-grounded discrimination record",
+            target,
+        }
+        if not set(expected_outputs).issubset(compatible_outputs):
+            return {}
+        return {expected: target for expected in expected_outputs}

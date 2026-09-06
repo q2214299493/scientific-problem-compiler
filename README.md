@@ -122,3 +122,14 @@ provenance requirements, but it is always `authorized: false` and
 `runnable: false`. SPC Core produces no shell command, submission request, or
 scientific execution input; downstream authorization and execution remain
 future phases.
+
+Phase 3A.1 projects each selected `DAGTask` and its plan-level scientific
+meaning into a content-bound `ScientificTaskExecutionContext`. Target input
+requirements must resolve to fields in that context, and every scientific
+output must have an explicit adapter reconciliation to the catalogued output
+contract. Proposal dependencies exactly preserve the selected task DAG.
+Capability catalogs reject duplicate or ambiguous mappings, and adapter
+mapping results are checked for determinism. Recursive payload validation
+rejects command-, script-, executable-, shell-, scheduler-, or submission-
+bearing keys at any depth. These checks do not grant authorization:
+`ExecutionProposal` remains both unauthorized and non-runnable.
