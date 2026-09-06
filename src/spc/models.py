@@ -59,6 +59,11 @@ class ApprovalDecision(StrEnum):
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
 
+class ApprovalMode(StrEnum):
+    INDEPENDENT_REQUIRED = "independent_required"
+    LEGACY_MANUAL_ALLOWED = "legacy_manual_allowed"
+
+
 class RetrievalSourceType(StrEnum):
     EVIDENCE_SPAN = "evidence_span"
     EXPERT_CASE = "expert_case"
@@ -457,6 +462,11 @@ class PlanValidationRecord(StrictModel):
     validator_version: str = "2.1.0"
 
 
+class ProjectTrustPolicy(StrictModel):
+    approval_mode: ApprovalMode
+    policy_version: NonBlankStr
+
+
 class GateVerdict(StrictModel):
     gate_id: str
     candidate_id: str
@@ -470,6 +480,12 @@ class GateVerdict(StrictModel):
     independent_approval_receipt_hash: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    trust_policy_version: str | None = None
+    trust_policy_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    plan_compilation_receipt_id: str | None = None
+    plan_compilation_receipt_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     passed: bool
     reasons: tuple[NonBlankStr, ...] = ()
 
@@ -479,6 +495,12 @@ class GateVerdict(StrictModel):
             self.independent_approval_receipt_hash is None
         ):
             raise ValueError("independent approval receipt ID and hash must be supplied together")
+        if (self.trust_policy_version is None) != (self.trust_policy_hash is None):
+            raise ValueError("trust policy version and hash must be supplied together")
+        if (self.plan_compilation_receipt_id is None) != (
+            self.plan_compilation_receipt_hash is None
+        ):
+            raise ValueError("plan compilation receipt ID and hash must be supplied together")
         return self
 
 
@@ -1185,6 +1207,36 @@ class PlanningProposalSet(StrictModel):
         identity = self.model_dump(mode="json", exclude={"proposal_id"})
         if self.proposal_id != f"planning-proposal-{content_hash(identity)[:24]}":
             raise ValueError("PlanningProposalSet proposal_id is not content-bound")
+        return self
+
+
+class PlanCompilationReceipt(StrictModel):
+    receipt_id: NonBlankStr
+    plan_id: NonBlankStr
+    plan_hash: Sha256Str
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    planning_proposal_id: NonBlankStr
+    planning_proposal_hash: Sha256Str
+    materializer_version: NonBlankStr
+    origin: NonBlankStr = "phase2c_grounded_compiler"
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanCompilationReceipt:
+        from .serialization import content_hash
+
+        if self.origin != "phase2c_grounded_compiler":
+            raise ValueError("PlanCompilationReceipt origin is invalid")
+        identity = self.model_dump(
+            mode="json", exclude={"receipt_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"plan-compilation-receipt-{content_hash(identity)[:24]}"
+        if self.receipt_id != expected_id:
+            raise ValueError("PlanCompilationReceipt receipt_id is not content-bound")
+        payload = {"receipt_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("PlanCompilationReceipt content_hash is invalid")
         return self
 
 

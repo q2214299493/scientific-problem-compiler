@@ -30,6 +30,7 @@ from .models import (
     AmbiguityAssessment,
     AgentCapabilityCatalog,
     AgentHandoffPackage,
+    ApprovalMode,
     ApprovalScores,
     ApprovalDimensionScore,
     ApprovalHardRedFlag,
@@ -63,10 +64,12 @@ from .models import (
     MethodFact,
     ModelFact,
     ObservableDraft,
+    PlanCompilationReceipt,
     PlanValidationRecord,
     PlanningLLMResponse,
     PlanningProposalSet,
     ProposedDeviationDraft,
+    ProjectTrustPolicy,
     RequiredFix,
     RetrievalHit,
     RetrievalManifest,
@@ -241,14 +244,25 @@ def plan(
 
     if result.proposal_set is None:
         raise RuntimeError("grounded planning did not return a PlanningProposalSet")
+    trust_policy = ProjectTrustPolicy(
+        approval_mode=ApprovalMode.INDEPENDENT_REQUIRED,
+        policy_version="1.0.0",
+    )
+    plan_paths = tuple(
+        output_dir / f"{candidate.plan_id}--{candidate.version}.yaml"
+        for candidate in result.candidates
+    )
+    receipt_paths = tuple(
+        output_dir / f"{receipt.plan_id}--compilation-receipt.yaml"
+        for receipt in result.compilation_receipts
+    )
     output_paths = (
         output_dir / "planning-input.yaml",
         output_dir / "planning-proposal.yaml",
         output_dir / "validation-reports.yaml",
-        *(
-            output_dir / f"{candidate.plan_id}--{candidate.version}.yaml"
-            for candidate in result.candidates
-        ),
+        output_dir / "project-trust-policy.yaml",
+        *plan_paths,
+        *receipt_paths,
     )
     existing = tuple(path for path in output_paths if path.exists())
     if existing:
@@ -258,13 +272,22 @@ def plan(
         )
     dump_yaml(output_paths[0], planning_input)
     dump_yaml(output_paths[1], result.proposal_set)
-    for path, candidate in zip(output_paths[3:], result.candidates, strict=True):
+    dump_yaml(output_paths[3], trust_policy)
+    for path, candidate in zip(plan_paths, result.candidates, strict=True):
         require_safe_path_component(candidate.plan_id, field="plan_id")
         dump_yaml(path, candidate)
+    for path, receipt in zip(
+        receipt_paths, result.compilation_receipts, strict=True
+    ):
+        dump_yaml(path, receipt)
     validation_payload = {
         "valid": all(report.valid for report in result.reports),
         "reports": [report.model_dump(mode="json") for report in result.reports],
         "candidate_plan_ids": [candidate.plan_id for candidate in result.candidates],
+        "compilation_receipt_ids": [
+            receipt.receipt_id for receipt in result.compilation_receipts
+        ],
+        "trust_policy": trust_policy.model_dump(mode="json"),
         "approved": False,
     }
     dump_yaml(output_paths[2], validation_payload)
@@ -559,6 +582,13 @@ def export(
     ],
     gate_file: Annotated[Path, typer.Option("--gate", exists=True, dir_okay=False)],
     export_id: Annotated[str, typer.Option("--export-id")],
+    trust_policy_file: Annotated[
+        Path, typer.Option("--trust-policy", exists=True, dir_okay=False)
+    ],
+    compilation_receipt_file: Annotated[
+        Path | None,
+        typer.Option("--compilation-receipt", exists=True, dir_okay=False),
+    ] = None,
     review_input_file: Annotated[
         Path | None,
         typer.Option("--review-input", exists=True, dir_okay=False),
@@ -583,6 +613,12 @@ def export(
     verdict = load_model(verdict_file, ApprovalVerdict)
     validation_record = load_model(validation_file, PlanValidationRecord)
     gate = load_model(gate_file, GateVerdict)
+    trust_policy = load_model(trust_policy_file, ProjectTrustPolicy)
+    compilation_receipt = (
+        load_model(compilation_receipt_file, PlanCompilationReceipt)
+        if compilation_receipt_file is not None
+        else None
+    )
     review_input = (
         load_model(review_input_file, ApprovalReviewInput)
         if review_input_file is not None
@@ -610,6 +646,8 @@ def export(
             human_selected=human_selected,
             adapter=FTAgentAdapter(),
             export_id=export_id,
+            trust_policy=trust_policy,
+            compilation_receipt=compilation_receipt,
             review_input=review_input,
             review=review_record,
             receipt=receipt,
@@ -637,6 +675,8 @@ def schema_command(
         ScientificQuestionPlan,
         ApprovalVerdict,
         PlanValidationRecord,
+        ProjectTrustPolicy,
+        PlanCompilationReceipt,
         GateVerdict,
         DomainProfile,
         AgentCapabilityCatalog,

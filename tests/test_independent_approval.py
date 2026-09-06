@@ -27,6 +27,7 @@ from spc.cli import app
 from spc.compiler import ScientificProblemCompiler
 from spc.interpretation import MockInterpretationProvider, ScientificEvidencePacketBuilder
 from spc.models import (
+    ApprovalMode,
     ApprovalDecision,
     ApprovalDimensionScore,
     ApprovalHardRedFlag,
@@ -41,7 +42,9 @@ from spc.models import (
     EvidenceReference,
     EvidenceSpan,
     IndependentApprovalReceipt,
+    PlanCompilationReceipt,
     PlanValidationRecord,
+    ProjectTrustPolicy,
     RequiredHumanDecision,
     ScientificContextPacket,
     ScientificEvidencePacket,
@@ -59,8 +62,10 @@ from spc.retrieval import ScientificContextBuilder
 from spc.serialization import content_hash, dump_json, dump_yaml, load_model
 from spc.validators import (
     build_plan_validation_record,
+    requires_independent_approval,
     validate_approval_boundary,
     validate_export,
+    validate_plan_compilation_receipt,
     validate_question_plan,
 )
 
@@ -75,6 +80,17 @@ class ReviewCase:
     plan: ScientificQuestionPlan
     validation_record: PlanValidationRecord
     review_input: ApprovalReviewInput
+    compilation_receipt: PlanCompilationReceipt
+
+
+INDEPENDENT_TRUST_POLICY = ProjectTrustPolicy(
+    approval_mode=ApprovalMode.INDEPENDENT_REQUIRED,
+    policy_version="1.0.0",
+)
+LEGACY_TRUST_POLICY = ProjectTrustPolicy(
+    approval_mode=ApprovalMode.LEGACY_MANUAL_ALLOWED,
+    policy_version="1.0.0",
+)
 
 
 def build_review_case(
@@ -157,6 +173,7 @@ def build_review_case(
         plan,
         validation_record,
         review_input,
+        compilation.compilation_receipts[0],
     )
 
 
@@ -910,11 +927,13 @@ def test_manual_verdict_cannot_masquerade_as_independent_approval(tmp_path) -> N
             case.plan,
             manual,
             case.validation_record,
+            trust_policy=INDEPENDENT_TRUST_POLICY,
             gate_id="gate-manual",
             passed=True,
             review_input=case.review_input,
             review=independent.review,
             receipt=independent.receipt,
+            compilation_receipt=case.compilation_receipt,
         )
 
 
@@ -1066,11 +1085,13 @@ def test_valid_independent_review_receipt_verdict_chain_passes(tmp_path) -> None
         case.plan,
         result.verdict,
         case.validation_record,
+        trust_policy=INDEPENDENT_TRUST_POLICY,
         gate_id="gate-independent",
         passed=True,
         review_input=case.review_input,
         review=result.review,
         receipt=result.receipt,
+        compilation_receipt=case.compilation_receipt,
     )
     assert gate.independent_approval_receipt_id == result.receipt.receipt_id
     assert gate.independent_approval_receipt_hash == result.receipt.content_hash
@@ -1091,7 +1112,12 @@ def test_legacy_manual_approval_remains_distinguishable(
         decision=ApprovalDecision.APPROVE,
     )
     gate = bind_gate_verdict(
-        plan, verdict, validation, gate_id="legacy-gate", passed=True
+        plan,
+        verdict,
+        validation,
+        trust_policy=LEGACY_TRUST_POLICY,
+        gate_id="legacy-gate",
+        passed=True,
     )
     assert plan.source_proposal is None
     assert gate.independent_approval_receipt_id is None
@@ -1105,8 +1131,10 @@ def test_export_refuses_missing_phase2d_review_binding(tmp_path) -> None:
         case.plan,
         result.verdict,
         case.validation_record,
+        trust_policy=INDEPENDENT_TRUST_POLICY,
         gate_id="ungrounded-gate",
         passed=False,
+        compilation_receipt=case.compilation_receipt,
     ).model_copy(update={"passed": True})
     with pytest.raises(ExportError) as caught:
         GenericExportService(tmp_path / "exports", case.store).export(
@@ -1117,6 +1145,8 @@ def test_export_refuses_missing_phase2d_review_binding(tmp_path) -> None:
             human_selected=True,
             adapter=FTAgentAdapter(),
             export_id="missing-independent-review",
+            trust_policy=INDEPENDENT_TRUST_POLICY,
+            compilation_receipt=case.compilation_receipt,
         )
     assert "MISSING_INDEPENDENT_APPROVAL" in {
         issue.code for issue in caught.value.report.issues
@@ -1130,11 +1160,13 @@ def test_valid_phase2d_export_preserves_and_validates_trust_chain(tmp_path) -> N
         case.plan,
         result.verdict,
         case.validation_record,
+        trust_policy=INDEPENDENT_TRUST_POLICY,
         gate_id="independent-gate",
         passed=True,
         review_input=case.review_input,
         review=result.review,
         receipt=result.receipt,
+        compilation_receipt=case.compilation_receipt,
     )
     output = GenericExportService(tmp_path / "exports", case.store).export(
         plan=case.plan,
@@ -1144,6 +1176,8 @@ def test_valid_phase2d_export_preserves_and_validates_trust_chain(tmp_path) -> N
         human_selected=True,
         adapter=FTAgentAdapter(),
         export_id="independent-review",
+        trust_policy=INDEPENDENT_TRUST_POLICY,
+        compilation_receipt=case.compilation_receipt,
         review_input=case.review_input,
         review=result.review,
         receipt=result.receipt,
@@ -1177,3 +1211,117 @@ def test_approval_findings_validate_task_and_capability_references(tmp_path) -> 
 def test_plan_validation_version_is_bumped(tmp_path) -> None:
     case = build_review_case(tmp_path)
     assert case.validation_record.validator_version == "2.1.0"
+
+
+def test_removing_source_proposal_does_not_disable_independent_policy(
+    tmp_path,
+) -> None:
+    case = build_review_case(tmp_path)
+    downgraded = case.plan.model_copy(update={"source_proposal": None})
+    assert not requires_independent_approval(downgraded)
+    with pytest.raises(ValueError, match="MISSING_PLAN_COMPILATION_RECEIPT"):
+        bind_gate_verdict(
+            downgraded,
+            independently_approved(case).verdict,
+            case.validation_record,
+            trust_policy=INDEPENDENT_TRUST_POLICY,
+            gate_id="downgrade-attempt",
+            passed=True,
+        )
+
+
+def test_source_proposal_none_cannot_pass_gate_under_independent_policy(
+    tmp_path,
+) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    downgraded = case.plan.model_copy(update={"source_proposal": None})
+    with pytest.raises(ValueError, match="INVALID_PLAN_COMPILATION_RECEIPT"):
+        bind_gate_verdict(
+            downgraded,
+            result.verdict,
+            case.validation_record,
+            trust_policy=INDEPENDENT_TRUST_POLICY,
+            gate_id="downgraded-plan-gate",
+            passed=True,
+            review_input=case.review_input,
+            review=result.review,
+            receipt=result.receipt,
+            compilation_receipt=case.compilation_receipt,
+        )
+
+
+def test_manual_spc_approve_cannot_export_under_independent_policy(
+    tmp_path,
+) -> None:
+    case = build_review_case(tmp_path)
+    plan_path = tmp_path / "candidate.yaml"
+    verdict_path = tmp_path / "manual-verdict.yaml"
+    dump_yaml(plan_path, case.plan)
+    cli_result = CliRunner().invoke(
+        app,
+        [
+            "approve",
+            str(plan_path),
+            "--output",
+            str(verdict_path),
+            "--decision",
+            "approve",
+            "--verdict-id",
+            "manual-verdict",
+            "--approver-id",
+            "manual-reviewer",
+        ],
+    )
+    assert cli_result.exit_code == 0, cli_result.output
+    assert "legacy/manual" in cli_result.output
+    verdict = load_model(verdict_path, ApprovalVerdict)
+    gate = bind_gate_verdict(
+        case.plan,
+        verdict,
+        case.validation_record,
+        trust_policy=INDEPENDENT_TRUST_POLICY,
+        gate_id="manual-export-attempt",
+        passed=False,
+        compilation_receipt=case.compilation_receipt,
+    ).model_copy(update={"passed": True})
+    with pytest.raises(ExportError) as caught:
+        GenericExportService(tmp_path / "exports", case.store).export(
+            plan=case.plan,
+            verdict=verdict,
+            validation_record=case.validation_record,
+            gate=gate,
+            human_selected=True,
+            adapter=FTAgentAdapter(),
+            export_id="manual-export-attempt",
+            trust_policy=INDEPENDENT_TRUST_POLICY,
+            compilation_receipt=case.compilation_receipt,
+        )
+    assert "MISSING_INDEPENDENT_APPROVAL" in {
+        issue.code for issue in caught.value.report.issues
+    }
+
+
+def test_phase2c_lineage_receipt_cannot_be_reused_for_another_plan(
+    tmp_path,
+) -> None:
+    case = build_review_case(tmp_path)
+    changed = case.plan.model_copy(update={"latent_concern": "Changed concern"})
+    report = validate_plan_compilation_receipt(changed, case.compilation_receipt)
+    assert "PLAN_COMPILATION_RECEIPT_MISMATCH" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_tampered_plan_compilation_receipt_fails(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    data = {
+        name: getattr(case.compilation_receipt, name)
+        for name in type(case.compilation_receipt).model_fields
+    }
+    data["planning_proposal_hash"] = "0" * 64
+    tampered = PlanCompilationReceipt.model_construct(**data)
+    report = validate_plan_compilation_receipt(case.plan, tampered)
+    assert "TAMPERED_PLAN_COMPILATION_RECEIPT" in {
+        issue.code for issue in report.issues
+    }

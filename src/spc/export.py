@@ -15,7 +15,9 @@ from .models import (
     ExportManifest,
     GateVerdict,
     IndependentApprovalReceipt,
+    PlanCompilationReceipt,
     PlanValidationRecord,
+    ProjectTrustPolicy,
     ScientificQuestionPlan,
 )
 from .serialization import content_hash, dump_json, dump_yaml, file_sha256, require_safe_path_component
@@ -64,6 +66,8 @@ class GenericExportService:
         human_selected: bool,
         adapter: AgentAdapter,
         export_id: str,
+        trust_policy: ProjectTrustPolicy,
+        compilation_receipt: PlanCompilationReceipt | None = None,
         review_input: ApprovalReviewInput | None = None,
         review: ApprovalReviewRecord | None = None,
         receipt: IndependentApprovalReceipt | None = None,
@@ -120,6 +124,8 @@ class GenericExportService:
                 gate,
                 handoff,
                 human_selected=human_selected,
+                trust_policy=trust_policy,
+                compilation_receipt=compilation_receipt,
                 review_input=review_input,
                 review=review,
                 receipt=receipt,
@@ -138,6 +144,8 @@ class GenericExportService:
                 validation_record,
                 gate,
                 handoff,
+                trust_policy=trust_policy,
+                compilation_receipt=compilation_receipt,
                 review_input=review_input,
                 review=review,
                 receipt=receipt,
@@ -157,6 +165,8 @@ class GenericExportService:
         gate: GateVerdict,
         handoff: AgentHandoffPackage,
         *,
+        trust_policy: ProjectTrustPolicy,
+        compilation_receipt: PlanCompilationReceipt | None = None,
         review_input: ApprovalReviewInput | None = None,
         review: ApprovalReviewRecord | None = None,
         receipt: IndependentApprovalReceipt | None = None,
@@ -195,6 +205,12 @@ class GenericExportService:
         dump_yaml(root / "approvals" / "plan-review.yaml", verdict)
         dump_yaml(root / "approvals" / "plan-validation.yaml", validation_record)
         dump_yaml(root / "approvals" / "plan-gate.yaml", gate)
+        dump_yaml(root / "approvals" / "project-trust-policy.yaml", trust_policy)
+        if compilation_receipt is not None:
+            dump_yaml(
+                root / "provenance" / "plan-compilation-receipt.yaml",
+                compilation_receipt,
+            )
         if review_input is not None:
             dump_yaml(root / "approvals" / "approval-review-input.yaml", review_input)
         if review is not None:

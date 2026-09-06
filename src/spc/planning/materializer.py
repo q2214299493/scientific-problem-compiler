@@ -19,6 +19,7 @@ from ..models import (
     MethodFingerprint,
     ModelDefinition,
     ObservableDefinition,
+    PlanCompilationReceipt,
     PlanningProposalSet,
     ProposedDeviation,
     RequiredHumanDecision,
@@ -30,7 +31,7 @@ from ..models import (
 )
 from ..serialization import content_hash
 
-MATERIALIZER_VERSION = "plan-materializer-1.1.0"
+MATERIALIZER_VERSION = "plan-materializer-1.2.0"
 
 
 def _entity_id(prefix: str, value: Any) -> str:
@@ -60,6 +61,35 @@ class PlanMaterializer:
         return tuple(
             self.materialize_candidate(candidate, proposal, planning_input)
             for candidate in proposal.candidates
+        )
+
+    def build_compilation_receipt(
+        self,
+        plan: ScientificQuestionPlan,
+        proposal: PlanningProposalSet,
+        planning_input: ScientificPlanningInput,
+    ) -> PlanCompilationReceipt:
+        materialized = self.materialize(proposal, planning_input)
+        plan_hash = content_hash(plan)
+        if plan_hash not in {content_hash(candidate) for candidate in materialized}:
+            raise ValueError(
+                "plan is not an output of the supplied planning input and proposal"
+            )
+        identity = {
+            "plan_id": plan.plan_id,
+            "plan_hash": plan_hash,
+            "planning_input_id": planning_input.planning_input_id,
+            "planning_input_hash": planning_input.content_hash,
+            "planning_proposal_id": proposal.proposal_id,
+            "planning_proposal_hash": content_hash(proposal),
+            "materializer_version": MATERIALIZER_VERSION,
+            "origin": "phase2c_grounded_compiler",
+        }
+        receipt_id = f"plan-compilation-receipt-{content_hash(identity)[:24]}"
+        payload = {"receipt_id": receipt_id, **identity}
+        return PlanCompilationReceipt(
+            **payload,
+            content_hash=content_hash(payload),
         )
 
     def materialize_candidate(

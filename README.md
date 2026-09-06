@@ -95,3 +95,11 @@ its verdict has no independent-review receipt and cannot satisfy the Phase 2D
 boundary. Phase 2D export additionally requires `--review-input`,
 `--review-record`, and `--approval-receipt`; all three artifacts are preserved
 inside the immutable export package.
+
+Phase 2D.1.1 makes `ProjectTrustPolicy` the external authority for that
+boundary. Normal `spc plan` output uses `independent_required` and includes a
+content-bound `PlanCompilationReceipt` for every candidate. Gate and export
+bind the exact policy and compilation receipt, so clearing or rewriting
+`source_proposal` cannot downgrade a grounded plan. Manual approval is accepted
+only when the caller explicitly supplies a `legacy_manual_allowed` policy.
+`source_proposal` remains lineage evidence, not an authorization control.

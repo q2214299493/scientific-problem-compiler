@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from ..models import (
+    ApprovalMode,
     ApprovalScores,
     ApprovalReviewInput,
     ApprovalReviewRecord,
@@ -12,7 +13,9 @@ from ..models import (
     GateVerdict,
     HumanDecisionResolution,
     IndependentApprovalReceipt,
+    PlanCompilationReceipt,
     PlanValidationRecord,
+    ProjectTrustPolicy,
     RequiredFix,
     ScientificCapability,
     ScientificQuestionPlan,
@@ -21,8 +24,8 @@ from ..serialization import content_hash
 from ..validators import (
     EvidenceSpanRepository,
     ValidationReport,
-    requires_independent_approval,
     validate_independent_approval_chain,
+    validate_plan_compilation_receipt,
     validate_question_plan,
 )
 
@@ -75,14 +78,26 @@ def bind_gate_verdict(
     verdict: ApprovalVerdict,
     validation_record: PlanValidationRecord,
     *,
+    trust_policy: ProjectTrustPolicy,
     gate_id: str,
     passed: bool,
     reasons: tuple[str, ...] = (),
     review_input: ApprovalReviewInput | None = None,
     review: ApprovalReviewRecord | None = None,
     receipt: IndependentApprovalReceipt | None = None,
+    compilation_receipt: PlanCompilationReceipt | None = None,
 ) -> GateVerdict:
-    if passed and requires_independent_approval(plan):
+    if passed and trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED:
+        if compilation_receipt is None:
+            raise ValueError(
+                "MISSING_PLAN_COMPILATION_RECEIPT: independent approval policy requires grounded compiler lineage"
+            )
+        compilation_report = validate_plan_compilation_receipt(
+            plan, compilation_receipt
+        )
+        if not compilation_report.valid:
+            codes = ", ".join(issue.code for issue in compilation_report.issues)
+            raise ValueError(f"INVALID_PLAN_COMPILATION_RECEIPT: {codes}")
         if review_input is None or review is None or receipt is None:
             raise ValueError(
                 "MISSING_INDEPENDENT_APPROVAL: Phase 2D gate requires review input, review record, and receipt"
@@ -107,6 +122,18 @@ def bind_gate_verdict(
         ),
         independent_approval_receipt_hash=(
             receipt.content_hash if receipt is not None else None
+        ),
+        trust_policy_version=trust_policy.policy_version,
+        trust_policy_hash=content_hash(trust_policy),
+        plan_compilation_receipt_id=(
+            compilation_receipt.receipt_id
+            if compilation_receipt is not None
+            else None
+        ),
+        plan_compilation_receipt_hash=(
+            compilation_receipt.content_hash
+            if compilation_receipt is not None
+            else None
         ),
         passed=passed,
         reasons=reasons,

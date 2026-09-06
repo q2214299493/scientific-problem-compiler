@@ -17,9 +17,11 @@ from spc.models import (
     CandidatePlanDraft,
     EvidenceClassification,
     EvidenceSpan,
+    PlanCompilationReceipt,
     PlanningLLMResponse,
     PlanningProposalSet,
     ProposedDeviationDraft,
+    ProjectTrustPolicy,
     ScientificPlanningInput,
 )
 from spc.planning import (
@@ -853,6 +855,11 @@ def test_plan_cli_writes_grounded_artifacts_without_approval(tmp_path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert load_model(output_dir / "planning-input.yaml", ScientificPlanningInput)
+    assert load_model(output_dir / "project-trust-policy.yaml", ProjectTrustPolicy)
+    assert load_model(
+        next(output_dir.glob("plan-*--compilation-receipt.yaml")),
+        PlanCompilationReceipt,
+    )
     validation = (output_dir / "validation-reports.yaml").read_text(encoding="utf-8")
     assert "approved: false" in validation
     assert tuple(output_dir.glob("plan-*--1.0.0.yaml"))
@@ -868,6 +875,8 @@ def test_schema_cli_exports_phase2c_contracts(tmp_path) -> None:
         "IntentInterpretation",
         "CandidatePlanDraft",
         "PlanningProposalSet",
+        "ProjectTrustPolicy",
+        "PlanCompilationReceipt",
     ):
         assert (output_dir / f"{model_name}.schema.json").is_file()
 

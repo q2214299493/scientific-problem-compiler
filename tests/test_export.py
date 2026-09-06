@@ -9,15 +9,23 @@ from spc.approval import ScientificPlanApprover, bind_gate_verdict
 from spc.domains import DomainPackLoader
 from spc.export import ExportError, GenericExportService
 from spc.models import (
+    ApprovalMode,
     ApprovalScores,
     FixResolution,
     HumanDecisionResolution,
+    ProjectTrustPolicy,
     RequiredFix,
     RequiredHumanDecision,
 )
 from spc.repositories import SourceEvidenceStore
 from spc.serialization import dump_yaml, file_sha256, load_data
 from spc.validators import build_plan_validation_record, validate_export, validate_question_plan
+
+
+LEGACY_TRUST_POLICY = ProjectTrustPolicy(
+    approval_mode=ApprovalMode.LEGACY_MANUAL_ALLOWED,
+    policy_version="1.0.0",
+)
 
 
 def approved_inputs(
@@ -47,7 +55,12 @@ def approved_inputs(
         human_decision_resolutions=human_decision_resolutions,
     )
     gate = bind_gate_verdict(
-        plan, verdict, validation_record, gate_id="gate-1", passed=True
+        plan,
+        verdict,
+        validation_record,
+        trust_policy=LEGACY_TRUST_POLICY,
+        gate_id="gate-1",
+        passed=True,
     )
     return verdict, validation_record, gate
 
@@ -61,6 +74,7 @@ def run_export(tmp_path, plan, evidence_repository, verdict, validation_record, 
         "human_selected": True,
         "adapter": FTAgentAdapter(),
         "export_id": "x",
+        "trust_policy": LEGACY_TRUST_POLICY,
     }
     arguments.update(overrides)
     return GenericExportService(tmp_path / "exports", evidence_repository).export(**arguments)
@@ -256,7 +270,12 @@ def test_stale_plan_validation_record_cannot_export(
     verdict, validation_record, _ = approved_inputs(plan, evidence_repository)
     validation_record = validation_record.model_copy(update={"plan_content_hash": "0" * 64})
     gate = bind_gate_verdict(
-        plan, verdict, validation_record, gate_id="gate-1", passed=True
+        plan,
+        verdict,
+        validation_record,
+        trust_policy=LEGACY_TRUST_POLICY,
+        gate_id="gate-1",
+        passed=True,
     )
     with pytest.raises(ExportError) as caught:
         run_export(tmp_path, plan, evidence_repository, verdict, validation_record, gate)
@@ -491,6 +510,7 @@ def test_export_is_immutable_by_refusing_overwrite(
         "human_selected": True,
         "adapter": FTAgentAdapter(),
         "export_id": "x",
+        "trust_policy": LEGACY_TRUST_POLICY,
     }
     service.export(**arguments)
     with pytest.raises(FileExistsError):

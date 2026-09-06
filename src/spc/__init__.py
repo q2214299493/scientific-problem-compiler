@@ -6,9 +6,11 @@ from .models import (
     ApprovalReviewRecord,
     ApprovalVerdict,
     IndependentApprovalReceipt,
+    PlanCompilationReceipt,
     PlanValidationRecord,
     PlanningLLMResponse,
     PlanningProposalSet,
+    ProjectTrustPolicy,
     ScientificPlanningInput,
     ScientificQuestionPlan,
 )
@@ -19,9 +21,11 @@ __all__ = [
     "ApprovalReviewRecord",
     "ApprovalVerdict",
     "IndependentApprovalReceipt",
+    "PlanCompilationReceipt",
     "PlanValidationRecord",
     "PlanningLLMResponse",
     "PlanningProposalSet",
+    "ProjectTrustPolicy",
     "ScientificPlanningInput",
     "ScientificQuestionPlan",
 ]

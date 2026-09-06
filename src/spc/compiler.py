@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .domains import DomainPackLoader
-from .models import PlanningProposalSet, ScientificPlanningInput, ScientificQuestionPlan
+from .models import (
+    PlanCompilationReceipt,
+    PlanningProposalSet,
+    ScientificPlanningInput,
+    ScientificQuestionPlan,
+)
 from .planning.materializer import PlanMaterializer
 from .planning.validators import PlanningProposalError, validate_planning_proposal_set
 from .validators import EvidenceSpanRepository, ValidationReport, validate_candidate_set, validate_question_plan
@@ -15,6 +20,7 @@ class CompilationResult:
     candidates: tuple[ScientificQuestionPlan, ...]
     reports: tuple[ValidationReport, ...]
     proposal_set: PlanningProposalSet | None = None
+    compilation_receipts: tuple[PlanCompilationReceipt, ...] = ()
 
 
 class ScientificProblemCompiler:
@@ -62,7 +68,16 @@ class ScientificProblemCompiler:
             for plan in plans
         )
         set_report = validate_candidate_set(plans)
-        return CompilationResult(plans, (proposal_report, *reports, set_report), proposal)
+        receipts = tuple(
+            self.materializer.build_compilation_receipt(plan, proposal, planning_input)
+            for plan in plans
+        )
+        return CompilationResult(
+            plans,
+            (proposal_report, *reports, set_report),
+            proposal,
+            receipts,
+        )
 
     def compile_legacy(self, request: str, domain: str) -> CompilationResult:
         """Phase 1 compatibility path for test-supplied immutable plans."""

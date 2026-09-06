@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .models import (
     AgentHandoffPackage,
+    ApprovalMode,
     ApprovalDecision,
     ApprovalReviewInput,
     ApprovalReviewRecord,
@@ -23,7 +24,9 @@ from .models import (
     GateVerdict,
     GroundedStatement,
     IndependentApprovalReceipt,
+    PlanCompilationReceipt,
     PlanValidationRecord,
+    ProjectTrustPolicy,
     ScientificCapability,
     ScientificQuestionPlan,
     SourceDocument,
@@ -294,9 +297,43 @@ def validate_approval_boundary(
 
 
 def requires_independent_approval(plan: ScientificQuestionPlan) -> bool:
-    """Phase 2C materialized plans carry a source proposal; legacy plans do not."""
+    """Return lineage evidence only; never use this helper as a security policy."""
 
     return plan.source_proposal is not None
+
+
+def validate_plan_compilation_receipt(
+    plan: ScientificQuestionPlan,
+    receipt: PlanCompilationReceipt,
+) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    identity = receipt.model_dump(
+        mode="json", exclude={"receipt_id", "content_hash"}, exclude_none=True
+    )
+    expected_id = f"plan-compilation-receipt-{content_hash(identity)[:24]}"
+    expected_hash = content_hash({"receipt_id": expected_id, **identity})
+    if receipt.receipt_id != expected_id or receipt.content_hash != expected_hash:
+        issues.append(
+            ValidationIssue(
+                code="TAMPERED_PLAN_COMPILATION_RECEIPT",
+                message="PlanCompilationReceipt identity or content hash is invalid",
+            )
+        )
+    if (receipt.plan_id, receipt.plan_hash) != (plan.plan_id, content_hash(plan)):
+        issues.append(
+            ValidationIssue(
+                code="PLAN_COMPILATION_RECEIPT_MISMATCH",
+                message="PlanCompilationReceipt is not bound to the supplied plan",
+            )
+        )
+    if receipt.origin != "phase2c_grounded_compiler":
+        issues.append(
+            ValidationIssue(
+                code="INVALID_PLAN_COMPILATION_ORIGIN",
+                message="PlanCompilationReceipt does not identify the grounded compiler",
+            )
+        )
+    return _report(issues)
 
 
 def validate_approval_claim_evidence_coherence(
@@ -757,6 +794,8 @@ def validate_handoff_package(
     handoff: AgentHandoffPackage,
     *,
     human_selected: bool,
+    trust_policy: ProjectTrustPolicy,
+    compilation_receipt: PlanCompilationReceipt | None = None,
     review_input: ApprovalReviewInput | None = None,
     review: ApprovalReviewRecord | None = None,
     receipt: IndependentApprovalReceipt | None = None,
@@ -808,7 +847,38 @@ def validate_handoff_package(
                 message="GateVerdict is not bound to the supplied PlanValidationRecord",
             )
         )
-    if requires_independent_approval(plan):
+    if (gate.trust_policy_version, gate.trust_policy_hash) != (
+        trust_policy.policy_version,
+        content_hash(trust_policy),
+    ):
+        issues.append(
+            ValidationIssue(
+                code="GATE_TRUST_POLICY_BINDING_MISMATCH",
+                message="GateVerdict is not bound to the supplied ProjectTrustPolicy",
+            )
+        )
+    if trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED:
+        if compilation_receipt is None:
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_PLAN_COMPILATION_RECEIPT",
+                    message="independent approval policy requires grounded compiler lineage",
+                )
+            )
+        else:
+            issues.extend(
+                validate_plan_compilation_receipt(plan, compilation_receipt).issues
+            )
+            if (
+                gate.plan_compilation_receipt_id,
+                gate.plan_compilation_receipt_hash,
+            ) != (compilation_receipt.receipt_id, compilation_receipt.content_hash):
+                issues.append(
+                    ValidationIssue(
+                        code="GATE_COMPILATION_RECEIPT_BINDING_MISMATCH",
+                        message="GateVerdict is not bound to the PlanCompilationReceipt",
+                    )
+                )
         if review_input is None or review is None or receipt is None:
             issues.append(
                 ValidationIssue(
@@ -831,6 +901,8 @@ def validate_handoff_package(
                         message="GateVerdict is not bound to the independent approval receipt",
                     )
                 )
+    elif compilation_receipt is not None:
+        issues.extend(validate_plan_compilation_receipt(plan, compilation_receipt).issues)
     if not human_selected:
         issues.append(ValidationIssue(code="HUMAN_SELECTION_REQUIRED", message="explicit human selection is required"))
     if (handoff.source_plan_id, handoff.source_plan_version, handoff.source_plan_hash) != (plan.plan_id, plan.version, plan_hash):
@@ -863,6 +935,7 @@ REQUIRED_EXPORT_FILES = frozenset(
         "approvals/plan-review.yaml",
         "approvals/plan-validation.yaml",
         "approvals/plan-gate.yaml",
+        "approvals/project-trust-policy.yaml",
         "capability-bindings.yaml",
         "evidence-manifest.jsonl",
         "decisions.jsonl",
@@ -875,6 +948,7 @@ INDEPENDENT_APPROVAL_EXPORT_FILES = frozenset(
         "approvals/approval-review-input.yaml",
         "approvals/approval-review-record.yaml",
         "approvals/independent-approval-receipt.yaml",
+        "provenance/plan-compilation-receipt.yaml",
     }
 )
 
@@ -886,10 +960,14 @@ def _load_jsonl(path: Path) -> list[Any]:
 def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
     try:
         plan = ScientificQuestionPlan.model_validate(load_data(export_dir / "selected-plan.yaml"))
+        trust_policy = ProjectTrustPolicy.model_validate(
+            load_data(export_dir / "approvals/project-trust-policy.yaml")
+        )
         review_input = None
         review = None
         receipt = None
-        if requires_independent_approval(plan):
+        compilation_receipt = None
+        if trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED:
             review_input = ApprovalReviewInput.model_validate(
                 load_data(export_dir / "approvals/approval-review-input.yaml")
             )
@@ -898,6 +976,9 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
             )
             receipt = IndependentApprovalReceipt.model_validate(
                 load_data(export_dir / "approvals/independent-approval-receipt.yaml")
+            )
+            compilation_receipt = PlanCompilationReceipt.model_validate(
+                load_data(export_dir / "provenance/plan-compilation-receipt.yaml")
             )
         manifest = ExportManifest.model_validate(load_data(export_dir / "manifest.yaml"))
         handoff = AgentHandoffPackage.model_validate(load_data(export_dir / "handoff-package.yaml"))
@@ -952,8 +1033,23 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
     if not validation.valid or not gate.passed:
         issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="export contains a failed validation record or gate"))
     issues.extend(validate_approval_state(plan, verdict).issues)
-    if requires_independent_approval(plan):
-        if review_input is None or review is None or receipt is None:
+    if (gate.trust_policy_version, gate.trust_policy_hash) != (
+        trust_policy.policy_version,
+        content_hash(trust_policy),
+    ):
+        issues.append(
+            ValidationIssue(
+                code="EXPORT_SEMANTIC_MISMATCH",
+                message="gate does not bind the exported ProjectTrustPolicy",
+            )
+        )
+    if trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED:
+        if (
+            review_input is None
+            or review is None
+            or receipt is None
+            or compilation_receipt is None
+        ):
             issues.append(
                 ValidationIssue(
                     code="MISSING_INDEPENDENT_APPROVAL",
@@ -961,6 +1057,11 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
                 )
             )
         else:
+            issues.extend(
+                validate_plan_compilation_receipt(
+                    plan, compilation_receipt
+                ).issues
+            )
             issues.extend(
                 validate_independent_approval_chain(
                     plan, verdict, review_input, review, receipt
@@ -974,6 +1075,19 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
                     ValidationIssue(
                         code="EXPORT_SEMANTIC_MISMATCH",
                         message="gate does not bind the exported independent approval receipt",
+                    )
+                )
+            if (
+                gate.plan_compilation_receipt_id,
+                gate.plan_compilation_receipt_hash,
+            ) != (
+                compilation_receipt.receipt_id,
+                compilation_receipt.content_hash,
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="EXPORT_SEMANTIC_MISMATCH",
+                        message="gate does not bind the exported PlanCompilationReceipt",
                     )
                 )
     declared_evidence = {reference.evidence_id for reference in plan.evidence_refs}
@@ -1075,7 +1189,7 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
         set(REQUIRED_EXPORT_FILES)
         | (
             set(INDEPENDENT_APPROVAL_EXPORT_FILES)
-            if requires_independent_approval(plan)
+            if trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED
             else set()
         )
         | expected_task_files
@@ -1187,16 +1301,16 @@ def validate_export(export_dir: Path) -> ValidationReport:
     }
     expected_files = safe_checksum_paths | {"checksums.json"}
     required_export_files = set(REQUIRED_EXPORT_FILES)
-    selected_plan_path = export_dir / "selected-plan.yaml"
-    if selected_plan_path.is_file():
+    trust_policy_path = export_dir / "approvals/project-trust-policy.yaml"
+    if trust_policy_path.is_file():
         try:
-            selected_plan = ScientificQuestionPlan.model_validate(
-                load_data(selected_plan_path)
+            trust_policy = ProjectTrustPolicy.model_validate(
+                load_data(trust_policy_path)
             )
         except (OSError, ValueError):
             pass
         else:
-            if requires_independent_approval(selected_plan):
+            if trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED:
                 required_export_files.update(INDEPENDENT_APPROVAL_EXPORT_FILES)
     for relative_path in sorted(required_export_files - actual_files):
         issues.append(
