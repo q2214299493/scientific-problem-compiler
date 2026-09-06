@@ -14,6 +14,7 @@ from ..repositories import KnowledgeRepositories
 from ..serialization import content_hash, to_primitive
 from ..validators import (
     EvidenceSpanRepository,
+    validate_approval_claim_evidence_coherence,
     validate_plan_validation_record,
     validate_question_plan,
 )
@@ -98,6 +99,23 @@ class ApprovalContextResolver:
                 "FABRICATED_CANDIDATE_CLAIM_REF",
                 "candidate provenance references a non-allowlisted SourceClaim",
             )
+        claim_records = {
+            claim.claim_id: claim for claim in evidence_packet.source_claims
+        }
+        candidate_evidence_ids = {
+            reference.evidence_id for reference in candidate_plan.evidence_refs
+        }
+        required_claim_evidence = {
+            evidence_id
+            for claim_id in candidate_claim_ids
+            for evidence_id in claim_records[claim_id].evidence_refs
+        }
+        if not required_claim_evidence.issubset(candidate_evidence_ids):
+            raise ApprovalContextError(
+                "APPROVAL_CLAIM_EVIDENCE_MISMATCH",
+                "candidate evidence does not cover every SourceClaim named by candidate provenance",
+            )
+
         current_report = validate_question_plan(
             candidate_plan,
             planning_input.scientific_capabilities,
@@ -174,4 +192,15 @@ class ApprovalContextResolver:
         })
         review_input_id = f"approval-review-input-{content_hash(identity)[:24]}"
         payload = {"review_input_id": review_input_id, **identity}
-        return ApprovalReviewInput(**payload, content_hash=content_hash(payload))
+        review_input = ApprovalReviewInput(
+            **payload, content_hash=content_hash(payload)
+        )
+        coherence = validate_approval_claim_evidence_coherence(
+            candidate_plan, review_input
+        )
+        if not coherence.valid:
+            raise ApprovalContextError(
+                coherence.issues[0].code,
+                "; ".join(issue.message for issue in coherence.issues),
+            )
+        return review_input

@@ -54,6 +54,7 @@ from .models import (
     FixResolution,
     GateVerdict,
     HumanDecisionResolution,
+    IndependentApprovalReceipt,
     IntentFingerprint,
     IntentInterpretation,
     InterpretationProposal,
@@ -361,6 +362,12 @@ def review(
     verdict_output: Annotated[
         Path | None, typer.Option("--verdict-output")
     ] = None,
+    review_input_output: Annotated[
+        Path | None, typer.Option("--review-input-output")
+    ] = None,
+    receipt_output: Annotated[
+        Path | None, typer.Option("--receipt-output")
+    ] = None,
     approver_id: Annotated[
         str, typer.Option("--approver-id")
     ] = "independent-scientific-approver",
@@ -424,7 +431,22 @@ def review(
         raise typer.Exit(1) from error
 
     final_verdict_output = verdict_output or output.with_name("approval-verdict.yaml")
-    existing = tuple(path for path in (output, final_verdict_output) if path.exists())
+    final_review_input_output = review_input_output or output.with_name(
+        "approval-review-input.yaml"
+    )
+    final_receipt_output = receipt_output or output.with_name(
+        "independent-approval-receipt.yaml"
+    )
+    existing = tuple(
+        path
+        for path in (
+            output,
+            final_verdict_output,
+            final_review_input_output,
+            final_receipt_output,
+        )
+        if path.exists()
+    )
     if existing:
         raise typer.BadParameter(
             "refusing to overwrite approval outputs: "
@@ -432,6 +454,8 @@ def review(
         )
     dump_yaml(output, result.review)
     dump_yaml(final_verdict_output, result.verdict)
+    dump_yaml(final_review_input_output, review_input)
+    dump_yaml(final_receipt_output, result.receipt)
     typer.echo(
         json.dumps(
             {
@@ -441,6 +465,9 @@ def review(
                 "decision": result.verdict.decision,
                 "review_output": str(output),
                 "verdict_output": str(final_verdict_output),
+                "review_input_output": str(final_review_input_output),
+                "receipt_id": result.receipt.receipt_id,
+                "receipt_output": str(final_receipt_output),
                 "plan_gate_passed": False,
             },
             indent=2,
@@ -470,7 +497,7 @@ def approve(
         Path | None, typer.Option("--human-decision-resolutions", exists=True, dir_okay=False)
     ] = None,
 ) -> None:
-    """Create an independent, hash-bound approval verdict without modifying the plan."""
+    """LEGACY/manual verdict mode; it cannot satisfy Phase 2D independent approval."""
     plan = load_model(plan_file, ScientificQuestionPlan)
     scores = ApprovalScores(**{name: score for name in ApprovalScores.model_fields})
     required_fixes = tuple(
@@ -506,7 +533,7 @@ def approve(
         human_decision_resolutions=human_decision_resolutions,
     )
     dump_yaml(output, verdict)
-    typer.echo(str(output))
+    typer.echo(f"legacy/manual approval verdict: {output}")
 
 
 @app.command()
@@ -532,6 +559,18 @@ def export(
     ],
     gate_file: Annotated[Path, typer.Option("--gate", exists=True, dir_okay=False)],
     export_id: Annotated[str, typer.Option("--export-id")],
+    review_input_file: Annotated[
+        Path | None,
+        typer.Option("--review-input", exists=True, dir_okay=False),
+    ] = None,
+    review_record_file: Annotated[
+        Path | None,
+        typer.Option("--review-record", exists=True, dir_okay=False),
+    ] = None,
+    receipt_file: Annotated[
+        Path | None,
+        typer.Option("--approval-receipt", exists=True, dir_okay=False),
+    ] = None,
     target: Annotated[str, typer.Option("--target")] = "ft-agent",
     exports_dir: Annotated[Path, typer.Option("--exports-dir")] = Path("exports"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
@@ -544,6 +583,21 @@ def export(
     verdict = load_model(verdict_file, ApprovalVerdict)
     validation_record = load_model(validation_file, PlanValidationRecord)
     gate = load_model(gate_file, GateVerdict)
+    review_input = (
+        load_model(review_input_file, ApprovalReviewInput)
+        if review_input_file is not None
+        else None
+    )
+    review_record = (
+        load_model(review_record_file, ApprovalReviewRecord)
+        if review_record_file is not None
+        else None
+    )
+    receipt = (
+        load_model(receipt_file, IndependentApprovalReceipt)
+        if receipt_file is not None
+        else None
+    )
     try:
         path = GenericExportService(
             exports_dir,
@@ -556,6 +610,9 @@ def export(
             human_selected=human_selected,
             adapter=FTAgentAdapter(),
             export_id=export_id,
+            review_input=review_input,
+            review=review_record,
+            receipt=receipt,
         )
     except ExportError as error:
         _emit_report(error.report)
@@ -610,6 +667,7 @@ def schema_command(
         ApprovalLLMResponse,
         ApprovalReviewInput,
         ApprovalReviewRecord,
+        IndependentApprovalReceipt,
         IntentInterpretation,
         AmbiguityAssessment,
         ObservableDraft,

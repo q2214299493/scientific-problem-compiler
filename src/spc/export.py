@@ -9,9 +9,12 @@ from typing import Protocol
 from .domains import DomainPackLoader
 from .models import (
     AgentHandoffPackage,
+    ApprovalReviewInput,
+    ApprovalReviewRecord,
     ApprovalVerdict,
     ExportManifest,
     GateVerdict,
+    IndependentApprovalReceipt,
     PlanValidationRecord,
     ScientificQuestionPlan,
 )
@@ -61,6 +64,9 @@ class GenericExportService:
         human_selected: bool,
         adapter: AgentAdapter,
         export_id: str,
+        review_input: ApprovalReviewInput | None = None,
+        review: ApprovalReviewRecord | None = None,
+        receipt: IndependentApprovalReceipt | None = None,
     ) -> Path:
         require_safe_path_component(adapter.target_agent, field="target_agent")
         require_safe_path_component(export_id, field="export_id")
@@ -114,6 +120,9 @@ class GenericExportService:
                 gate,
                 handoff,
                 human_selected=human_selected,
+                review_input=review_input,
+                review=review,
+                receipt=receipt,
             ).issues
         )
         if preflight_issues:
@@ -122,7 +131,17 @@ class GenericExportService:
         with tempfile.TemporaryDirectory(prefix=f".{export_id}-", dir=destination.parent) as temporary:
             staging = Path(temporary) / "package"
             staging.mkdir()
-            self._write_package(staging, plan, verdict, validation_record, gate, handoff)
+            self._write_package(
+                staging,
+                plan,
+                verdict,
+                validation_record,
+                gate,
+                handoff,
+                review_input=review_input,
+                review=review,
+                receipt=receipt,
+            )
             staging_verification = validate_export(staging)
             if not staging_verification.valid:
                 raise ExportError(staging_verification)
@@ -137,6 +156,10 @@ class GenericExportService:
         validation_record: PlanValidationRecord,
         gate: GateVerdict,
         handoff: AgentHandoffPackage,
+        *,
+        review_input: ApprovalReviewInput | None = None,
+        review: ApprovalReviewRecord | None = None,
+        receipt: IndependentApprovalReceipt | None = None,
     ) -> None:
         plan_hash = content_hash(plan)
         for storage_id, field in (
@@ -172,6 +195,15 @@ class GenericExportService:
         dump_yaml(root / "approvals" / "plan-review.yaml", verdict)
         dump_yaml(root / "approvals" / "plan-validation.yaml", validation_record)
         dump_yaml(root / "approvals" / "plan-gate.yaml", gate)
+        if review_input is not None:
+            dump_yaml(root / "approvals" / "approval-review-input.yaml", review_input)
+        if review is not None:
+            dump_yaml(root / "approvals" / "approval-review-record.yaml", review)
+        if receipt is not None:
+            dump_yaml(
+                root / "approvals" / "independent-approval-receipt.yaml",
+                receipt,
+            )
         dump_yaml(root / "capability-bindings.yaml", list(handoff.capability_bindings))
         dump_yaml(root / "execution-policy.yaml", handoff.execution_policy)
         evidence_lines = [json.dumps(item.model_dump(mode="json"), sort_keys=True) for item in plan.evidence_refs]

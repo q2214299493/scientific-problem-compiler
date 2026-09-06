@@ -16,8 +16,13 @@ from spc.approval import (
     ApprovalStructuredOutputError,
     IndependentApprovalService,
     MockApprovalProvider,
+    ScientificPlanApprover,
     StructuredLLMApprovalProvider,
+    bind_gate_verdict,
+    validate_approval_response,
+    validate_independent_approval_chain,
 )
+from spc.adapters.ft_agent import FTAgentAdapter
 from spc.cli import app
 from spc.compiler import ScientificProblemCompiler
 from spc.interpretation import MockInterpretationProvider, ScientificEvidencePacketBuilder
@@ -30,9 +35,12 @@ from spc.models import (
     ApprovalReviewInput,
     ApprovalReviewRecord,
     ApprovalReviewScores,
+    ApprovalScores,
     ApprovalVerdict,
     EvidenceClassification,
+    EvidenceReference,
     EvidenceSpan,
+    IndependentApprovalReceipt,
     PlanValidationRecord,
     RequiredHumanDecision,
     ScientificContextPacket,
@@ -40,6 +48,7 @@ from spc.models import (
     ScientificPlanningInput,
     ScientificQuestionPlan,
 )
+from spc.export import ExportError, GenericExportService
 from spc.planning import (
     FakeLLMTransport,
     MockPlanningProvider,
@@ -51,6 +60,7 @@ from spc.serialization import content_hash, dump_json, dump_yaml, load_model
 from spc.validators import (
     build_plan_validation_record,
     validate_approval_boundary,
+    validate_export,
     validate_question_plan,
 )
 
@@ -849,6 +859,10 @@ def test_review_cli_writes_review_and_verdict_without_gate(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert load_model(output, ApprovalReviewRecord)
     assert load_model(tmp_path / "approval-verdict.yaml", ApprovalVerdict)
+    assert load_model(
+        tmp_path / "independent-approval-receipt.yaml",
+        IndependentApprovalReceipt,
+    )
     assert not (tmp_path / "plan-gate.yaml").exists()
 
 
@@ -860,5 +874,306 @@ def test_schema_cli_exports_phase2d_contracts(tmp_path) -> None:
         "ApprovalReviewInput",
         "ApprovalLLMResponse",
         "ApprovalReviewRecord",
+        "IndependentApprovalReceipt",
     ):
         assert (output_dir / f"{model_name}.schema.json").is_file()
+
+
+def independently_approved(case: ReviewCase):
+    return IndependentApprovalService(
+        StaticApprovalProvider(approving_response(case.review_input)),
+        approver_id="independent-reviewer",
+    ).review(case.review_input)
+
+
+def test_manual_verdict_cannot_masquerade_as_independent_approval(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    independent = independently_approved(case)
+    manual = ScientificPlanApprover("manual-reviewer").bind_verdict(
+        case.plan,
+        verdict_id="manual-verdict",
+        scores=ApprovalScores(**{name: 5 for name in ApprovalScores.model_fields}),
+        decision=ApprovalDecision.APPROVE,
+    )
+    report = validate_independent_approval_chain(
+        case.plan,
+        manual,
+        case.review_input,
+        independent.review,
+        independent.receipt,
+    )
+    assert "INDEPENDENT_VERDICT_HASH_MISMATCH" in {
+        issue.code for issue in report.issues
+    }
+    with pytest.raises(ValueError, match="INVALID_INDEPENDENT_APPROVAL_CHAIN"):
+        bind_gate_verdict(
+            case.plan,
+            manual,
+            case.validation_record,
+            gate_id="gate-manual",
+            passed=True,
+            review_input=case.review_input,
+            review=independent.review,
+            receipt=independent.receipt,
+        )
+
+
+def test_mismatched_review_hash_is_rejected(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    data = result.receipt.model_dump(mode="python")
+    data["review_hash"] = "0" * 64
+    changed = IndependentApprovalReceipt.model_construct(**data)
+    report = validate_independent_approval_chain(
+        case.plan, result.verdict, case.review_input, result.review, changed
+    )
+    assert "INDEPENDENT_REVIEW_HASH_MISMATCH" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_mismatched_verdict_hash_is_rejected(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    data = result.receipt.model_dump(mode="python")
+    data["verdict_hash"] = "0" * 64
+    changed = IndependentApprovalReceipt.model_construct(**data)
+    report = validate_independent_approval_chain(
+        case.plan, result.verdict, case.review_input, result.review, changed
+    )
+    assert "INDEPENDENT_VERDICT_HASH_MISMATCH" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_review_for_plan_a_cannot_approve_plan_b(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    changed = case.plan.model_copy(update={"latent_concern": "A different concern"})
+    identity = {
+        name: getattr(changed, name)
+        for name in type(changed).model_fields
+        if name != "plan_id"
+    }
+    plan_b = changed.model_copy(
+        update={"plan_id": f"plan-{content_hash(identity)[:24]}"}
+    )
+    report = validate_independent_approval_chain(
+        plan_b, result.verdict, case.review_input, result.review, result.receipt
+    )
+    assert {
+        "REVIEW_CANDIDATE_BINDING_MISMATCH",
+        "INDEPENDENT_RECEIPT_CANDIDATE_MISMATCH",
+    }.issubset({issue.code for issue in report.issues})
+
+
+def test_stale_review_record_is_rejected(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    data = {
+        name: getattr(result.review, name)
+        for name in type(result.review).model_fields
+    }
+    data["policy_reasons"] = ("changed",)
+    stale = ApprovalReviewRecord.model_construct(**data)
+    report = validate_independent_approval_chain(
+        case.plan, result.verdict, case.review_input, stale, result.receipt
+    )
+    assert "STALE_APPROVAL_REVIEW_RECORD" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_claim_evidence_mismatch_at_approval_boundary_is_rejected(tmp_path) -> None:
+    case = build_review_case(
+        tmp_path,
+        evidence_records=(
+            {
+                "evidence_id": "ev-a",
+                "text": "We hypothesize that CO activation controls the pathway comparison.",
+                "source_role": "author",
+                "source_type": "manuscript",
+            },
+            {
+                "evidence_id": "ev-b",
+                "text": "Chain growth is a separate mechanistic topic.",
+                "source_role": "author",
+                "source_type": "manuscript",
+            },
+        ),
+    )
+    claim_ids = {
+        entry.removeprefix("claim:")
+        for entry in case.plan.source_query_manifest
+        if entry.startswith("claim:")
+    }
+    required = {
+        evidence_id
+        for claim in case.evidence_packet.source_claims
+        if claim.claim_id in claim_ids
+        for evidence_id in claim.evidence_refs
+    }
+    ev_b = case.store.get("ev-b")
+    retained = (
+        EvidenceReference(
+            evidence_id=ev_b.evidence_id,
+            source_id=ev_b.source_id,
+            source_version=ev_b.source_version,
+        ),
+    )
+    assert required
+    changed = case.plan.model_copy(update={"evidence_refs": retained})
+    identity = {
+        name: getattr(changed, name)
+        for name in type(changed).model_fields
+        if name != "plan_id"
+    }
+    changed = changed.model_copy(
+        update={"plan_id": f"plan-{content_hash(identity)[:24]}"}
+    )
+    report = validate_question_plan(
+        changed, case.planning_input.scientific_capabilities, case.store
+    )
+    record = build_plan_validation_record(
+        changed, report, validation_id="validation-claim-mismatch"
+    )
+    with pytest.raises(
+        ApprovalContextError, match="APPROVAL_CLAIM_EVIDENCE_MISMATCH"
+    ):
+        ApprovalContextResolver().resolve(
+            case.context,
+            case.evidence_packet,
+            case.planning_input,
+            changed,
+            record,
+            case.knowledge,
+            case.store,
+        )
+
+
+def test_valid_independent_review_receipt_verdict_chain_passes(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    report = validate_independent_approval_chain(
+        case.plan,
+        result.verdict,
+        case.review_input,
+        result.review,
+        result.receipt,
+    )
+    assert report.valid
+    gate = bind_gate_verdict(
+        case.plan,
+        result.verdict,
+        case.validation_record,
+        gate_id="gate-independent",
+        passed=True,
+        review_input=case.review_input,
+        review=result.review,
+        receipt=result.receipt,
+    )
+    assert gate.independent_approval_receipt_id == result.receipt.receipt_id
+    assert gate.independent_approval_receipt_hash == result.receipt.content_hash
+
+
+def test_legacy_manual_approval_remains_distinguishable(
+    make_plan, evidence_repository
+) -> None:
+    plan = make_plan()
+    report = validate_question_plan(plan, evidence_repository=evidence_repository)
+    validation = build_plan_validation_record(
+        plan, report, validation_id="legacy-validation"
+    )
+    verdict = ScientificPlanApprover("manual-reviewer").bind_verdict(
+        plan,
+        verdict_id="legacy-manual-verdict",
+        scores=ApprovalScores(**{name: 5 for name in ApprovalScores.model_fields}),
+        decision=ApprovalDecision.APPROVE,
+    )
+    gate = bind_gate_verdict(
+        plan, verdict, validation, gate_id="legacy-gate", passed=True
+    )
+    assert plan.source_proposal is None
+    assert gate.independent_approval_receipt_id is None
+    assert gate.independent_approval_receipt_hash is None
+
+
+def test_export_refuses_missing_phase2d_review_binding(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    gate = bind_gate_verdict(
+        case.plan,
+        result.verdict,
+        case.validation_record,
+        gate_id="ungrounded-gate",
+        passed=False,
+    ).model_copy(update={"passed": True})
+    with pytest.raises(ExportError) as caught:
+        GenericExportService(tmp_path / "exports", case.store).export(
+            plan=case.plan,
+            verdict=result.verdict,
+            validation_record=case.validation_record,
+            gate=gate,
+            human_selected=True,
+            adapter=FTAgentAdapter(),
+            export_id="missing-independent-review",
+        )
+    assert "MISSING_INDEPENDENT_APPROVAL" in {
+        issue.code for issue in caught.value.report.issues
+    }
+
+
+def test_valid_phase2d_export_preserves_and_validates_trust_chain(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    gate = bind_gate_verdict(
+        case.plan,
+        result.verdict,
+        case.validation_record,
+        gate_id="independent-gate",
+        passed=True,
+        review_input=case.review_input,
+        review=result.review,
+        receipt=result.receipt,
+    )
+    output = GenericExportService(tmp_path / "exports", case.store).export(
+        plan=case.plan,
+        verdict=result.verdict,
+        validation_record=case.validation_record,
+        gate=gate,
+        human_selected=True,
+        adapter=FTAgentAdapter(),
+        export_id="independent-review",
+        review_input=case.review_input,
+        review=result.review,
+        receipt=result.receipt,
+    )
+    assert validate_export(output).valid
+    assert (output / "approvals" / "approval-review-input.yaml").is_file()
+    assert (output / "approvals" / "approval-review-record.yaml").is_file()
+    assert (output / "approvals" / "independent-approval-receipt.yaml").is_file()
+
+
+def test_approval_findings_validate_task_and_capability_references(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    response = approving_response(case.review_input)
+    score = response.scores.intent_fidelity.model_copy(
+        update={
+            "task_refs": ("fabricated-task",),
+            "capability_refs": ("fabricated-capability",),
+        }
+    )
+    scores = response.scores.model_copy(update={"intent_fidelity": score})
+    response = response.model_copy(update={"scores": scores})
+    report = validate_approval_response(response, case.review_input)
+    assert "FABRICATED_APPROVAL_TASK_REF" in {
+        issue.code for issue in report.issues
+    }
+    assert "FABRICATED_APPROVAL_CAPABILITY_REF" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_plan_validation_version_is_bumped(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    assert case.validation_record.validator_version == "2.1.0"

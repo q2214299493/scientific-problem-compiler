@@ -11,6 +11,9 @@ from pydantic import BaseModel, ConfigDict
 from .models import (
     AgentHandoffPackage,
     ApprovalDecision,
+    ApprovalReviewInput,
+    ApprovalReviewRecord,
+    ApprovalScores,
     ApprovalVerdict,
     DAGTask,
     EvidenceClassification,
@@ -19,6 +22,7 @@ from .models import (
     ExportManifest,
     GateVerdict,
     GroundedStatement,
+    IndependentApprovalReceipt,
     PlanValidationRecord,
     ScientificCapability,
     ScientificQuestionPlan,
@@ -289,6 +293,233 @@ def validate_approval_boundary(
     return _report(issues)
 
 
+def requires_independent_approval(plan: ScientificQuestionPlan) -> bool:
+    """Phase 2C materialized plans carry a source proposal; legacy plans do not."""
+
+    return plan.source_proposal is not None
+
+
+def validate_approval_claim_evidence_coherence(
+    plan: ScientificQuestionPlan,
+    review_input: ApprovalReviewInput,
+) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    claim_ids = {
+        entry.removeprefix("claim:")
+        for entry in plan.source_query_manifest
+        if entry.startswith("claim:")
+    }
+    claims_by_id = {claim.claim_id: claim for claim in review_input.source_claims}
+    missing_claims = claim_ids - set(claims_by_id)
+    if missing_claims:
+        issues.append(
+            ValidationIssue(
+                code="APPROVAL_CLAIM_BINDING_MISMATCH",
+                message="candidate provenance names SourceClaim records absent from the approval input",
+                path="source_query_manifest",
+            )
+        )
+    required_evidence = {
+        evidence_id
+        for claim_id in claim_ids & set(claims_by_id)
+        for evidence_id in claims_by_id[claim_id].evidence_refs
+    }
+    candidate_evidence = {reference.evidence_id for reference in plan.evidence_refs}
+    if not required_evidence.issubset(candidate_evidence):
+        issues.append(
+            ValidationIssue(
+                code="APPROVAL_CLAIM_EVIDENCE_MISMATCH",
+                message="candidate evidence does not cover every SourceClaim named by candidate provenance",
+                path="evidence_refs",
+            )
+        )
+    return _report(issues)
+
+
+def validate_independent_approval_chain(
+    plan: ScientificQuestionPlan,
+    verdict: ApprovalVerdict,
+    review_input: ApprovalReviewInput,
+    review: ApprovalReviewRecord,
+    receipt: IndependentApprovalReceipt,
+) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    plan_hash = content_hash(plan)
+
+    review_input_identity = review_input.model_dump(
+        mode="json",
+        exclude={"review_input_id", "content_hash"},
+        exclude_none=True,
+    )
+    expected_review_input_id = (
+        f"approval-review-input-{content_hash(review_input_identity)[:24]}"
+    )
+    expected_review_input_hash = content_hash(
+        {"review_input_id": expected_review_input_id, **review_input_identity}
+    )
+    if (
+        review_input.review_input_id != expected_review_input_id
+        or review_input.content_hash != expected_review_input_hash
+    ):
+        issues.append(
+            ValidationIssue(
+                code="STALE_APPROVAL_REVIEW_INPUT",
+                message="ApprovalReviewInput identity or content hash is stale",
+            )
+        )
+
+    review_identity = review.model_dump(
+        mode="json", exclude={"review_id", "content_hash"}, exclude_none=True
+    )
+    expected_review_id = f"approval-review-{content_hash(review_identity)[:24]}"
+    expected_review_hash = content_hash(
+        {"review_id": expected_review_id, **review_identity}
+    )
+    if review.review_id != expected_review_id or review.content_hash != expected_review_hash:
+        issues.append(
+            ValidationIssue(
+                code="STALE_APPROVAL_REVIEW_RECORD",
+                message="ApprovalReviewRecord identity or content hash is stale",
+            )
+        )
+
+    receipt_identity = receipt.model_dump(
+        mode="json", exclude={"receipt_id", "content_hash"}, exclude_none=True
+    )
+    expected_receipt_id = (
+        f"independent-approval-receipt-{content_hash(receipt_identity)[:24]}"
+    )
+    expected_receipt_hash = content_hash(
+        {"receipt_id": expected_receipt_id, **receipt_identity}
+    )
+    if receipt.receipt_id != expected_receipt_id or receipt.content_hash != expected_receipt_hash:
+        issues.append(
+            ValidationIssue(
+                code="STALE_INDEPENDENT_APPROVAL_RECEIPT",
+                message="IndependentApprovalReceipt identity or content hash is stale",
+            )
+        )
+
+    if (
+        review_input.candidate_plan.plan_id != plan.plan_id
+        or review_input.candidate_plan.version != plan.version
+        or review_input.candidate_plan_hash != plan_hash
+        or content_hash(review_input.candidate_plan) != plan_hash
+    ):
+        issues.append(
+            ValidationIssue(
+                code="REVIEW_CANDIDATE_BINDING_MISMATCH",
+                message="ApprovalReviewInput is not bound to the supplied candidate plan",
+            )
+        )
+    if (review.review_input_id, review.review_input_hash) != (
+        review_input.review_input_id,
+        review_input.content_hash,
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_REVIEW_INPUT_HASH_MISMATCH",
+                message="ApprovalReviewRecord is not bound to the supplied ApprovalReviewInput",
+            )
+        )
+    if (receipt.review_id, receipt.review_hash) != (
+        review.review_id,
+        review.content_hash,
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_REVIEW_HASH_MISMATCH",
+                message="receipt is not bound to the supplied ApprovalReviewRecord",
+            )
+        )
+    if (receipt.review_input_id, receipt.review_input_hash) != (
+        review_input.review_input_id,
+        review_input.content_hash,
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_REVIEW_INPUT_HASH_MISMATCH",
+                message="receipt is not bound to the supplied ApprovalReviewInput",
+            )
+        )
+    if (receipt.verdict_id, receipt.verdict_hash) != (
+        verdict.verdict_id,
+        content_hash(verdict),
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_VERDICT_HASH_MISMATCH",
+                message="receipt is not bound to the supplied ApprovalVerdict",
+            )
+        )
+    if (receipt.candidate_id, receipt.candidate_version, receipt.candidate_hash) != (
+        plan.plan_id,
+        plan.version,
+        plan_hash,
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_RECEIPT_CANDIDATE_MISMATCH",
+                message="receipt is not bound to the supplied candidate plan",
+            )
+        )
+    if (receipt.provider_id, receipt.provider_version) != (
+        review.provider_id,
+        review.provider_version,
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_PROVIDER_BINDING_MISMATCH",
+                message="receipt provider binding does not match the review record",
+            )
+        )
+    if receipt.approver_id != verdict.approver_id:
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_APPROVER_BINDING_MISMATCH",
+                message="receipt approver does not match the authoritative verdict",
+            )
+        )
+    expected_verdict_id = (
+        "approval-verdict-"
+        + content_hash(
+            {
+                "review_hash": review.content_hash,
+                "candidate_hash": plan_hash,
+                "approver_id": verdict.approver_id,
+            }
+        )[:24]
+    )
+    detailed_scores = review.response.scores
+    expected_scores = ApprovalScores(
+        **{
+            name: getattr(detailed_scores, name).score
+            for name in ApprovalScores.model_fields
+        }
+    )
+    expected_human_decisions = tuple(
+        decision.decision_id for decision in plan.required_human_decisions
+    )
+    if (
+        verdict.verdict_id != expected_verdict_id
+        or verdict.decision != review.policy_decision
+        or verdict.scores != expected_scores
+        or verdict.hard_red_flags
+        != tuple(flag.code for flag in review.response.hard_red_flags)
+        or verdict.required_fixes != review.response.required_fixes
+        or verdict.human_decisions_required != expected_human_decisions
+    ):
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_VERDICT_REVIEW_MISMATCH",
+                message="ApprovalVerdict is not the deterministic materialization of the independent review",
+            )
+        )
+    issues.extend(validate_approval_boundary(plan, verdict).issues)
+    issues.extend(validate_approval_claim_evidence_coherence(plan, review_input).issues)
+    return _report(issues)
+
+
 def build_plan_validation_record(
     plan: ScientificQuestionPlan,
     report: ValidationReport,
@@ -526,6 +757,9 @@ def validate_handoff_package(
     handoff: AgentHandoffPackage,
     *,
     human_selected: bool,
+    review_input: ApprovalReviewInput | None = None,
+    review: ApprovalReviewRecord | None = None,
+    receipt: IndependentApprovalReceipt | None = None,
 ) -> ValidationReport:
     issues = list(validate_approval_boundary(plan, verdict).issues)
     plan_hash = content_hash(plan)
@@ -574,6 +808,29 @@ def validate_handoff_package(
                 message="GateVerdict is not bound to the supplied PlanValidationRecord",
             )
         )
+    if requires_independent_approval(plan):
+        if review_input is None or review is None or receipt is None:
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_INDEPENDENT_APPROVAL",
+                    message="Phase 2D plan requires an independent review input, review record, and receipt",
+                )
+            )
+        else:
+            chain = validate_independent_approval_chain(
+                plan, verdict, review_input, review, receipt
+            )
+            issues.extend(chain.issues)
+            if (
+                gate.independent_approval_receipt_id,
+                gate.independent_approval_receipt_hash,
+            ) != (receipt.receipt_id, receipt.content_hash):
+                issues.append(
+                    ValidationIssue(
+                        code="GATE_INDEPENDENT_APPROVAL_BINDING_MISMATCH",
+                        message="GateVerdict is not bound to the independent approval receipt",
+                    )
+                )
     if not human_selected:
         issues.append(ValidationIssue(code="HUMAN_SELECTION_REQUIRED", message="explicit human selection is required"))
     if (handoff.source_plan_id, handoff.source_plan_version, handoff.source_plan_hash) != (plan.plan_id, plan.version, plan_hash):
@@ -613,6 +870,13 @@ REQUIRED_EXPORT_FILES = frozenset(
         "checksums.json",
     }
 )
+INDEPENDENT_APPROVAL_EXPORT_FILES = frozenset(
+    {
+        "approvals/approval-review-input.yaml",
+        "approvals/approval-review-record.yaml",
+        "approvals/independent-approval-receipt.yaml",
+    }
+)
 
 
 def _load_jsonl(path: Path) -> list[Any]:
@@ -622,6 +886,19 @@ def _load_jsonl(path: Path) -> list[Any]:
 def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
     try:
         plan = ScientificQuestionPlan.model_validate(load_data(export_dir / "selected-plan.yaml"))
+        review_input = None
+        review = None
+        receipt = None
+        if requires_independent_approval(plan):
+            review_input = ApprovalReviewInput.model_validate(
+                load_data(export_dir / "approvals/approval-review-input.yaml")
+            )
+            review = ApprovalReviewRecord.model_validate(
+                load_data(export_dir / "approvals/approval-review-record.yaml")
+            )
+            receipt = IndependentApprovalReceipt.model_validate(
+                load_data(export_dir / "approvals/independent-approval-receipt.yaml")
+            )
         manifest = ExportManifest.model_validate(load_data(export_dir / "manifest.yaml"))
         handoff = AgentHandoffPackage.model_validate(load_data(export_dir / "handoff-package.yaml"))
         verdict = ApprovalVerdict.model_validate(load_data(export_dir / "approvals/plan-review.yaml"))
@@ -675,6 +952,30 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
     if not validation.valid or not gate.passed:
         issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message="export contains a failed validation record or gate"))
     issues.extend(validate_approval_state(plan, verdict).issues)
+    if requires_independent_approval(plan):
+        if review_input is None or review is None or receipt is None:
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_INDEPENDENT_APPROVAL",
+                    message="export lacks the required independent approval artifacts",
+                )
+            )
+        else:
+            issues.extend(
+                validate_independent_approval_chain(
+                    plan, verdict, review_input, review, receipt
+                ).issues
+            )
+            if (
+                gate.independent_approval_receipt_id,
+                gate.independent_approval_receipt_hash,
+            ) != (receipt.receipt_id, receipt.content_hash):
+                issues.append(
+                    ValidationIssue(
+                        code="EXPORT_SEMANTIC_MISMATCH",
+                        message="gate does not bind the exported independent approval receipt",
+                    )
+                )
     declared_evidence = {reference.evidence_id for reference in plan.evidence_refs}
     for resolution in verdict.fix_resolutions:
         if not set(resolution.evidence_refs).issubset(declared_evidence):
@@ -772,6 +1073,11 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
                 issues.append(ValidationIssue(code="EXPORT_SEMANTIC_MISMATCH", message=f"exported fingerprint does not match selected plan: {fingerprint.fingerprint_id}"))
     expected_contract_files = (
         set(REQUIRED_EXPORT_FILES)
+        | (
+            set(INDEPENDENT_APPROVAL_EXPORT_FILES)
+            if requires_independent_approval(plan)
+            else set()
+        )
         | expected_task_files
         | expected_fingerprint_files
     )
@@ -880,7 +1186,19 @@ def validate_export(export_dir: Path) -> ValidationReport:
         if path.is_file() or path.is_symlink()
     }
     expected_files = safe_checksum_paths | {"checksums.json"}
-    for relative_path in sorted(REQUIRED_EXPORT_FILES - actual_files):
+    required_export_files = set(REQUIRED_EXPORT_FILES)
+    selected_plan_path = export_dir / "selected-plan.yaml"
+    if selected_plan_path.is_file():
+        try:
+            selected_plan = ScientificQuestionPlan.model_validate(
+                load_data(selected_plan_path)
+            )
+        except (OSError, ValueError):
+            pass
+        else:
+            if requires_independent_approval(selected_plan):
+                required_export_files.update(INDEPENDENT_APPROVAL_EXPORT_FILES)
+    for relative_path in sorted(required_export_files - actual_files):
         issues.append(
             ValidationIssue(
                 code="MISSING_REQUIRED_EXPORT_FILE",
@@ -909,6 +1227,6 @@ def validate_export(export_dir: Path) -> ValidationReport:
                         message="manifest file inventory does not match checksummed package files",
                     )
                 )
-    if REQUIRED_EXPORT_FILES.issubset(actual_files):
+    if required_export_files.issubset(actual_files):
         issues.extend(_semantic_export_issues(export_dir))
     return _report(issues)

@@ -13,6 +13,8 @@ def validate_approval_response(
     issues: list[ValidationIssue] = []
     allowed_evidence = set(review_input.allowed_evidence_ids)
     allowed_claims = set(review_input.allowed_claim_ids)
+    allowed_tasks = set(review_input.allowed_task_ids)
+    allowed_capabilities = set(review_input.allowed_capability_ids)
     allowed_decisions = {
         decision.decision_id
         for decision in review_input.candidate_plan.required_human_decisions
@@ -43,6 +45,22 @@ def validate_approval_response(
                     path=f"scores.{dimension}.claim_refs",
                 )
             )
+        if not set(score.task_refs).issubset(allowed_tasks):
+            issues.append(
+                ValidationIssue(
+                    code="FABRICATED_APPROVAL_TASK_REF",
+                    message=f"{dimension} score references a non-allowlisted task",
+                    path=f"scores.{dimension}.task_refs",
+                )
+            )
+        if not set(score.capability_refs).issubset(allowed_capabilities):
+            issues.append(
+                ValidationIssue(
+                    code="FABRICATED_APPROVAL_CAPABILITY_REF",
+                    message=f"{dimension} score references a non-allowlisted capability",
+                    path=f"scores.{dimension}.capability_refs",
+                )
+            )
     for index, flag in enumerate(response.hard_red_flags):
         if not set(flag.evidence_refs).issubset(allowed_evidence):
             issues.append(
@@ -58,6 +76,22 @@ def validate_approval_response(
                     code="FABRICATED_APPROVAL_CLAIM_REF",
                     message="hard red flag references a non-allowlisted claim",
                     path=f"hard_red_flags[{index}].claim_refs",
+                )
+            )
+        if not set(flag.task_refs).issubset(allowed_tasks):
+            issues.append(
+                ValidationIssue(
+                    code="FABRICATED_APPROVAL_TASK_REF",
+                    message="hard red flag references a non-allowlisted task",
+                    path=f"hard_red_flags[{index}].task_refs",
+                )
+            )
+        if not set(flag.capability_refs).issubset(allowed_capabilities):
+            issues.append(
+                ValidationIssue(
+                    code="FABRICATED_APPROVAL_CAPABILITY_REF",
+                    message="hard red flag references a non-allowlisted capability",
+                    path=f"hard_red_flags[{index}].capability_refs",
                 )
             )
     unknown_decisions = set(response.unresolved_human_decisions) - allowed_decisions

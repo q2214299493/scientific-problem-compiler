@@ -12,6 +12,7 @@ from .validators import (
     ApprovalResponseError,
     validate_approval_response,
 )
+from ..validators import validate_independent_approval_chain
 
 __all__ = (
     "ApprovalContextError",
@@ -28,4 +29,5 @@ __all__ = (
     "StructuredLLMApprovalProvider",
     "bind_gate_verdict",
     "validate_approval_response",
+    "validate_independent_approval_chain",
 )

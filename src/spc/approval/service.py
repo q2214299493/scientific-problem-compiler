@@ -7,6 +7,7 @@ from ..models import (
     ApprovalReviewRecord,
     ApprovalScores,
     ApprovalVerdict,
+    IndependentApprovalReceipt,
 )
 from ..serialization import content_hash, to_primitive
 from .materializer import ScientificPlanApprover
@@ -19,6 +20,7 @@ from .validators import ApprovalResponseError, validate_approval_response
 class ApprovalResult:
     review: ApprovalReviewRecord
     verdict: ApprovalVerdict
+    receipt: IndependentApprovalReceipt
 
 
 class IndependentApprovalService:
@@ -91,4 +93,27 @@ class IndependentApprovalService:
                 for decision in candidate_before.required_human_decisions
             ),
         )
-        return ApprovalResult(review=review, verdict=verdict)
+        receipt_identity = to_primitive({
+            "review_id": review.review_id,
+            "review_hash": review.content_hash,
+            "review_input_id": review_input.review_input_id,
+            "review_input_hash": review_input.content_hash,
+            "verdict_id": verdict.verdict_id,
+            "verdict_hash": content_hash(verdict),
+            "candidate_id": candidate_before.plan_id,
+            "candidate_version": candidate_before.version,
+            "candidate_hash": candidate_hash_before,
+            "approver_id": self.approver_id,
+            "provider_id": self.provider.provider_id,
+            "provider_version": self.provider.provider_version,
+        })
+        receipt_id = (
+            "independent-approval-receipt-"
+            + content_hash(receipt_identity)[:24]
+        )
+        receipt_payload = {"receipt_id": receipt_id, **receipt_identity}
+        receipt = IndependentApprovalReceipt(
+            **receipt_payload,
+            content_hash=content_hash(receipt_payload),
+        )
+        return ApprovalResult(review=review, verdict=verdict, receipt=receipt)

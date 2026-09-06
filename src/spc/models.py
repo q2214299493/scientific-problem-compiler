@@ -454,7 +454,7 @@ class PlanValidationRecord(StrictModel):
     domain_pack_version: str
     valid: bool
     issue_codes: tuple[str, ...] = ()
-    validator_version: str = "1.2.1"
+    validator_version: str = "2.1.0"
 
 
 class GateVerdict(StrictModel):
@@ -466,8 +466,20 @@ class GateVerdict(StrictModel):
     approval_verdict_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     plan_validation_id: str
     plan_validation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    independent_approval_receipt_id: str | None = None
+    independent_approval_receipt_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     passed: bool
     reasons: tuple[NonBlankStr, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_optional_receipt_binding(self) -> GateVerdict:
+        if (self.independent_approval_receipt_id is None) != (
+            self.independent_approval_receipt_hash is None
+        ):
+            raise ValueError("independent approval receipt ID and hash must be supplied together")
+        return self
 
 
 class ScientificCapability(StrictModel):
@@ -1186,6 +1198,8 @@ class ApprovalDimensionScore(StrictModel):
     rationale: NonBlankStr
     evidence_refs: tuple[NonBlankStr, ...] = ()
     claim_refs: tuple[NonBlankStr, ...] = ()
+    task_refs: tuple[NonBlankStr, ...] = ()
+    capability_refs: tuple[NonBlankStr, ...] = ()
 
 
 class ApprovalReviewScores(StrictModel):
@@ -1205,6 +1219,8 @@ class ApprovalHardRedFlag(StrictModel):
     plan_path: NonBlankStr | None = None
     evidence_refs: tuple[NonBlankStr, ...] = ()
     claim_refs: tuple[NonBlankStr, ...] = ()
+    task_refs: tuple[NonBlankStr, ...] = ()
+    capability_refs: tuple[NonBlankStr, ...] = ()
 
 
 class ApprovalLLMResponse(StrictModel):
@@ -1350,4 +1366,48 @@ class ApprovalReviewRecord(StrictModel):
         payload = {"review_id": expected_id, **identity}
         if self.content_hash != content_hash(payload):
             raise ValueError("ApprovalReviewRecord content_hash is invalid")
+        return self
+
+
+class IndependentApprovalReceipt(StrictModel):
+    receipt_id: NonBlankStr
+    review_id: NonBlankStr
+    review_hash: Sha256Str
+    review_input_id: NonBlankStr
+    review_input_hash: Sha256Str
+    verdict_id: NonBlankStr
+    verdict_hash: Sha256Str
+    candidate_id: NonBlankStr
+    candidate_version: NonBlankStr
+    candidate_hash: Sha256Str
+    approver_id: NonBlankStr
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> IndependentApprovalReceipt:
+        from .serialization import content_hash
+
+        expected_verdict_id = (
+            "approval-verdict-"
+            + content_hash(
+                {
+                    "review_hash": self.review_hash,
+                    "candidate_hash": self.candidate_hash,
+                    "approver_id": self.approver_id,
+                }
+            )[:24]
+        )
+        if self.verdict_id != expected_verdict_id:
+            raise ValueError("receipt verdict_id is not bound to the independent review")
+        identity = self.model_dump(
+            mode="json", exclude={"receipt_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"independent-approval-receipt-{content_hash(identity)[:24]}"
+        if self.receipt_id != expected_id:
+            raise ValueError("IndependentApprovalReceipt receipt_id is not content-bound")
+        payload = {"receipt_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("IndependentApprovalReceipt content_hash is invalid")
         return self

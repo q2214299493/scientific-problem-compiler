@@ -428,6 +428,8 @@ class MockApprovalProvider:
             ),
             evidence_refs=plan_evidence,
             claim_refs=plan_claim_ids,
+            task_refs=review_input.allowed_task_ids,
+            capability_refs=review_input.allowed_capability_ids,
         )
         scores = ApprovalReviewScores(
             intent_fidelity=score,

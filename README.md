@@ -84,3 +84,14 @@ spc review context.yaml evidence-packet.yaml planning-input.yaml `
 ```
 
 `StructuredLLMApprovalProvider` reuses the vendor-neutral transport but has a separate protocol, prompt, response schema, and provider identity from planning. Normal CI remains offline through `FakeLLMTransport`.
+
+Phase 2D.1 closes the approval trust chain with a content-bound
+`IndependentApprovalReceipt`. `spc review` now writes the review input, review
+record, authoritative verdict, and receipt. A Phase 2C-materialized plan cannot
+receive a passed Plan Gate or be exported unless those artifacts bind the same
+candidate, provider, approver, review, and verdict hashes. The legacy
+`spc approve` command remains available only for manual Phase 1 compatibility;
+its verdict has no independent-review receipt and cannot satisfy the Phase 2D
+boundary. Phase 2D export additionally requires `--review-input`,
+`--review-record`, and `--approval-receipt`; all three artifacts are preserved
+inside the immutable export package.
