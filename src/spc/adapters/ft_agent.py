@@ -15,6 +15,9 @@ from ..serialization import content_hash, load_data
 class FTAgentAdapter:
     target_agent = "ft-agent"
     supported_domains = ("fischer_tropsch",)
+    adapter_id = "spc.ft-agent-execution-adapter"
+    adapter_version = "1.0.0"
+    supported_environments = ("ft-agent-staging",)
 
     def __init__(self, catalog: AgentCapabilityCatalog | None = None) -> None:
         if catalog is None:
@@ -59,3 +62,33 @@ class FTAgentAdapter:
             capability_bindings=self.bind_capabilities(plan),
             execution_policy=ExecutionPolicy(),
         )
+
+    def map_capability(
+        self,
+        scientific_capability_id: str,
+        catalog: AgentCapabilityCatalog,
+    ) -> str | None:
+        """Resolve only mappings declared by the supplied agent catalog."""
+
+        if catalog.agent_id != self.target_agent:
+            return None
+        matches = sorted(
+            capability.capability_id
+            for capability in catalog.capabilities
+            if scientific_capability_id
+            in capability.supports_scientific_capability_ids
+        )
+        return matches[0] if len(matches) == 1 else None
+
+    def resource_requirements(
+        self,
+        executable_capability_id: str,
+        target_environment: str,
+    ) -> dict[str, str]:
+        """Describe the handoff boundary without producing execution commands."""
+
+        return {
+            "capability": executable_capability_id,
+            "environment": target_environment,
+            "allocation": "not_authorized",
+        }

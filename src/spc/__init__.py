@@ -5,6 +5,7 @@ from .models import (
     ApprovalReviewInput,
     ApprovalReviewRecord,
     ApprovalVerdict,
+    ExecutionProposal,
     IndependentApprovalReceipt,
     PlanCompilationReceipt,
     PlanValidationRecord,
@@ -13,6 +14,7 @@ from .models import (
     ProjectTrustPolicy,
     ScientificPlanningInput,
     ScientificQuestionPlan,
+    SPCExportPackage,
 )
 
 __all__ = [
@@ -20,6 +22,7 @@ __all__ = [
     "ApprovalReviewInput",
     "ApprovalReviewRecord",
     "ApprovalVerdict",
+    "ExecutionProposal",
     "IndependentApprovalReceipt",
     "PlanCompilationReceipt",
     "PlanValidationRecord",
@@ -28,5 +31,6 @@ __all__ = [
     "ProjectTrustPolicy",
     "ScientificPlanningInput",
     "ScientificQuestionPlan",
+    "SPCExportPackage",
 ]
 __version__ = "0.1.0"

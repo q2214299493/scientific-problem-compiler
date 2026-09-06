@@ -103,3 +103,22 @@ bind the exact policy and compilation receipt, so clearing or rewriting
 `source_proposal` cannot downgrade a grounded plan. Manual approval is accepted
 only when the caller explicitly supplies a `legacy_manual_allowed` policy.
 `source_proposal` remains lineage evidence, not an authorization control.
+
+## Phase 3A trusted downstream handoff
+
+Phase 3A adds a one-way trust boundary from an independently approved export
+to a downstream `ExecutionProposal`. `DownstreamImportValidator` first runs the
+complete export checksum and semantic validation, then binds the selected plan,
+manifest, passed gate, external trust policy, compilation receipt, independent
+approval receipt, and capability mappings into an immutable
+`SPCExportPackage`. Legacy/manual exports are not accepted at this boundary.
+
+`ExecutionProposalBuilder` resolves one exported task through the target
+agent's `AgentCapabilityCatalog` and a replaceable `AgentExecutionAdapter`.
+The adapter receives capability identifiers and catalog data, never the
+`ScientificQuestionPlan`. The resulting proposal records inputs, expected
+outputs, assumptions, resource metadata, validation requirements, and
+provenance requirements, but it is always `authorized: false` and
+`runnable: false`. SPC Core produces no shell command, submission request, or
+scientific execution input; downstream authorization and execution remain
+future phases.
