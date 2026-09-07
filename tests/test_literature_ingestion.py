@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -13,11 +14,13 @@ from spc.domains import DomainPackLoader
 from spc.knowledge.ingestion import (
     LiteratureExtractionError,
     LiteratureIngestionService,
+    LiteratureRepresentationSelector,
     PypdfLiteratureTextExtractor,
     create_evidence_span_from_canonical_text,
 )
 from spc.models import (
     CurationStatus,
+    HistoricalLiteratureEvidenceAuthorization,
     KnowledgeCurationRecord,
     LiteratureRepresentationSelection,
 )
@@ -50,12 +53,25 @@ def ingest_fixture(
     *,
     pdf_path: Path = BORN_DIGITAL_PDF,
     parser_version: str = "1.0.0",
+    select: bool = True,
 ) -> tuple[KnowledgeRepositories, SourceEvidenceStore, object]:
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
     evidence_store = SourceEvidenceStore(tmp_path / ".spc")
     outcome = LiteratureIngestionService(
         PypdfLiteratureTextExtractor(parser_version=parser_version)
     ).ingest(pdf_path, metadata(), repositories, evidence_store)
+    if select and outcome.canonical_text_id is not None:
+        selection_outcome = LiteratureRepresentationSelector().select(
+            outcome.literature_id,
+            outcome.ingestion_id,
+            "test-selector",
+            "Selected explicitly for the ingestion test fixture.",
+            repositories,
+            evidence_store,
+        )
+        outcome = outcome.model_copy(
+            update={"selection_id": selection_outcome.selection.selection_id}
+        )
     return repositories, evidence_store, outcome
 
 
@@ -77,6 +93,32 @@ def accept_literature(repositories: KnowledgeRepositories, literature_id: str) -
         content_hash=content_hash(payload),
     )
     repositories.curations.put(curation.curation_id, curation)
+    selection = repositories.literature_representation_selections.resolve_current(
+        literature_id
+    )
+    selection_identity = {
+        "target_type": "literature_representation_selection",
+        "target_id": selection.selection_id,
+        "target_hash": selection.content_hash,
+        "status": CurationStatus.ACCEPTED,
+        "curator_id": "curator-k1b",
+        "rationale": "Accepted after explicit representation review.",
+        "evidence_refs": (),
+    }
+    selection_curation_id = (
+        f"knowledge-curation-{content_hash(selection_identity)[:24]}"
+    )
+    selection_payload = {
+        "curation_id": selection_curation_id,
+        **selection_identity,
+    }
+    selection_curation = KnowledgeCurationRecord(
+        **selection_payload,
+        content_hash=content_hash(selection_payload),
+    )
+    repositories.curations.put(
+        selection_curation.curation_id, selection_curation
+    )
 
 
 def make_selection(
@@ -105,6 +147,36 @@ def make_selection(
         **payload,
         content_hash=content_hash(payload),
     )
+
+
+def put_curation(
+    repositories: KnowledgeRepositories,
+    *,
+    target_type: str,
+    target_id: str,
+    target_hash: str,
+    evidence_refs: tuple[str, ...] = (),
+    supersedes: str | None = None,
+) -> KnowledgeCurationRecord:
+    identity = {
+        "target_type": target_type,
+        "target_id": target_id,
+        "target_hash": target_hash,
+        "status": CurationStatus.ACCEPTED,
+        "curator_id": "curator-k1b2",
+        "rationale": "Accepted under the K1B.2 promotion policy.",
+        "evidence_refs": evidence_refs,
+        "supersedes_curation_id": supersedes,
+    }
+    identity = {key: value for key, value in identity.items() if value is not None}
+    curation_id = f"knowledge-curation-{content_hash(identity)[:24]}"
+    payload = {"curation_id": curation_id, **identity}
+    curation = KnowledgeCurationRecord(
+        **payload,
+        content_hash=content_hash(payload),
+    )
+    repositories.curations.put(curation.curation_id, curation)
+    return curation
 
 
 def test_raw_pdf_bytes_are_stored_unchanged_and_hash_is_deterministic(tmp_path) -> None:
@@ -260,7 +332,8 @@ def test_current_representation_selection_is_deterministic(tmp_path) -> None:
         first.literature_id
     )
     assert repeated.ingestion_id == first.ingestion_id
-    assert repeated.selection_id == first.selection_id == current.selection_id
+    assert repeated.selection_id is None
+    assert first.selection_id == current.selection_id
     assert len(repositories.literature_representation_selections.list()) == 1
 
 
@@ -285,7 +358,20 @@ def test_new_parser_version_preserves_literature_identity_and_old_ingestion(
     current = repositories.literature_representation_selections.resolve_current(
         first.literature_id
     )
-    assert current.selection_id == second.selection_id
+    assert second.selection_id is None
+    assert current.selection_id == first.selection_id
+    promoted = LiteratureRepresentationSelector().select(
+        second.literature_id,
+        second.ingestion_id,
+        "test-selector",
+        "Promote the reprocessed representation.",
+        repositories,
+        evidence_store,
+    )
+    current = repositories.literature_representation_selections.resolve_current(
+        first.literature_id
+    )
+    assert current.selection_id == promoted.selection.selection_id
     assert current.supersedes_selection_id == first.selection_id
     assert repositories.literature_representation_selections.get(
         first.selection_id
@@ -326,6 +412,7 @@ def test_selection_cannot_point_to_ingestion_from_another_literature(tmp_path) -
         supersedes_selection_id=first.selection_id,
     )
     repositories.literature_representation_selections.put(bad.selection_id, bad)
+    accept_literature(repositories, first.literature_id)
     with pytest.raises(ValueError, match="selection binding is invalid"):
         repositories.create_snapshot(
             evidence_store, DomainPackLoader().load("base").profile
@@ -341,6 +428,7 @@ def test_selection_ingestion_hash_mismatch_is_rejected(tmp_path) -> None:
         ingestion_hash="0" * 64,
     )
     repositories.literature_representation_selections.put(bad.selection_id, bad)
+    accept_literature(repositories, outcome.literature_id)
     with pytest.raises(ValueError, match="selection binding is invalid"):
         repositories.create_snapshot(
             evidence_store, DomainPackLoader().load("base").profile
@@ -352,9 +440,17 @@ def test_evidence_span_requires_selected_representation_by_default(tmp_path) -> 
     first_text = repositories.canonical_text_artifacts.read_text(
         first.canonical_text_id
     )
-    LiteratureIngestionService(
+    second = LiteratureIngestionService(
         PypdfLiteratureTextExtractor(parser_version="1.1.0")
     ).ingest(BORN_DIGITAL_PDF, metadata(), repositories, evidence_store)
+    LiteratureRepresentationSelector().select(
+        second.literature_id,
+        second.ingestion_id,
+        "test-selector",
+        "Promote the second representation.",
+        repositories,
+        evidence_store,
+    )
     start = first_text.index("Mechanistic connectivity")
     end = start + len("Mechanistic connectivity must be preserved.")
     with pytest.raises(ValueError, match="not the current selected"):
@@ -442,7 +538,9 @@ def test_partially_text_bearing_pdf_records_extraction_coverage(tmp_path) -> Non
     writer.add_blank_page(width=612, height=792)
     with partial_pdf.open("wb") as stream:
         writer.write(stream)
-    repositories, _, outcome = ingest_fixture(tmp_path, pdf_path=partial_pdf)
+    repositories, _, outcome = ingest_fixture(
+        tmp_path, pdf_path=partial_pdf, select=False
+    )
     ingestion = repositories.literature_ingestions.get(outcome.ingestion_id)
     assert ingestion.ingestion_status == "accepted"
     assert ingestion.total_pages == 2
@@ -450,6 +548,7 @@ def test_partially_text_bearing_pdf_records_extraction_coverage(tmp_path) -> Non
     assert ingestion.pages_without_text == 1
     assert ingestion.text_coverage_ratio == 0.5
     assert ingestion.warnings == ("page 2 has no extractable text",)
+    assert repositories.literature_representation_selections.list() == ()
 
 
 def test_textless_pdf_requires_ocr_without_attempting_it(tmp_path) -> None:
@@ -494,24 +593,33 @@ def test_generic_non_ft_pdf_fixture_and_cli_work_offline(tmp_path) -> None:
 
 def test_trusted_snapshot_changes_when_accepted_ingestion_changes(tmp_path) -> None:
     repositories, evidence_store, first = ingest_fixture(tmp_path)
+    accept_literature(repositories, first.literature_id)
     first_snapshot = repositories.create_snapshot(
         evidence_store, DomainPackLoader().load("base").profile
     )
     second = LiteratureIngestionService(
         PypdfLiteratureTextExtractor(parser_version="1.1.0")
     ).ingest(BORN_DIGITAL_PDF, metadata(), repositories, evidence_store)
+    promoted = LiteratureRepresentationSelector().select(
+        second.literature_id,
+        second.ingestion_id,
+        "test-selector",
+        "Promote the second parser output.",
+        repositories,
+        evidence_store,
+    )
+    accept_literature(repositories, second.literature_id)
     second_snapshot = repositories.create_snapshot(
         evidence_store, DomainPackLoader().load("base").profile
     )
     assert second_snapshot.snapshot_id != first_snapshot.snapshot_id
-    assert first.ingestion_id in second_snapshot.literature_ingestion_hashes
     assert second.ingestion_id in second_snapshot.literature_ingestion_hashes
     assert (
         first.selection_id
         in first_snapshot.literature_representation_selection_hashes
     )
     assert (
-        second.selection_id
+        promoted.selection.selection_id
         in second_snapshot.literature_representation_selection_hashes
     )
     assert (
@@ -524,6 +632,7 @@ def test_snapshot_changes_when_only_current_representation_selection_changes(
     tmp_path,
 ) -> None:
     repositories, evidence_store, outcome = ingest_fixture(tmp_path)
+    accept_literature(repositories, outcome.literature_id)
     first_snapshot = repositories.create_snapshot(
         evidence_store, DomainPackLoader().load("base").profile
     )
@@ -537,6 +646,7 @@ def test_snapshot_changes_when_only_current_representation_selection_changes(
     repositories.literature_representation_selections.put(
         replacement.selection_id, replacement
     )
+    accept_literature(repositories, outcome.literature_id)
     second_snapshot = repositories.create_snapshot(
         evidence_store, DomainPackLoader().load("base").profile
     )
@@ -546,4 +656,210 @@ def test_snapshot_changes_when_only_current_representation_selection_changes(
     )
     assert replacement.selection_id in (
         second_snapshot.literature_representation_selection_hashes
+    )
+
+
+def test_successful_ingestion_does_not_create_initial_selection(tmp_path) -> None:
+    repositories, _, outcome = ingest_fixture(tmp_path, select=False)
+    assert outcome.selection_id is None
+    assert repositories.literature_ingestions.get(outcome.ingestion_id)
+    assert repositories.literature_representation_selections.list() == ()
+
+
+def test_unselected_successful_ingestion_is_excluded_from_trusted_snapshot(
+    tmp_path,
+) -> None:
+    repositories, evidence_store, selected = ingest_fixture(tmp_path)
+    accept_literature(repositories, selected.literature_id)
+    unselected = LiteratureIngestionService(
+        PypdfLiteratureTextExtractor(parser_version="2.0.0")
+    ).ingest(BORN_DIGITAL_PDF, metadata(), repositories, evidence_store)
+    snapshot = repositories.create_snapshot(
+        evidence_store, DomainPackLoader().load("base").profile
+    )
+    assert selected.ingestion_id in snapshot.literature_ingestion_hashes
+    assert unselected.ingestion_id not in snapshot.literature_ingestion_hashes
+    assert selected.canonical_text_id in snapshot.canonical_text_artifact_hashes
+    assert unselected.canonical_text_id not in snapshot.canonical_text_artifact_hashes
+    assert repositories.literature_ingestions.get(unselected.ingestion_id)
+
+
+def test_tampered_unselected_canonical_does_not_break_current_snapshot(
+    tmp_path,
+) -> None:
+    repositories, evidence_store, selected = ingest_fixture(tmp_path)
+    accept_literature(repositories, selected.literature_id)
+    unselected = LiteratureIngestionService(
+        PypdfLiteratureTextExtractor(parser_version="2.0.0")
+    ).ingest(BORN_DIGITAL_PDF, metadata(), repositories, evidence_store)
+    canonical = repositories.canonical_text_artifacts.get(
+        unselected.canonical_text_id
+    )
+    path = repositories.root / canonical.stored_path
+    os.chmod(path, 0o666)
+    path.write_text("tampered unused historical representation", encoding="utf-8")
+    snapshot = repositories.create_snapshot(
+        evidence_store, DomainPackLoader().load("base").profile
+    )
+    assert selected.ingestion_id in snapshot.literature_ingestion_hashes
+    assert unselected.ingestion_id not in snapshot.literature_ingestion_hashes
+
+
+def test_uncurated_current_selection_cannot_enter_trusted_snapshot(tmp_path) -> None:
+    repositories, evidence_store, outcome = ingest_fixture(tmp_path, select=False)
+    selection = LiteratureRepresentationSelector().select(
+        outcome.literature_id,
+        outcome.ingestion_id,
+        "human-selector",
+        "Candidate representation requires independent curation.",
+        repositories,
+        evidence_store,
+    ).selection
+    document = repositories.literature_documents.get(outcome.literature_id)
+    put_curation(
+        repositories,
+        target_type="literature_document",
+        target_id=document.literature_id,
+        target_hash=document.content_hash,
+    )
+    with pytest.raises(ValueError, match="selection is not accepted"):
+        repositories.create_snapshot(
+            evidence_store, DomainPackLoader().load("base").profile
+        )
+    assert repositories.literature_representation_selections.get(
+        selection.selection_id
+    ) == selection
+
+
+def test_selector_cli_promotes_without_curating_or_extracting_science(tmp_path) -> None:
+    metadata_path = tmp_path / "metadata.yaml"
+    dump_yaml(metadata_path, metadata())
+    knowledge_dir = tmp_path / "knowledge"
+    state_dir = tmp_path / ".spc"
+    ingest_result = CliRunner().invoke(
+        app,
+        [
+            "ingest-literature",
+            str(BORN_DIGITAL_PDF),
+            "--metadata",
+            str(metadata_path),
+            "--knowledge-dir",
+            str(knowledge_dir),
+            "--state-dir",
+            str(state_dir),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+    ingested = json.loads(ingest_result.output)
+    assert ingested["selection_id"] is None
+    select_result = CliRunner().invoke(
+        app,
+        [
+            "select-literature-representation",
+            "--literature-id",
+            ingested["literature_id"],
+            "--ingestion-id",
+            ingested["ingestion_id"],
+            "--selected-by",
+            "cli-curator",
+            "--rationale",
+            "Explicit promotion after reviewing extraction metrics.",
+            "--knowledge-dir",
+            str(knowledge_dir),
+            "--state-dir",
+            str(state_dir),
+        ],
+    )
+    assert select_result.exit_code == 0, select_result.output
+    promoted = json.loads(select_result.output)
+    assert promoted["ingestion_status"] == "accepted"
+    assert promoted["text_coverage_ratio"] == 1.0
+    assert promoted["warnings"] == []
+    repositories = KnowledgeRepositories(knowledge_dir)
+    assert repositories.literature_representation_selections.get(
+        promoted["selection"]["selection_id"]
+    )
+    assert repositories.curations.list() == ()
+
+
+def test_historical_evidence_requires_explicit_authorization(tmp_path) -> None:
+    repositories, evidence_store, first = ingest_fixture(tmp_path)
+    accept_literature(repositories, first.literature_id)
+    second = LiteratureIngestionService(
+        PypdfLiteratureTextExtractor(parser_version="2.0.0")
+    ).ingest(BORN_DIGITAL_PDF, metadata(), repositories, evidence_store)
+    current = LiteratureRepresentationSelector().select(
+        second.literature_id,
+        second.ingestion_id,
+        "human-selector",
+        "Promote the reviewed second representation.",
+        repositories,
+        evidence_store,
+    ).selection
+    accept_literature(repositories, second.literature_id)
+
+    first_text = repositories.canonical_text_artifacts.read_text(
+        first.canonical_text_id
+    )
+    start = first_text.index("Mechanistic connectivity")
+    historical_evidence = create_evidence_span_from_canonical_text(
+        first.canonical_text_id,
+        start,
+        start + len("Mechanistic connectivity must be preserved."),
+        repositories,
+        evidence_store,
+        historical_ingestion=True,
+    )
+    current_curations = [
+        item
+        for item in repositories.curations.list()
+        if item.target_type == "literature_representation_selection"
+        and item.target_id == current.selection_id
+    ]
+    assert len(current_curations) == 1
+    put_curation(
+        repositories,
+        target_type="literature_representation_selection",
+        target_id=current.selection_id,
+        target_hash=current.content_hash,
+        evidence_refs=(historical_evidence.evidence_id,),
+        supersedes=current_curations[0].curation_id,
+    )
+    with pytest.raises(ValueError, match="historical literature evidence"):
+        repositories.create_snapshot(
+            evidence_store, DomainPackLoader().load("base").profile
+        )
+
+    first_ingestion = repositories.literature_ingestions.get(first.ingestion_id)
+    authorization_identity = {
+        "literature_id": first_ingestion.literature_id,
+        "ingestion_id": first_ingestion.ingestion_id,
+        "ingestion_hash": first_ingestion.content_hash,
+        "source_id": first_ingestion.source_id,
+        "source_version": first_ingestion.source_version,
+        "evidence_refs": (historical_evidence.evidence_id,),
+        "authorized_by": "historical-evidence-curator",
+        "rationale": "Permit this exact historical quotation for comparison.",
+    }
+    authorization_id = (
+        "historical-evidence-authorization-"
+        f"{content_hash(authorization_identity)[:24]}"
+    )
+    authorization_payload = {
+        "authorization_id": authorization_id,
+        **authorization_identity,
+    }
+    authorization = HistoricalLiteratureEvidenceAuthorization(
+        **authorization_payload,
+        content_hash=content_hash(authorization_payload),
+    )
+    repositories.historical_evidence_authorizations.put(
+        authorization.authorization_id, authorization
+    )
+    snapshot = repositories.create_snapshot(
+        evidence_store, DomainPackLoader().load("base").profile
+    )
+    assert historical_evidence.evidence_id in snapshot.evidence_span_hashes
+    assert authorization.authorization_id in (
+        snapshot.historical_evidence_authorization_hashes
     )

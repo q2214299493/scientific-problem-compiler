@@ -188,10 +188,14 @@ The `spc ingest-literature` command accepts a PDF plus bibliographic metadata.
 Trusted snapshots recursively verify the raw bytes, canonical UTF-8 text,
 block offsets, ingestion hashes and SourceDocument binding before use.
 
-K1B.1 adds an immutable `LiteratureRepresentationSelection` chain. The current
-selection, rather than mutable fields on `LiteratureDocument`, authoritatively
-chooses one ingestion/canonical/source representation. Evidence creation uses
-that current selection by default and requires an explicit historical mode for
-older representations. Ingestion records also retain page-level text coverage;
-expected parser failures persist a non-sensitive `failed` audit record after
-the raw PDF has been stored.
+K1B.1 adds an immutable `LiteratureRepresentationSelection` chain. K1B.2 makes
+promotion explicit: successful ingestion only creates a candidate, while
+`spc select-literature-representation` validates and selects it without
+extracting scientific claims. The current selection must then receive an
+accepted curation record before trusted use. Trusted snapshots bind only that
+selected ingestion/canonical/raw/source chain; unused successful ingestions
+remain audit history. Evidence creation requires the current selection by
+default, while historical evidence requires both explicit historical mode and
+a record authorizing the exact evidence IDs before trusted scientific use.
+Ingestion records retain page-level text coverage, and expected parser failures
+persist a non-sensitive `failed` audit record after the raw PDF has been stored.

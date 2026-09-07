@@ -59,6 +59,7 @@ from .models import (
     ExportManifest,
     FixResolution,
     GateVerdict,
+    HistoricalLiteratureEvidenceAuthorization,
     HumanDecisionResolution,
     IndependentApprovalReceipt,
     IntentFingerprint,
@@ -74,6 +75,7 @@ from .models import (
     LiteratureIngestionOutcome,
     LiteratureIngestionRecord,
     LiteratureRepresentationSelection,
+    LiteratureRepresentationSelectionOutcome,
     MethodFingerprint,
     MethodFact,
     ModelFact,
@@ -112,7 +114,10 @@ from .planning import (
     StructuredLLMPlanningProvider,
     StructuredOutputError,
 )
-from .knowledge.ingestion import LiteratureIngestionService
+from .knowledge.ingestion import (
+    LiteratureIngestionService,
+    LiteratureRepresentationSelector,
+)
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
@@ -176,6 +181,29 @@ def ingest_literature(
     outcome = LiteratureIngestionService().ingest(
         paper,
         metadata_payload,
+        KnowledgeRepositories(knowledge_dir),
+        SourceEvidenceStore(state_dir),
+    )
+    typer.echo(outcome.model_dump_json(indent=2))
+
+
+@app.command("select-literature-representation")
+def select_literature_representation(
+    literature_id: Annotated[str, typer.Option("--literature-id")],
+    ingestion_id: Annotated[str, typer.Option("--ingestion-id")],
+    selected_by: Annotated[str, typer.Option("--selected-by")],
+    rationale: Annotated[str, typer.Option("--rationale")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Promote one validated ingestion without extracting scientific claims."""
+    outcome = LiteratureRepresentationSelector().select(
+        literature_id,
+        ingestion_id,
+        selected_by,
+        rationale,
         KnowledgeRepositories(knowledge_dir),
         SourceEvidenceStore(state_dir),
     )
@@ -732,6 +760,8 @@ def schema_command(
         LiteratureIngestionRecord,
         LiteratureIngestionOutcome,
         LiteratureRepresentationSelection,
+        LiteratureRepresentationSelectionOutcome,
+        HistoricalLiteratureEvidenceAuthorization,
         ExpertProfile,
         ExpertOpinion,
         KnowledgeRelation,

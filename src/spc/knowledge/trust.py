@@ -19,6 +19,7 @@ from ..models import (
     ExpertCase,
     ExpertOpinion,
     ExpertProfile,
+    HistoricalLiteratureEvidenceAuthorization,
     KnowledgeCurationRecord,
     KnowledgeRelation,
     LiteratureDocument,
@@ -53,6 +54,11 @@ REPOSITORY_NODE_SPECS = (
         "literature_representation_selections",
         "selection_id",
     ),
+    (
+        "historical_evidence_authorization",
+        "historical_evidence_authorizations",
+        "authorization_id",
+    ),
     ("expert_profile", "expert_profiles", "expert_id"),
     ("expert_attribution", "expert_attributions", "attribution_id"),
     ("expert_opinion", "expert_opinions", "opinion_id"),
@@ -68,7 +74,12 @@ REPOSITORY_NODE_SPECS = (
 )
 
 CURATION_REQUIRED_TYPES = frozenset(
-    {"literature_document", "expert_opinion", "knowledge_relation"}
+    {
+        "literature_document",
+        "literature_representation_selection",
+        "expert_opinion",
+        "knowledge_relation",
+    }
 )
 
 
@@ -100,6 +111,8 @@ class TrustedKnowledgeValidator:
         self.evidence_store = evidence_store
         self.records = self.record_index(repositories)
         self._reachable: dict[tuple[str, str], BaseModel] = {}
+        self._all_literature_ingestion_sources: set[tuple[str, str]] = set()
+        self._trusted_current_literature_sources: set[tuple[str, str]] = set()
 
     @staticmethod
     def record_index(
@@ -108,7 +121,13 @@ class TrustedKnowledgeValidator:
         records: dict[tuple[str, str], BaseModel] = {}
         for record_type, repository_name, identity_field in REPOSITORY_NODE_SPECS:
             repository: Any = getattr(repositories, repository_name)
-            for record in repository.list():
+            listing = (
+                repository.list_metadata()
+                if repository_name
+                in {"raw_literature_artifacts", "canonical_text_artifacts"}
+                else repository.list()
+            )
+            for record in listing:
                 key = (record_type, getattr(record, identity_field))
                 if key in records:
                     raise TrustedKnowledgeError(
@@ -185,11 +204,49 @@ class TrustedKnowledgeValidator:
             for key, curation in current.items()
             if curation.status == CurationStatus.ACCEPTED
         }
-        for curation in accepted.values():
+        accepted_ingestions = tuple(
+            item
+            for item in self.repositories.literature_ingestions.list()
+            if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
+        )
+        self._all_literature_ingestion_sources = {
+            (item.source_id or "", item.source_version or "")
+            for item in accepted_ingestions
+        }
+        selection_literature_ids = {
+            item.literature_id
+            for item in self.repositories.literature_representation_selections.list()
+        }
+        current_selection_ids: set[str] = set()
+        self._trusted_current_literature_sources = set()
+        for literature_id in sorted(selection_literature_ids):
+            try:
+                selection = (
+                    self.repositories.literature_representation_selections.resolve_current(
+                        literature_id
+                    )
+                )
+            except (FileNotFoundError, ValueError):
+                continue
+            current_selection_ids.add(selection.selection_id)
+            curation = current.get(
+                ("literature_representation_selection", selection.selection_id)
+            )
+            if curation is not None and curation.status == CurationStatus.ACCEPTED:
+                self._trusted_current_literature_sources.add(
+                    (selection.source_id, selection.source_version)
+                )
+        active_accepted = {
+            key: curation
+            for key, curation in accepted.items()
+            if key[0] != "literature_representation_selection"
+            or key[1] in current_selection_ids
+        }
+        for curation in active_accepted.values():
             self._verify_evidence_refs(curation.evidence_refs)
             self._reachable[("knowledge_curation", curation.curation_id)] = curation
 
-        roots = set(accepted)
+        roots = set(active_accepted)
         roots.update(
             ("expert_case", item.case_id)
             for item in self.repositories.expert_cases.list()
@@ -202,31 +259,6 @@ class TrustedKnowledgeValidator:
             ("scientific_capability", item.capability_id)
             for item in self.repositories.capabilities.list()
         )
-        ingestion_literature_ids = {
-            item.literature_id
-            for item in self.repositories.literature_ingestions.list()
-            if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
-        }
-        roots.update(
-            ("literature_ingestion", item.ingestion_id)
-            for item in self.repositories.literature_ingestions.list()
-            if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
-        )
-        for literature_id in sorted(ingestion_literature_ids):
-            try:
-                selection = (
-                    self.repositories.literature_representation_selections.resolve_current(
-                        literature_id
-                    )
-                )
-            except (FileNotFoundError, ValueError) as error:
-                raise TrustedKnowledgeError(
-                    "INVALID_LITERATURE_REPRESENTATION_SELECTION",
-                    str(error),
-                ) from error
-            roots.add(
-                ("literature_representation_selection", selection.selection_id)
-            )
         for key in sorted(roots):
             self._validate_record(key, current, set())
 
@@ -238,7 +270,7 @@ class TrustedKnowledgeValidator:
         opinions = self._records_of_type("expert_opinion", ExpertOpinion)
         relations = self._records_of_type("knowledge_relation", KnowledgeRelation)
         accepted_curations = tuple(
-            sorted(accepted.values(), key=lambda item: item.curation_id)
+            sorted(active_accepted.values(), key=lambda item: item.curation_id)
         )
         return TrustedKnowledgeSelection(
             literature_documents=documents,
@@ -274,6 +306,8 @@ class TrustedKnowledgeValidator:
                 self._validate_ingestion(record, current, visiting)
             elif isinstance(record, LiteratureRepresentationSelection):
                 self._validate_representation_selection(record, current, visiting)
+            elif isinstance(record, HistoricalLiteratureEvidenceAuthorization):
+                self._validate_historical_authorization(record)
             elif isinstance(record, ExpertProfile):
                 pass
             elif isinstance(record, ExpertAttributionRecord):
@@ -327,6 +361,17 @@ class TrustedKnowledgeValidator:
                     "INVALID_LITERATURE_REPRESENTATION_SELECTION",
                     str(error),
                 ) from error
+            selection_curation = current.get(
+                ("literature_representation_selection", selection.selection_id)
+            )
+            if (
+                selection_curation is None
+                or selection_curation.status != CurationStatus.ACCEPTED
+            ):
+                raise TrustedKnowledgeError(
+                    "UNTRUSTED_LITERATURE_REPRESENTATION_SELECTION",
+                    f"current representation selection is not accepted: {selection.selection_id}",
+                )
             self._validate_record(
                 ("literature_representation_selection", selection.selection_id),
                 current,
@@ -342,6 +387,32 @@ class TrustedKnowledgeValidator:
         current: Mapping[tuple[str, str], KnowledgeCurationRecord],
         visiting: set[tuple[str, str]],
     ) -> None:
+        try:
+            current_selection = (
+                self.repositories.literature_representation_selections.resolve_current(
+                    selection.literature_id
+                )
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_REPRESENTATION_SELECTION", str(error)
+            ) from error
+        selection_curation = current.get(
+            ("literature_representation_selection", selection.selection_id)
+        )
+        if current_selection.selection_id != selection.selection_id:
+            raise TrustedKnowledgeError(
+                "HISTORICAL_REPRESENTATION_NOT_TRUSTED",
+                f"selection is not current: {selection.selection_id}",
+            )
+        if (
+            selection_curation is None
+            or selection_curation.status != CurationStatus.ACCEPTED
+        ):
+            raise TrustedKnowledgeError(
+                "UNTRUSTED_LITERATURE_REPRESENTATION_SELECTION",
+                f"selection is not explicitly accepted: {selection.selection_id}",
+            )
         ingestion = self._validate_record(
             ("literature_ingestion", selection.ingestion_id), current, visiting
         )
@@ -610,7 +681,84 @@ class TrustedKnowledgeValidator:
                 "INVALID_KNOWLEDGE_EVIDENCE",
                 f"evidence is unavailable or invalid: {evidence_id}",
             ) from error
+        source_key = (source.source_id, source.version)
+        if (
+            source_key in self._all_literature_ingestion_sources
+            and source_key not in self._trusted_current_literature_sources
+        ):
+            self._require_historical_authorization(evidence, source)
         return evidence, source
+
+    def _require_historical_authorization(
+        self, evidence: EvidenceSpan, source: SourceDocument
+    ) -> None:
+        matches = tuple(
+            authorization
+            for authorization in self.repositories.historical_evidence_authorizations.list()
+            if evidence.evidence_id in authorization.evidence_refs
+            and (authorization.source_id, authorization.source_version)
+            == (source.source_id, source.version)
+        )
+        if len(matches) != 1:
+            raise TrustedKnowledgeError(
+                "HISTORICAL_LITERATURE_EVIDENCE_NOT_AUTHORIZED",
+                f"historical literature evidence is not explicitly authorized: {evidence.evidence_id}",
+            )
+        self._validate_historical_authorization(matches[0])
+
+    def _validate_historical_authorization(
+        self, authorization: HistoricalLiteratureEvidenceAuthorization
+    ) -> None:
+        if self.evidence_store is None:
+            raise TrustedKnowledgeError(
+                "EVIDENCE_STORE_REQUIRED",
+                "historical evidence authorization requires a SourceEvidenceStore",
+            )
+        from .ingestion import validate_literature_ingestion_chain
+
+        try:
+            ingestion = self.repositories.literature_ingestions.get(
+                authorization.ingestion_id
+            )
+            chain = validate_literature_ingestion_chain(
+                ingestion, self.repositories, self.evidence_store
+            )
+            if (
+                authorization.literature_id != ingestion.literature_id
+                or authorization.ingestion_hash != ingestion.content_hash
+                or authorization.source_id != chain.source.source_id
+                or authorization.source_version != chain.source.version
+            ):
+                raise ValueError("historical authorization binding mismatch")
+            for evidence_id in authorization.evidence_refs:
+                evidence = self.evidence_store.get(evidence_id)
+                evidence_source = self.evidence_store.verify_evidence_integrity(evidence)
+                if (evidence_source.source_id, evidence_source.version) != (
+                    authorization.source_id,
+                    authorization.source_version,
+                ):
+                    raise ValueError("historical evidence comes from another source")
+                self._remember_evidence(evidence, evidence_source)
+        except Exception as error:
+            if isinstance(error, TrustedKnowledgeError):
+                raise
+            raise TrustedKnowledgeError(
+                "INVALID_HISTORICAL_EVIDENCE_AUTHORIZATION",
+                f"historical evidence authorization is invalid: {authorization.authorization_id}",
+            ) from error
+        self._reachable[
+            ("historical_evidence_authorization", authorization.authorization_id)
+        ] = authorization
+        self._reachable[("literature_ingestion", ingestion.ingestion_id)] = ingestion
+        self._reachable[
+            ("canonical_text_artifact", chain.canonical_text.canonical_text_id)
+        ] = chain.canonical_text
+        self._reachable[
+            ("raw_literature_artifact", chain.raw_artifact.artifact_id)
+        ] = chain.raw_artifact
+        self._reachable[
+            ("source_document", f"{chain.source.source_id}@{chain.source.version}")
+        ] = chain.source
 
     def _verify_source(self, source_id: str, source_version: str) -> SourceDocument:
         if self.evidence_store is None:

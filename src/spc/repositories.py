@@ -19,6 +19,7 @@ from .models import (
     ExpertCase,
     ExpertOpinion,
     ExpertProfile,
+    HistoricalLiteratureEvidenceAuthorization,
     KnowledgeSnapshot,
     KnowledgeCurationRecord,
     KnowledgeRelation,
@@ -469,6 +470,22 @@ class RawLiteratureArtifactRepository:
             if path.is_dir() or path.is_symlink()
         )
 
+    def list_metadata(self) -> tuple[RawLiteratureArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        records: list[RawLiteratureArtifact] = []
+        for directory in sorted(self.root.iterdir()):
+            if not (directory.is_dir() or directory.is_symlink()):
+                continue
+            content_path = directory / "artifact.pdf"
+            metadata_path = directory / "metadata.json"
+            self._validate_paths(directory, content_path, metadata_path)
+            record = load_model(metadata_path, RawLiteratureArtifact)
+            if record.artifact_id != directory.name:
+                raise ValueError("raw artifact metadata ID does not match its directory")
+            records.append(record)
+        return tuple(records)
+
     def _write_directory(
         self,
         destination: Path,
@@ -604,6 +621,24 @@ class CanonicalTextArtifactRepository(RawLiteratureArtifactRepository):
             if path.is_dir() or path.is_symlink()
         )
 
+    def list_metadata(self) -> tuple[CanonicalTextArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        records: list[CanonicalTextArtifact] = []
+        for directory in sorted(self.root.iterdir()):
+            if not (directory.is_dir() or directory.is_symlink()):
+                continue
+            content_path = directory / "content.txt"
+            metadata_path = directory / "metadata.json"
+            self._validate_paths(directory, content_path, metadata_path)
+            record = load_model(metadata_path, CanonicalTextArtifact)
+            if record.canonical_text_id != directory.name:
+                raise ValueError(
+                    "canonical text metadata ID does not match its directory"
+                )
+            records.append(record)
+        return tuple(records)
+
     @staticmethod
     def _verify_blocks(record: CanonicalTextArtifact, text: str) -> None:
         for block in record.blocks:
@@ -695,6 +730,17 @@ class LiteratureRepresentationSelectionRepository(
         return current
 
 
+class HistoricalLiteratureEvidenceAuthorizationRepository(
+    IdentityBoundRepository[HistoricalLiteratureEvidenceAuthorization]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "historical_evidence_authorizations",
+            HistoricalLiteratureEvidenceAuthorization,
+            "authorization_id",
+        )
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -708,6 +754,9 @@ class KnowledgeRepositories:
         self.literature_ingestions = LiteratureIngestionRepository(root)
         self.literature_representation_selections = (
             LiteratureRepresentationSelectionRepository(root)
+        )
+        self.historical_evidence_authorizations = (
+            HistoricalLiteratureEvidenceAuthorizationRepository(root)
         )
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
@@ -762,6 +811,14 @@ class KnowledgeRepositories:
                 record.selection_id, record
             )
 
+    def load_historical_evidence_authorizations(
+        self, records: Iterable[HistoricalLiteratureEvidenceAuthorization]
+    ) -> None:
+        for record in records:
+            self.historical_evidence_authorizations.put(
+                record.authorization_id, record
+            )
+
     def load_expert_profiles(self, records: Iterable[ExpertProfile]) -> None:
         for record in records:
             self.expert_profiles.put(record.expert_id, record)
@@ -792,6 +849,22 @@ class KnowledgeRepositories:
         from .knowledge.trust import TrustedKnowledgeValidator
 
         trusted = TrustedKnowledgeValidator(self, evidence_store).validate()
+        literature_source_keys = {
+            (item.source_id, item.source_version)
+            for item in self.literature_ingestions.list()
+            if item.source_id is not None and item.source_version is not None
+        }
+        trusted_evidence_ids = {
+            record_id
+            for (record_type, record_id) in trusted.trusted_records
+            if record_type == "evidence_span"
+        }
+        trusted_source_keys = {
+            (record.source_id, record.version)
+            for (record_type, _), record in trusted.trusted_records.items()
+            if record_type == "source_document"
+            and isinstance(record, SourceDocument)
+        }
         payload = {
             "domain_profile_hash": content_hash(domain_profile),
             "expert_case_hashes": {
@@ -804,11 +877,16 @@ class KnowledgeRepositories:
                 item.capability_id: content_hash(item) for item in self.capabilities.list()
             },
             "evidence_span_hashes": {
-                item.evidence_id: content_hash(item) for item in evidence_store.evidence_records.list()
+                item.evidence_id: content_hash(item)
+                for item in evidence_store.evidence_records.list()
+                if (item.source_id, item.source_version) not in literature_source_keys
+                or item.evidence_id in trusted_evidence_ids
             },
             "evidence_source_versions": {
                 f"{item.source_id}@{item.version}": item.content_sha256
                 for item in evidence_store.source_records.list()
+                if (item.source_id, item.version) not in literature_source_keys
+                or (item.source_id, item.version) in trusted_source_keys
             },
             "literature_document_hashes": {
                 item.literature_id: item.content_hash
@@ -833,6 +911,11 @@ class KnowledgeRepositories:
                 record_id: record.content_hash
                 for (record_type, record_id), record in trusted.trusted_records.items()
                 if record_type == "literature_representation_selection"
+            },
+            "historical_evidence_authorization_hashes": {
+                record_id: record.content_hash
+                for (record_type, record_id), record in trusted.trusted_records.items()
+                if record_type == "historical_evidence_authorization"
             },
             "expert_profile_hashes": {
                 item.expert_id: item.content_hash
@@ -871,6 +954,7 @@ class KnowledgeRepositories:
                 "canonical_text_artifact_hashes",
                 "literature_ingestion_hashes",
                 "literature_representation_selection_hashes",
+                "historical_evidence_authorization_hashes",
                 "expert_profile_hashes",
                 "expert_opinion_hashes",
                 "expert_attribution_hashes",

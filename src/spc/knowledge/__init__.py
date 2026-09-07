@@ -7,7 +7,9 @@ from .ingestion import (
     LiteratureMetadata,
     LiteratureTextExtractor,
     PypdfLiteratureTextExtractor,
+    LiteratureRepresentationSelector,
     create_evidence_span_from_canonical_text,
+    validate_literature_ingestion_chain,
 )
 from .mermaid import knowledge_graph_to_mermaid
 from .trust import TrustedKnowledgeError, TrustedKnowledgeValidator
@@ -22,6 +24,8 @@ __all__ = [
     "LiteratureMetadata",
     "LiteratureTextExtractor",
     "PypdfLiteratureTextExtractor",
+    "LiteratureRepresentationSelector",
     "create_evidence_span_from_canonical_text",
+    "validate_literature_ingestion_chain",
     "knowledge_graph_to_mermaid",
 ]

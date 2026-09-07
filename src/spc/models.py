@@ -939,6 +939,53 @@ class LiteratureRepresentationSelection(StrictModel):
         return self
 
 
+class LiteratureRepresentationSelectionOutcome(StrictModel):
+    selection: LiteratureRepresentationSelection
+    ingestion_status: LiteratureIngestionStatus
+    total_pages: int = Field(ge=0)
+    pages_with_text: int = Field(ge=0)
+    pages_without_text: int = Field(ge=0)
+    text_coverage_ratio: float = Field(ge=0, le=1, allow_inf_nan=False)
+    warnings: tuple[NonBlankStr, ...] = ()
+
+
+class HistoricalLiteratureEvidenceAuthorization(StrictModel):
+    authorization_id: NonBlankStr
+    literature_id: NonBlankStr
+    ingestion_id: NonBlankStr
+    ingestion_hash: Sha256Str
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    authorized_by: NonBlankStr
+    rationale: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> HistoricalLiteratureEvidenceAuthorization:
+        from .serialization import content_hash
+
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError(
+                "HistoricalLiteratureEvidenceAuthorization evidence_refs must be unique"
+            )
+        identity = self.model_dump(
+            mode="json",
+            exclude={"authorization_id", "content_hash"},
+        )
+        expected_id = f"historical-evidence-authorization-{content_hash(identity)[:24]}"
+        if self.authorization_id != expected_id:
+            raise ValueError(
+                "HistoricalLiteratureEvidenceAuthorization authorization_id is not content-bound"
+            )
+        payload = {"authorization_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError(
+                "HistoricalLiteratureEvidenceAuthorization content_hash is invalid"
+            )
+        return self
+
+
 class LiteratureIngestionOutcome(StrictModel):
     literature_id: NonBlankStr
     artifact_id: NonBlankStr
@@ -1281,6 +1328,9 @@ class KnowledgeSnapshot(StrictModel):
         default_factory=dict, exclude_if=lambda value: not value
     )
     literature_representation_selection_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    historical_evidence_authorization_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
     expert_profile_hashes: dict[NonBlankStr, Sha256Str] = Field(
