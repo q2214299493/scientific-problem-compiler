@@ -10,13 +10,23 @@ from typing import Generic, Iterable, TypeVar
 from pydantic import BaseModel
 
 from .models import (
+    CurationStatus,
     DomainProfile,
     EvidenceSpan,
     ExpertCase,
+    ExpertOpinion,
+    ExpertProfile,
     KnowledgeSnapshot,
+    KnowledgeRelation,
+    LiteratureDocument,
     LiteratureWorkflowPattern,
+    MethodFact,
+    ModelFact,
+    ReportedResult,
     ScientificCapability,
+    SourceClaim,
     SourceDocument,
+    SourceQuote,
 )
 from .serialization import (
     content_hash,
@@ -88,6 +98,47 @@ class ModelRepository(Generic[ModelT]):
         if not self.root.exists():
             return ()
         return tuple(load_model(path, self.model_type) for path in sorted(self.root.glob("*.json")))
+
+
+class IdentityBoundRepository(ModelRepository[ModelT]):
+    def __init__(
+        self,
+        root: Path,
+        model_type: type[ModelT],
+        identity_field: str,
+    ) -> None:
+        super().__init__(root, model_type)
+        self.identity_field = identity_field
+
+    def _record_id(self, model: ModelT) -> str:
+        value = getattr(model, self.identity_field, None)
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"record has no valid {self.identity_field!r} identity field"
+            )
+        return value
+
+    def put(self, key: str, model: ModelT) -> Path:
+        if key != self._record_id(model):
+            raise ValueError(
+                f"repository key must equal record {self.identity_field}"
+            )
+        return super().put(key, model)
+
+    def get(self, key: str) -> ModelT:
+        record = super().get(key)
+        if self._record_id(record) != key:
+            raise ValueError("stored record ID does not match repository key")
+        return record
+
+    def list(self) -> tuple[ModelT, ...]:
+        records = super().list()
+        record_ids = [self._record_id(record) for record in records]
+        if len(set(record_ids)) != len(record_ids):
+            raise ValueError("repository contains duplicate record IDs")
+        for record_id in record_ids:
+            self.get(record_id)
+        return records
 
 
 class SourceEvidenceStore:
@@ -266,11 +317,73 @@ class ScientificCapabilityRepository(ModelRepository[ScientificCapability]):
         return records
 
 
+class LiteratureDocumentRepository(IdentityBoundRepository[LiteratureDocument]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "literature_documents",
+            LiteratureDocument,
+            "literature_id",
+        )
+
+
+class ExpertProfileRepository(IdentityBoundRepository[ExpertProfile]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "expert_profiles",
+            ExpertProfile,
+            "expert_id",
+        )
+
+
+class ExpertOpinionRepository(IdentityBoundRepository[ExpertOpinion]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "expert_opinions",
+            ExpertOpinion,
+            "opinion_id",
+        )
+
+
+class KnowledgeRelationRepository(IdentityBoundRepository[KnowledgeRelation]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "relations",
+            KnowledgeRelation,
+            "relation_id",
+        )
+
+    def put(self, key: str, model: KnowledgeRelation) -> Path:
+        require_safe_path_component(key, field="repository key")
+        if (self.root / f"{key}.json").exists():
+            raise FileExistsError(f"duplicate knowledge relation ID: {key}")
+        return super().put(key, model)
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
+        self.root = root
         self.expert_cases = ExpertCaseRepository(root)
         self.workflow_patterns = LiteratureWorkflowRepository(root)
         self.capabilities = ScientificCapabilityRepository(root)
+        self.literature_documents = LiteratureDocumentRepository(root)
+        self.expert_profiles = ExpertProfileRepository(root)
+        self.expert_opinions = ExpertOpinionRepository(root)
+        self.relations = KnowledgeRelationRepository(root)
+        self.source_quotes = IdentityBoundRepository(
+            root / "source_quotes", SourceQuote, "quote_id"
+        )
+        self.source_claims = IdentityBoundRepository(
+            root / "source_claims", SourceClaim, "claim_id"
+        )
+        self.reported_results = IdentityBoundRepository(
+            root / "reported_results", ReportedResult, "result_id"
+        )
+        self.method_facts = IdentityBoundRepository(
+            root / "method_facts", MethodFact, "fact_id"
+        )
+        self.model_facts = IdentityBoundRepository(
+            root / "model_facts", ModelFact, "fact_id"
+        )
 
     def load_expert_cases(self, records: Iterable[ExpertCase]) -> None:
         for record in records:
@@ -283,6 +396,24 @@ class KnowledgeRepositories:
     def load_capabilities(self, records: Iterable[ScientificCapability]) -> None:
         for record in records:
             self.capabilities.put(record.capability_id, record)
+
+    def load_literature_documents(
+        self, records: Iterable[LiteratureDocument]
+    ) -> None:
+        for record in records:
+            self.literature_documents.put(record.literature_id, record)
+
+    def load_expert_profiles(self, records: Iterable[ExpertProfile]) -> None:
+        for record in records:
+            self.expert_profiles.put(record.expert_id, record)
+
+    def load_expert_opinions(self, records: Iterable[ExpertOpinion]) -> None:
+        for record in records:
+            self.expert_opinions.put(record.opinion_id, record)
+
+    def load_relations(self, records: Iterable[KnowledgeRelation]) -> None:
+        for record in records:
+            self.relations.put(record.relation_id, record)
 
     def create_snapshot(
         self,
@@ -307,8 +438,39 @@ class KnowledgeRepositories:
                 f"{item.source_id}@{item.version}": item.content_sha256
                 for item in evidence_store.source_records.list()
             },
+            "literature_document_hashes": {
+                item.literature_id: item.content_hash
+                for item in self.literature_documents.list()
+                if item.curation_status == CurationStatus.ACCEPTED
+            },
+            "expert_profile_hashes": {
+                item.expert_id: item.content_hash
+                for item in self.expert_profiles.list()
+            },
+            "expert_opinion_hashes": {
+                item.opinion_id: item.content_hash
+                for item in self.expert_opinions.list()
+                if item.status == CurationStatus.ACCEPTED
+            },
+            "knowledge_relation_hashes": {
+                item.relation_id: item.content_hash
+                for item in self.relations.list()
+                if item.status == CurationStatus.ACCEPTED
+            },
+        }
+        snapshot_identity = {
+            key: value
+            for key, value in payload.items()
+            if value
+            or key
+            not in {
+                "literature_document_hashes",
+                "expert_profile_hashes",
+                "expert_opinion_hashes",
+                "knowledge_relation_hashes",
+            }
         }
         return KnowledgeSnapshot(
-            snapshot_id=f"snapshot-{content_hash(payload)[:24]}",
+            snapshot_id=f"snapshot-{content_hash(snapshot_identity)[:24]}",
             **payload,
         )

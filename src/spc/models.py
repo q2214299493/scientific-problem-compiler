@@ -31,6 +31,11 @@ NonBlankStr = Annotated[
     AfterValidator(_require_non_blank),
 ]
 Sha256Str = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+KnowledgeEntityType = Annotated[
+    str,
+    StringConstraints(pattern=r"^[a-z][a-z0-9_]*$"),
+    AfterValidator(_require_non_blank),
+]
 
 
 class StrictModel(BaseModel):
@@ -63,6 +68,27 @@ class ApprovalDecision(StrEnum):
 class ApprovalMode(StrEnum):
     INDEPENDENT_REQUIRED = "independent_required"
     LEGACY_MANUAL_ALLOWED = "legacy_manual_allowed"
+
+
+class CurationStatus(StrEnum):
+    MACHINE_EXTRACTED = "machine_extracted"
+    HUMAN_REVIEWED = "human_reviewed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class KnowledgePredicate(StrEnum):
+    SUPPORTS = "supports"
+    CONTRADICTS = "contradicts"
+    REFINES = "refines"
+    USES_METHOD = "uses_method"
+    USES_MODEL = "uses_model"
+    REPORTS_RESULT = "reports_result"
+    DERIVED_FROM = "derived_from"
+    COMMENTS_ON = "comments_on"
+    SUPERSEDES = "supersedes"
+    APPLIES_TO = "applies_to"
+    REQUIRES_CAPABILITY = "requires_capability"
 
 
 class RetrievalSourceType(StrEnum):
@@ -614,6 +640,161 @@ class LiteratureWorkflowPattern(StrictModel):
     evidence_refs: tuple[str, ...] = ()
 
 
+class LiteratureDocument(StrictModel):
+    literature_id: NonBlankStr
+    title: NonBlankStr
+    authors: tuple[NonBlankStr, ...] = Field(min_length=1)
+    year: int = Field(ge=1000, le=9999)
+    journal: NonBlankStr | None = None
+    doi: NonBlankStr | None = None
+    url: NonBlankStr | None = None
+    domain: NonBlankStr
+    topics: tuple[NonBlankStr, ...] = ()
+    keywords: tuple[NonBlankStr, ...] = ()
+    raw_artifact_ref: NonBlankStr
+    canonical_text_ref: NonBlankStr
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    citation_refs: tuple[NonBlankStr, ...] = ()
+    curation_status: CurationStatus
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureDocument:
+        from .serialization import content_hash
+
+        for field_name in ("authors", "topics", "keywords", "citation_refs"):
+            values = getattr(self, field_name)
+            if len(set(values)) != len(values):
+                raise ValueError(f"LiteratureDocument {field_name} must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"literature_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"literature-{content_hash(identity)[:24]}"
+        if self.literature_id != expected_id:
+            raise ValueError("LiteratureDocument literature_id is not content-bound")
+        payload = {"literature_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("LiteratureDocument content_hash is invalid")
+        return self
+
+
+class ExpertProfile(StrictModel):
+    expert_id: NonBlankStr
+    display_name: NonBlankStr
+    affiliations: tuple[NonBlankStr, ...] = ()
+    expertise_domains: tuple[NonBlankStr, ...] = ()
+    expertise_topics: tuple[NonBlankStr, ...] = ()
+    profile_source_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_content_hash(self) -> ExpertProfile:
+        from .serialization import content_hash
+
+        for field_name in (
+            "affiliations",
+            "expertise_domains",
+            "expertise_topics",
+            "profile_source_refs",
+        ):
+            values = getattr(self, field_name)
+            if len(set(values)) != len(values):
+                raise ValueError(f"ExpertProfile {field_name} must be unique")
+        identity = self.model_dump(
+            mode="json", exclude={"content_hash"}, exclude_none=True
+        )
+        if self.content_hash != content_hash(identity):
+            raise ValueError("ExpertProfile content_hash is invalid")
+        return self
+
+
+class ExpertOpinion(StrictModel):
+    opinion_id: NonBlankStr
+    expert_id: NonBlankStr
+    domain: NonBlankStr
+    topic: NonBlankStr
+    statement: NonBlankStr
+    opinion_type: NonBlankStr
+    scope: NonBlankStr
+    rationale: NonBlankStr
+    conditions: tuple[NonBlankStr, ...] = ()
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    related_claim_refs: tuple[NonBlankStr, ...] = ()
+    related_workflow_refs: tuple[NonBlankStr, ...] = ()
+    status: CurationStatus
+    supersedes: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_provenance(self) -> ExpertOpinion:
+        from .serialization import content_hash
+
+        for field_name in (
+            "conditions",
+            "evidence_refs",
+            "related_claim_refs",
+            "related_workflow_refs",
+        ):
+            values = getattr(self, field_name)
+            if len(set(values)) != len(values):
+                raise ValueError(f"ExpertOpinion {field_name} must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"opinion_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"expert-opinion-{content_hash(identity)[:24]}"
+        if self.opinion_id != expected_id:
+            raise ValueError("ExpertOpinion opinion_id is not content-bound")
+        if self.supersedes == self.opinion_id:
+            raise ValueError("ExpertOpinion cannot supersede itself")
+        payload = {"opinion_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ExpertOpinion content_hash is invalid")
+        return self
+
+
+class KnowledgeRelation(StrictModel):
+    relation_id: NonBlankStr
+    subject_type: KnowledgeEntityType
+    subject_id: NonBlankStr
+    predicate: KnowledgePredicate
+    object_type: KnowledgeEntityType
+    object_id: NonBlankStr
+    domain: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    rationale: NonBlankStr
+    status: CurationStatus
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_endpoints(self) -> KnowledgeRelation:
+        from .serialization import content_hash
+
+        if (self.subject_type, self.subject_id) == (
+            self.object_type,
+            self.object_id,
+        ):
+            raise ValueError("KnowledgeRelation endpoints must be distinct")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("KnowledgeRelation evidence_refs must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"relation_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"knowledge-relation-{content_hash(identity)[:24]}"
+        if self.relation_id != expected_id:
+            raise ValueError("KnowledgeRelation relation_id is not content-bound")
+        payload = {"relation_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("KnowledgeRelation content_hash is invalid")
+        return self
+
+
 class DomainProfile(StrictModel):
     domain_id: str
     version: str
@@ -750,16 +931,96 @@ class KnowledgeSnapshot(StrictModel):
     capability_hashes: dict[NonBlankStr, Sha256Str]
     evidence_span_hashes: dict[NonBlankStr, Sha256Str]
     evidence_source_versions: dict[NonBlankStr, Sha256Str]
+    literature_document_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    expert_profile_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    expert_opinion_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    knowledge_relation_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_snapshot_id(self) -> KnowledgeSnapshot:
         from .serialization import content_hash
 
         identity = self.model_dump(
-            mode="json", exclude={"snapshot_id", "created_at"}
+            mode="json",
+            exclude={"snapshot_id", "created_at"},
+            exclude_defaults=True,
         )
         if self.snapshot_id != f"snapshot-{content_hash(identity)[:24]}":
             raise ValueError("KnowledgeSnapshot snapshot_id is not content-bound")
+        return self
+
+
+class KnowledgeGraphNode(StrictModel):
+    node_id: NonBlankStr
+    record_type: KnowledgeEntityType
+    record_id: NonBlankStr
+    record_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_node_id(self) -> KnowledgeGraphNode:
+        from .serialization import content_hash
+
+        identity = {"record_type": self.record_type, "record_id": self.record_id}
+        if self.node_id != f"knowledge-node-{content_hash(identity)[:24]}":
+            raise ValueError("KnowledgeGraphNode node_id is not content-bound")
+        return self
+
+
+class KnowledgeGraphEdge(StrictModel):
+    relation_id: NonBlankStr
+    relation_hash: Sha256Str
+    subject_node_id: NonBlankStr
+    predicate: KnowledgePredicate
+    object_node_id: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+
+
+class KnowledgeGraph(StrictModel):
+    graph_id: NonBlankStr
+    domain_filter: NonBlankStr | None = None
+    topic_filter: NonBlankStr | None = None
+    nodes: tuple[KnowledgeGraphNode, ...]
+    edges: tuple[KnowledgeGraphEdge, ...]
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_references(self) -> KnowledgeGraph:
+        from .serialization import content_hash
+
+        node_ids = [node.node_id for node in self.nodes]
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError("KnowledgeGraph node IDs must be unique")
+        relation_ids = [edge.relation_id for edge in self.edges]
+        if len(set(relation_ids)) != len(relation_ids):
+            raise ValueError("KnowledgeGraph relation IDs must be unique")
+        known_nodes = set(node_ids)
+        for edge in self.edges:
+            if (
+                edge.subject_node_id not in known_nodes
+                or edge.object_node_id not in known_nodes
+            ):
+                raise ValueError("KnowledgeGraph edge references an unknown node")
+        if tuple(sorted(self.nodes, key=lambda item: (item.record_type, item.record_id))) != self.nodes:
+            raise ValueError("KnowledgeGraph nodes must be deterministically ordered")
+        if tuple(sorted(self.edges, key=lambda item: item.relation_id)) != self.edges:
+            raise ValueError("KnowledgeGraph edges must be deterministically ordered")
+        identity = self.model_dump(
+            mode="json", exclude={"graph_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"knowledge-graph-{content_hash(identity)[:24]}"
+        if self.graph_id != expected_id:
+            raise ValueError("KnowledgeGraph graph_id is not content-bound")
+        payload = {"graph_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("KnowledgeGraph content_hash is invalid")
         return self
 
 

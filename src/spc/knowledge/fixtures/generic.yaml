@@ -1,0 +1,93 @@
+expert_opinions:
+  - conditions:
+      - Atom identity and boundary conditions remain consistent.
+    content_hash: b9ae127a1b458652edbdb715314592974ff685bd8c249508ba28063a3d3f2550
+    domain: base
+    evidence_refs: [ev-expert-guidance]
+    expert_id: expert-methodology-001
+    opinion_id: expert-opinion-6682fa29fa608209fd3d0a4c
+    opinion_type: methodological_guidance
+    rationale: Disconnected endpoints cannot support a coherent pathway comparison.
+    related_claim_refs: [claim-connectivity-001]
+    related_workflow_refs: [workflow-connectivity-001]
+    scope: Scientific pathway planning
+    statement: Endpoint selection should preserve mechanistic connectivity.
+    status: accepted
+    supersedes: null
+    topic: endpoint selection
+expert_profiles:
+  - affiliations: [Generic Scientific Methods Group]
+    content_hash: 86b8e79282ef65f8d63b0939a99be8cb8c877c21e2b26227ba6210980bf9b2bb
+    display_name: Methodology Expert
+    expert_id: expert-methodology-001
+    expertise_domains: [base]
+    expertise_topics: [mechanistic connectivity, endpoint selection]
+    profile_source_refs: [profile-source-methodology-001]
+literature_documents:
+  - authors: [A. Researcher, B. Curator]
+    canonical_text_ref: texts/generic-paper.txt
+    citation_refs: [citation-example-1]
+    content_hash: 9cb1bcfd4eed7d551043031585b8d98e90ca8b39ae27fa4767ae5907a0cc541c
+    curation_status: accepted
+    doi: 10.0000/example.k1a
+    domain: base
+    journal: Journal of Reproducible Science
+    keywords: [endpoint selection, provenance]
+    literature_id: literature-005eae2be812a4db3c662738
+    raw_artifact_ref: artifacts/generic-paper.pdf
+    source_id: source-generic-paper
+    source_version: v1
+    title: Connectivity-preserving scientific workflow design
+    topics: [mechanistic connectivity, workflow validation]
+    url: https://example.org/literature/k1a
+    year: 2026
+relations:
+  - content_hash: cd6885c4c248a3d02930d727043b05230fe4d0bb37863446d2fc2e89407bdd2a
+    domain: base
+    evidence_refs: [ev-literature-connectivity]
+    object_id: claim-connectivity-001
+    object_type: source_claim
+    predicate: supports
+    rationale: The curated document is the provenance source for the claim.
+    relation_id: knowledge-relation-7fdb5267955cfec4a06fab6d
+    status: accepted
+    subject_id: literature-005eae2be812a4db3c662738
+    subject_type: literature_document
+  - content_hash: 995bc093244e1f4a1c0dbaebe6f67bf528037d838d21b873dca7a9e9893c0818
+    domain: base
+    evidence_refs: [ev-expert-guidance]
+    object_id: expert-methodology-001
+    object_type: expert_profile
+    predicate: derived_from
+    rationale: The opinion is attributed to the persisted expert profile.
+    relation_id: knowledge-relation-220dab253880036bc87a684f
+    status: accepted
+    subject_id: expert-opinion-6682fa29fa608209fd3d0a4c
+    subject_type: expert_opinion
+  - content_hash: eb3d767f34189fb191dff0e98f8341b2e29545d2985ea1aaa1363a6c15531d8d
+    domain: base
+    evidence_refs: [ev-literature-connectivity]
+    object_id: workflow-connectivity-001
+    object_type: workflow_pattern
+    predicate: applies_to
+    rationale: The literature guidance applies to this workflow pattern.
+    relation_id: knowledge-relation-a35b16e2bd46a9f64e125daf
+    status: accepted
+    subject_id: literature-005eae2be812a4db3c662738
+    subject_type: literature_document
+source_claims:
+  - claim_id: claim-connectivity-001
+    claim_strength: reported guidance
+    claim_type: methodological_claim
+    epistemic_status: source_reported
+    evidence_refs: [ev-literature-connectivity]
+    source_quote_refs: [quote-connectivity-001]
+    source_role: author
+    text: A pathway comparison requires connectivity-preserving endpoints.
+workflow_patterns:
+  - domain: base
+    evidence_refs: [ev-literature-connectivity]
+    limitations: [Planning guidance only.]
+    pattern_id: workflow-connectivity-001
+    trigger: A scientific comparison requires consistent endpoints.
+    workflow_capabilities: [comparative_analysis]

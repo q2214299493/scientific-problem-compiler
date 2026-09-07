@@ -133,3 +133,25 @@ mapping results are checked for determinism. Recursive payload validation
 rejects command-, script-, executable-, shell-, scheduler-, or submission-
 bearing keys at any depth. These checks do not grant authorization:
 `ExecutionProposal` remains both unauthorized and non-runnable.
+
+## Knowledge Layer K1A
+
+K1A adds immutable persistence contracts for curated literature metadata,
+expert profiles, expert opinions, and domain-general scientific relations. It
+reuses the existing evidence, claim, result, fact, expert-case, workflow, and
+capability models rather than creating parallel scientific records. Repository
+writes bind each safe record key to its model identity and reject conflicting
+overwrites; relation IDs are unique and content-bound.
+
+`KnowledgeSnapshot` now binds accepted literature documents, accepted expert
+opinions, accepted relations, expert profiles, and the existing Phase 2
+knowledge/evidence records. Non-accepted literature, opinions, and relations do
+not enter the trusted snapshot. `KnowledgeGraphBuilder` deterministically
+projects repository IDs and hashes into nodes and relation references into
+edges. Mermaid output is only a reproducible view: immutable repository records
+remain authoritative.
+
+The package includes an offline, non-FT fixture with one literature claim
+relation, one expert-opinion provenance relation, and one literature-workflow
+relation. K1A does not parse PDFs, call external services or LLMs, build an
+embedding/vector store, or authorize or execute scientific work.
