@@ -17,8 +17,11 @@ from ..models import (
     LiteratureIngestionOutcome,
     LiteratureIngestionRecord,
     LiteratureIngestionStatus,
+    LiteratureRepresentationSelection,
     NonBlankStr,
     RawLiteratureArtifact,
+    SourceRole,
+    SourceType,
     StrictModel,
     literature_identity_id,
 )
@@ -58,6 +61,30 @@ class LiteratureTextExtraction:
     warnings: tuple[str, ...]
     requires_ocr: bool
 
+    @property
+    def total_pages(self) -> int:
+        return len(self.page_texts)
+
+    @property
+    def pages_with_text(self) -> int:
+        return sum(
+            1
+            for text in self.page_texts
+            if PypdfLiteratureTextExtractor._has_usable_text(text)
+        )
+
+    @property
+    def pages_without_text(self) -> int:
+        return self.total_pages - self.pages_with_text
+
+    @property
+    def text_coverage_ratio(self) -> float:
+        return self.pages_with_text / self.total_pages if self.total_pages else 0.0
+
+
+class LiteratureExtractionError(ValueError):
+    """Expected, safely reportable failure while extracting a PDF."""
+
 
 class LiteratureTextExtractor(Protocol):
     parser_id: str
@@ -94,11 +121,14 @@ class PypdfLiteratureTextExtractor:
             raise ValueError("raw PDF path must be a regular non-symlink file")
         if artifact_path.stat().st_size != artifact.byte_size:
             raise ValueError("raw PDF changed before extraction")
-        reader = pypdf.PdfReader(artifact_path, strict=True)
-        page_texts = tuple(
-            self._canonicalize_page(page.extract_text() or "")
-            for page in reader.pages
-        )
+        try:
+            reader = pypdf.PdfReader(artifact_path, strict=True)
+            page_texts = tuple(
+                self._canonicalize_page(page.extract_text() or "")
+                for page in reader.pages
+            )
+        except pypdf.errors.PdfReadError as error:
+            raise LiteratureExtractionError("PDF extraction failed") from error
         warnings = tuple(
             f"page {page_number} has no extractable text"
             for page_number, text in enumerate(page_texts, start=1)
@@ -193,13 +223,31 @@ class LiteratureIngestionService:
         raw_path = repositories.root.joinpath(
             *PurePosixPath(raw_artifact.stored_path).parts
         )
-        extraction = self.extractor.extract(raw_artifact, raw_path)
+        try:
+            extraction = self.extractor.extract(raw_artifact, raw_path)
+        except LiteratureExtractionError:
+            ingestion = self._make_ingestion(
+                literature_id=literature_id,
+                raw_artifact=raw_artifact,
+                status=LiteratureIngestionStatus.FAILED,
+                warnings=("PDF extraction failed",),
+            )
+            repositories.literature_ingestions.put(
+                ingestion.ingestion_id, ingestion
+            )
+            return LiteratureIngestionOutcome(
+                literature_id=literature_id,
+                artifact_id=raw_artifact.artifact_id,
+                ingestion_id=ingestion.ingestion_id,
+                warnings=ingestion.warnings,
+            )
         if extraction.requires_ocr:
             ingestion = self._make_ingestion(
                 literature_id=literature_id,
                 raw_artifact=raw_artifact,
                 status=LiteratureIngestionStatus.REQUIRES_OCR,
                 warnings=extraction.warnings,
+                extraction=extraction,
             )
             repositories.literature_ingestions.put(
                 ingestion.ingestion_id, ingestion
@@ -244,6 +292,7 @@ class LiteratureIngestionService:
             source_version=source.version,
             status=LiteratureIngestionStatus.ACCEPTED,
             warnings=extraction.warnings,
+            extraction=extraction,
         )
         repositories.literature_ingestions.put(ingestion.ingestion_id, ingestion)
         self._finalize_literature_document(
@@ -255,11 +304,13 @@ class LiteratureIngestionService:
             source.version,
             repositories,
         )
+        selection = self._select_representation(ingestion, repositories)
         return LiteratureIngestionOutcome(
             literature_id=literature_id,
             artifact_id=raw_artifact.artifact_id,
             canonical_text_id=canonical.canonical_text_id,
             ingestion_id=ingestion.ingestion_id,
+            selection_id=selection.selection_id,
             source_id=source.source_id,
             source_version=source.version,
             warnings=ingestion.warnings,
@@ -273,6 +324,7 @@ class LiteratureIngestionService:
         raw_artifact: RawLiteratureArtifact,
         status: LiteratureIngestionStatus,
         warnings: tuple[str, ...],
+        extraction: LiteratureTextExtraction | None = None,
         canonical: Any | None = None,
         source_id: str | None = None,
         source_version: str | None = None,
@@ -293,6 +345,16 @@ class LiteratureIngestionService:
             "parser_version": self.extractor.parser_version,
             "parser_config_hash": self.extractor.parser_config_hash,
             "ingestion_status": status,
+            "total_pages": extraction.total_pages if extraction is not None else 0,
+            "pages_with_text": (
+                extraction.pages_with_text if extraction is not None else 0
+            ),
+            "pages_without_text": (
+                extraction.pages_without_text if extraction is not None else 0
+            ),
+            "text_coverage_ratio": (
+                extraction.text_coverage_ratio if extraction is not None else 0.0
+            ),
             "warnings": warnings,
         }
         identity = {key: value for key, value in identity.items() if value is not None}
@@ -302,6 +364,42 @@ class LiteratureIngestionService:
             **payload,
             content_hash=content_hash(payload),
         )
+
+    @staticmethod
+    def _select_representation(
+        ingestion: LiteratureIngestionRecord,
+        repositories: KnowledgeRepositories,
+    ) -> LiteratureRepresentationSelection:
+        repository = repositories.literature_representation_selections
+        try:
+            current = repository.resolve_current(ingestion.literature_id)
+        except FileNotFoundError:
+            current = None
+        if current is not None and current.ingestion_id == ingestion.ingestion_id:
+            return current
+        identity = {
+            "literature_id": ingestion.literature_id,
+            "ingestion_id": ingestion.ingestion_id,
+            "ingestion_hash": ingestion.content_hash,
+            "canonical_text_id": ingestion.canonical_text_id,
+            "canonical_text_hash": ingestion.canonical_text_hash,
+            "source_id": ingestion.source_id,
+            "source_version": ingestion.source_version,
+            "selected_by": "spc-ingestion-service",
+            "rationale": "Selected after deterministic canonical-text ingestion.",
+            "supersedes_selection_id": (
+                current.selection_id if current is not None else None
+            ),
+        }
+        identity = {key: value for key, value in identity.items() if value is not None}
+        selection_id = f"literature-selection-{content_hash(identity)[:24]}"
+        payload = {"selection_id": selection_id, **identity}
+        selection = LiteratureRepresentationSelection(
+            **payload,
+            content_hash=content_hash(payload),
+        )
+        repository.put(selection.selection_id, selection)
+        return selection
 
     @staticmethod
     def _finalize_literature_document(
@@ -341,6 +439,7 @@ def create_evidence_span_from_canonical_text(
     evidence_store: SourceEvidenceStore,
     *,
     locator: str | None = None,
+    historical_ingestion: bool = False,
 ) -> EvidenceSpan:
     canonical = repositories.canonical_text_artifacts.get(canonical_text_id)
     text = repositories.canonical_text_artifacts.read_text(canonical_text_id)
@@ -351,15 +450,50 @@ def create_evidence_span_from_canonical_text(
         for ingestion in repositories.literature_ingestions.list()
         if ingestion.ingestion_status == LiteratureIngestionStatus.ACCEPTED
         and ingestion.canonical_text_id == canonical_text_id
-        and ingestion.canonical_text_hash == canonical.content_hash
     )
     if len(matching) != 1:
         raise ValueError("canonical text must have exactly one accepted ingestion binding")
     ingestion = matching[0]
+    if not historical_ingestion:
+        selection = repositories.literature_representation_selections.resolve_current(
+            canonical.literature_id
+        )
+        if selection.ingestion_id != ingestion.ingestion_id:
+            raise ValueError("canonical text is not the current selected representation")
+        if (
+            selection.literature_id != ingestion.literature_id
+            or selection.ingestion_hash != ingestion.content_hash
+            or selection.canonical_text_id != canonical.canonical_text_id
+            or selection.canonical_text_hash != canonical.content_hash
+            or selection.source_id != ingestion.source_id
+            or selection.source_version != ingestion.source_version
+        ):
+            raise ValueError("current representation selection binding is invalid")
+    raw = repositories.raw_literature_artifacts.get(ingestion.raw_artifact_id)
+    if (
+        ingestion.raw_artifact_hash != raw.content_hash
+        or ingestion.canonical_text_hash != canonical.content_hash
+        or ingestion.literature_id != canonical.literature_id
+        or ingestion.literature_id != raw.literature_id
+        or canonical.raw_artifact_id != raw.artifact_id
+        or canonical.raw_artifact_hash != raw.content_hash
+        or ingestion.parser_id != canonical.parser_id
+        or ingestion.parser_version != canonical.parser_version
+        or ingestion.parser_config_hash != canonical.parser_config_hash
+    ):
+        raise ValueError("raw/canonical/ingestion binding is invalid")
     source = evidence_store.source_records.get(
         f"{ingestion.source_id}--{ingestion.source_version}"
     )
     evidence_store.verify_source_integrity(source)
+    if (
+        source.source_id != ingestion.source_id
+        or source.version != ingestion.source_version
+        or source.content_sha256 != canonical.text_sha256
+        or source.source_role != SourceRole.LITERATURE_AUTHOR
+        or source.source_type != SourceType.LITERATURE_ARTICLE
+    ):
+        raise ValueError("canonical/source binding is invalid")
     recovered = text[start_offset:end_offset]
     evidence_identity = {
         "canonical_text_id": canonical_text_id,

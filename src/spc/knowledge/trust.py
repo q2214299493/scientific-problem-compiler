@@ -24,6 +24,7 @@ from ..models import (
     LiteratureDocument,
     LiteratureIngestionRecord,
     LiteratureIngestionStatus,
+    LiteratureRepresentationSelection,
     LiteratureWorkflowPattern,
     MethodFact,
     ModelFact,
@@ -47,6 +48,11 @@ REPOSITORY_NODE_SPECS = (
     ("raw_literature_artifact", "raw_literature_artifacts", "artifact_id"),
     ("canonical_text_artifact", "canonical_text_artifacts", "canonical_text_id"),
     ("literature_ingestion", "literature_ingestions", "ingestion_id"),
+    (
+        "literature_representation_selection",
+        "literature_representation_selections",
+        "selection_id",
+    ),
     ("expert_profile", "expert_profiles", "expert_id"),
     ("expert_attribution", "expert_attributions", "attribution_id"),
     ("expert_opinion", "expert_opinions", "opinion_id"),
@@ -196,11 +202,31 @@ class TrustedKnowledgeValidator:
             ("scientific_capability", item.capability_id)
             for item in self.repositories.capabilities.list()
         )
+        ingestion_literature_ids = {
+            item.literature_id
+            for item in self.repositories.literature_ingestions.list()
+            if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
+        }
         roots.update(
             ("literature_ingestion", item.ingestion_id)
             for item in self.repositories.literature_ingestions.list()
             if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
         )
+        for literature_id in sorted(ingestion_literature_ids):
+            try:
+                selection = (
+                    self.repositories.literature_representation_selections.resolve_current(
+                        literature_id
+                    )
+                )
+            except (FileNotFoundError, ValueError) as error:
+                raise TrustedKnowledgeError(
+                    "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                    str(error),
+                ) from error
+            roots.add(
+                ("literature_representation_selection", selection.selection_id)
+            )
         for key in sorted(roots):
             self._validate_record(key, current, set())
 
@@ -246,6 +272,8 @@ class TrustedKnowledgeValidator:
                 self._validate_canonical_text(record, current, visiting)
             elif isinstance(record, LiteratureIngestionRecord):
                 self._validate_ingestion(record, current, visiting)
+            elif isinstance(record, LiteratureRepresentationSelection):
+                self._validate_representation_selection(record, current, visiting)
             elif isinstance(record, ExpertProfile):
                 pass
             elif isinstance(record, ExpertAttributionRecord):
@@ -288,41 +316,53 @@ class TrustedKnowledgeValidator:
             if ingestion.literature_id == document.literature_id
         )
         if ingestions:
-            matching = tuple(
-                ingestion
-                for ingestion in ingestions
-                if ingestion.ingestion_status == LiteratureIngestionStatus.ACCEPTED
-                and ingestion.source_id == document.source_id
-                and ingestion.source_version == document.source_version
-            )
-            if len(matching) != 1:
-                raise TrustedKnowledgeError(
-                    "INVALID_LITERATURE_INGESTION_BINDING",
-                    f"LiteratureDocument must bind one accepted ingestion: {document.literature_id}",
+            try:
+                selection = (
+                    self.repositories.literature_representation_selections.resolve_current(
+                        document.literature_id
+                    )
                 )
-            ingestion = matching[0]
-            raw = self._require_record(
-                "raw_literature_artifact", ingestion.raw_artifact_id
-            )
-            canonical = self._require_record(
-                "canonical_text_artifact", ingestion.canonical_text_id or ""
-            )
-            if (
-                not isinstance(raw, RawLiteratureArtifact)
-                or not isinstance(canonical, CanonicalTextArtifact)
-                or document.raw_artifact_ref != raw.stored_path
-                or document.canonical_text_ref != canonical.stored_path
-            ):
+            except (FileNotFoundError, ValueError) as error:
                 raise TrustedKnowledgeError(
-                    "INVALID_LITERATURE_INGESTION_BINDING",
-                    f"LiteratureDocument artifact paths do not match ingestion: {document.literature_id}",
-                )
+                    "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                    str(error),
+                ) from error
             self._validate_record(
-                ("literature_ingestion", ingestion.ingestion_id), current, visiting
+                ("literature_representation_selection", selection.selection_id),
+                current,
+                visiting,
             )
             return
         source = self._verify_source(document.source_id, document.source_version)
         self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+
+    def _validate_representation_selection(
+        self,
+        selection: LiteratureRepresentationSelection,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        ingestion = self._validate_record(
+            ("literature_ingestion", selection.ingestion_id), current, visiting
+        )
+        if not isinstance(ingestion, LiteratureIngestionRecord):
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                f"selection has no ingestion: {selection.selection_id}",
+            )
+        if (
+            ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED
+            or selection.literature_id != ingestion.literature_id
+            or selection.ingestion_hash != ingestion.content_hash
+            or selection.canonical_text_id != ingestion.canonical_text_id
+            or selection.canonical_text_hash != ingestion.canonical_text_hash
+            or selection.source_id != ingestion.source_id
+            or selection.source_version != ingestion.source_version
+        ):
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                f"selection binding is invalid: {selection.selection_id}",
+            )
 
     def _validate_canonical_text(
         self,

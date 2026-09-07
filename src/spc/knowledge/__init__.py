@@ -3,6 +3,7 @@
 from .graph import KnowledgeGraphBuilder, KnowledgeGraphError
 from .ingestion import (
     LiteratureIngestionService,
+    LiteratureExtractionError,
     LiteratureMetadata,
     LiteratureTextExtractor,
     PypdfLiteratureTextExtractor,
@@ -17,6 +18,7 @@ __all__ = [
     "TrustedKnowledgeError",
     "TrustedKnowledgeValidator",
     "LiteratureIngestionService",
+    "LiteratureExtractionError",
     "LiteratureMetadata",
     "LiteratureTextExtractor",
     "PypdfLiteratureTextExtractor",

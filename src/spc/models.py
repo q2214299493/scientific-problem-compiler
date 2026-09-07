@@ -851,6 +851,10 @@ class LiteratureIngestionRecord(StrictModel):
     parser_version: NonBlankStr
     parser_config_hash: Sha256Str
     ingestion_status: LiteratureIngestionStatus
+    total_pages: int = Field(ge=0)
+    pages_with_text: int = Field(ge=0)
+    pages_without_text: int = Field(ge=0)
+    text_coverage_ratio: float = Field(ge=0, le=1, allow_inf_nan=False)
     warnings: tuple[NonBlankStr, ...] = ()
     content_hash: Sha256Str
 
@@ -860,6 +864,13 @@ class LiteratureIngestionRecord(StrictModel):
 
         if len(set(self.warnings)) != len(self.warnings):
             raise ValueError("LiteratureIngestionRecord warnings must be unique")
+        if self.pages_with_text + self.pages_without_text != self.total_pages:
+            raise ValueError("literature ingestion page metrics are inconsistent")
+        expected_coverage = (
+            self.pages_with_text / self.total_pages if self.total_pages else 0.0
+        )
+        if abs(self.text_coverage_ratio - expected_coverage) > 1e-12:
+            raise ValueError("literature ingestion text coverage ratio is invalid")
         canonical_binding = (
             self.canonical_text_id,
             self.canonical_text_hash,
@@ -869,6 +880,13 @@ class LiteratureIngestionRecord(StrictModel):
         if self.ingestion_status == LiteratureIngestionStatus.ACCEPTED:
             if any(value is None for value in canonical_binding):
                 raise ValueError("accepted literature ingestion requires canonical/source binding")
+            if self.pages_with_text == 0:
+                raise ValueError("accepted literature ingestion requires extractable text")
+        elif self.ingestion_status == LiteratureIngestionStatus.REQUIRES_OCR:
+            if self.pages_with_text != 0:
+                raise ValueError("requires_ocr ingestion cannot contain extractable text")
+            if any(value is not None for value in canonical_binding):
+                raise ValueError("non-accepted literature ingestion cannot bind canonical/source records")
         elif any(value is not None for value in canonical_binding):
             raise ValueError("non-accepted literature ingestion cannot bind canonical/source records")
         identity = self.model_dump(
@@ -885,11 +903,48 @@ class LiteratureIngestionRecord(StrictModel):
         return self
 
 
+class LiteratureRepresentationSelection(StrictModel):
+    selection_id: NonBlankStr
+    literature_id: NonBlankStr
+    ingestion_id: NonBlankStr
+    ingestion_hash: Sha256Str
+    canonical_text_id: NonBlankStr
+    canonical_text_hash: Sha256Str
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    selected_by: NonBlankStr
+    rationale: NonBlankStr
+    supersedes_selection_id: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureRepresentationSelection:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json",
+            exclude={"selection_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"literature-selection-{content_hash(identity)[:24]}"
+        if self.selection_id != expected_id:
+            raise ValueError(
+                "LiteratureRepresentationSelection selection_id is not content-bound"
+            )
+        payload = {"selection_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError(
+                "LiteratureRepresentationSelection content_hash is invalid"
+            )
+        return self
+
+
 class LiteratureIngestionOutcome(StrictModel):
     literature_id: NonBlankStr
     artifact_id: NonBlankStr
     canonical_text_id: NonBlankStr | None = None
     ingestion_id: NonBlankStr
+    selection_id: NonBlankStr | None = None
     source_id: NonBlankStr | None = None
     source_version: NonBlankStr | None = None
     warnings: tuple[NonBlankStr, ...] = ()
@@ -1223,6 +1278,9 @@ class KnowledgeSnapshot(StrictModel):
         default_factory=dict, exclude_if=lambda value: not value
     )
     literature_ingestion_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    literature_representation_selection_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
     expert_profile_hashes: dict[NonBlankStr, Sha256Str] = Field(

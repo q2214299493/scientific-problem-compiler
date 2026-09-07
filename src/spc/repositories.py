@@ -24,6 +24,7 @@ from .models import (
     KnowledgeRelation,
     LiteratureDocument,
     LiteratureIngestionRecord,
+    LiteratureRepresentationSelection,
     LiteratureWorkflowPattern,
     MethodFact,
     ModelFact,
@@ -413,6 +414,18 @@ class RawLiteratureArtifactRepository:
         digest = hashlib.sha256(content).hexdigest()
         identity = {"literature_id": literature_id, "sha256": digest}
         artifact_id = f"literature-artifact-{content_hash(identity)[:24]}"
+        destination = self.root / artifact_id
+        if destination.exists():
+            existing = self.get(artifact_id)
+            if (
+                existing.literature_id != literature_id
+                or existing.sha256 != digest
+                or existing.byte_size != len(content)
+            ):
+                raise FileExistsError(
+                    f"refusing to reuse conflicting raw artifact: {artifact_id}"
+                )
+            return existing
         payload = {
             "artifact_id": artifact_id,
             "literature_id": literature_id,
@@ -426,14 +439,6 @@ class RawLiteratureArtifactRepository:
             **payload,
             content_hash=content_hash(payload),
         )
-        destination = self.root / artifact_id
-        if destination.exists():
-            existing = self.get(artifact_id)
-            if existing != record:
-                raise FileExistsError(
-                    f"refusing to overwrite different raw artifact: {artifact_id}"
-                )
-            return existing
         self._write_directory(destination, "artifact.pdf", content, record)
         return self.get(artifact_id)
 
@@ -626,6 +631,70 @@ class LiteratureIngestionRepository(
         )
 
 
+class LiteratureRepresentationSelectionRepository(
+    IdentityBoundRepository[LiteratureRepresentationSelection]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "literature_representation_selections",
+            LiteratureRepresentationSelection,
+            "selection_id",
+        )
+
+    def resolve_current(
+        self, literature_id: str
+    ) -> LiteratureRepresentationSelection:
+        require_safe_path_component(literature_id, field="literature_id")
+        all_records = {item.selection_id: item for item in self.list()}
+        records = tuple(
+            item for item in all_records.values() if item.literature_id == literature_id
+        )
+        if not records:
+            raise FileNotFoundError(
+                f"no representation selection for literature: {literature_id}"
+            )
+        successors: dict[str, str] = {}
+        for record in records:
+            predecessor_id = record.supersedes_selection_id
+            if predecessor_id is None:
+                continue
+            predecessor = all_records.get(predecessor_id)
+            if predecessor is None:
+                raise ValueError(
+                    f"missing superseded representation selection: {predecessor_id}"
+                )
+            if predecessor.literature_id != literature_id:
+                raise ValueError(
+                    "representation selection history must retain literature_id"
+                )
+            if predecessor_id in successors:
+                raise ValueError(
+                    f"representation selection has multiple successors: {predecessor_id}"
+                )
+            successors[predecessor_id] = record.selection_id
+        heads = [record for record in records if record.selection_id not in successors]
+        if len(heads) != 1:
+            raise ValueError(
+                f"expected exactly one current representation selection: {literature_id}"
+            )
+        seen: set[str] = set()
+        current = heads[0]
+        cursor: LiteratureRepresentationSelection | None = current
+        while cursor is not None:
+            if cursor.selection_id in seen:
+                raise ValueError(
+                    f"cyclic representation selection history: {literature_id}"
+                )
+            seen.add(cursor.selection_id)
+            predecessor_id = cursor.supersedes_selection_id
+            cursor = all_records.get(predecessor_id) if predecessor_id else None
+        if len(seen) != len(records):
+            raise ValueError(
+                f"cyclic or disconnected representation selection history: {literature_id}"
+            )
+        return current
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -637,6 +706,9 @@ class KnowledgeRepositories:
         self.raw_literature_artifacts = self.literature_artifacts.raw_artifacts
         self.canonical_text_artifacts = self.literature_artifacts.canonical_texts
         self.literature_ingestions = LiteratureIngestionRepository(root)
+        self.literature_representation_selections = (
+            LiteratureRepresentationSelectionRepository(root)
+        )
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.expert_attributions = ExpertAttributionRepository(root)
@@ -681,6 +753,14 @@ class KnowledgeRepositories:
     ) -> None:
         for record in records:
             self.literature_ingestions.put(record.ingestion_id, record)
+
+    def load_literature_representation_selections(
+        self, records: Iterable[LiteratureRepresentationSelection]
+    ) -> None:
+        for record in records:
+            self.literature_representation_selections.put(
+                record.selection_id, record
+            )
 
     def load_expert_profiles(self, records: Iterable[ExpertProfile]) -> None:
         for record in records:
@@ -749,6 +829,11 @@ class KnowledgeRepositories:
                 for (record_type, record_id), record in trusted.trusted_records.items()
                 if record_type == "literature_ingestion"
             },
+            "literature_representation_selection_hashes": {
+                record_id: record.content_hash
+                for (record_type, record_id), record in trusted.trusted_records.items()
+                if record_type == "literature_representation_selection"
+            },
             "expert_profile_hashes": {
                 item.expert_id: item.content_hash
                 for item in trusted.expert_profiles
@@ -785,6 +870,7 @@ class KnowledgeRepositories:
                 "raw_literature_artifact_hashes",
                 "canonical_text_artifact_hashes",
                 "literature_ingestion_hashes",
+                "literature_representation_selection_hashes",
                 "expert_profile_hashes",
                 "expert_opinion_hashes",
                 "expert_attribution_hashes",

@@ -187,3 +187,11 @@ artifact, source version and ingestion record.
 The `spc ingest-literature` command accepts a PDF plus bibliographic metadata.
 Trusted snapshots recursively verify the raw bytes, canonical UTF-8 text,
 block offsets, ingestion hashes and SourceDocument binding before use.
+
+K1B.1 adds an immutable `LiteratureRepresentationSelection` chain. The current
+selection, rather than mutable fields on `LiteratureDocument`, authoritatively
+chooses one ingestion/canonical/source representation. Evidence creation uses
+that current selection by default and requires an explicit historical mode for
+older representations. Ingestion records also retain page-level text coverage;
+expected parser failures persist a non-sensitive `failed` audit record after
+the raw PDF has been stored.
