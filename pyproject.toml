@@ -29,6 +29,7 @@ spc = [
   "domain_packs/fischer_tropsch/*.yaml",
   "adapters/catalogs/*.yaml",
   "knowledge/fixtures/*.yaml",
+  "knowledge/fixtures/*.txt",
 ]
 
 [tool.pytest.ini_options]

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import StrEnum
 from collections.abc import Mapping
+import unicodedata
 from typing import Annotated, Any
 
 from pydantic import (
@@ -23,6 +24,19 @@ def _require_non_blank(value: str) -> str:
     if not value.strip():
         raise ValueError("text must not be blank")
     return value
+
+
+def _normalize_identity_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _normalize_doi(value: str) -> str:
+    normalized = _normalize_identity_text(value)
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if normalized.startswith(prefix):
+            normalized = normalized.removeprefix(prefix).strip()
+            break
+    return normalized
 
 
 NonBlankStr = Annotated[
@@ -75,6 +89,11 @@ class CurationStatus(StrEnum):
     HUMAN_REVIEWED = "human_reviewed"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+
+
+class KnowledgeViewMode(StrEnum):
+    TRUSTED = "trusted"
+    AUDIT = "audit"
 
 
 class KnowledgePredicate(StrEnum):
@@ -656,7 +675,6 @@ class LiteratureDocument(StrictModel):
     source_id: NonBlankStr
     source_version: NonBlankStr
     citation_refs: tuple[NonBlankStr, ...] = ()
-    curation_status: CurationStatus
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -667,15 +685,18 @@ class LiteratureDocument(StrictModel):
             values = getattr(self, field_name)
             if len(set(values)) != len(values):
                 raise ValueError(f"LiteratureDocument {field_name} must be unique")
-        identity = self.model_dump(
-            mode="json",
-            exclude={"literature_id", "content_hash"},
-            exclude_none=True,
-        )
-        expected_id = f"literature-{content_hash(identity)[:24]}"
+        if self.doi is not None:
+            stable_identity = {"doi": _normalize_doi(self.doi)}
+        else:
+            stable_identity = {
+                "title": _normalize_identity_text(self.title),
+                "authors": tuple(_normalize_identity_text(item) for item in self.authors),
+                "year": self.year,
+            }
+        expected_id = f"literature-{content_hash(stable_identity)[:24]}"
         if self.literature_id != expected_id:
             raise ValueError("LiteratureDocument literature_id is not content-bound")
-        payload = {"literature_id": expected_id, **identity}
+        payload = self.model_dump(mode="json", exclude={"content_hash"}, exclude_none=True)
         if self.content_hash != content_hash(payload):
             raise ValueError("LiteratureDocument content_hash is invalid")
         return self
@@ -724,7 +745,6 @@ class ExpertOpinion(StrictModel):
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
     related_claim_refs: tuple[NonBlankStr, ...] = ()
     related_workflow_refs: tuple[NonBlankStr, ...] = ()
-    status: CurationStatus
     supersedes: NonBlankStr | None = None
     content_hash: Sha256Str
 
@@ -767,7 +787,6 @@ class KnowledgeRelation(StrictModel):
     domain: NonBlankStr
     evidence_refs: tuple[NonBlankStr, ...] = ()
     rationale: NonBlankStr
-    status: CurationStatus
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -792,6 +811,40 @@ class KnowledgeRelation(StrictModel):
         payload = {"relation_id": expected_id, **identity}
         if self.content_hash != content_hash(payload):
             raise ValueError("KnowledgeRelation content_hash is invalid")
+        return self
+
+
+class KnowledgeCurationRecord(StrictModel):
+    curation_id: NonBlankStr
+    target_type: KnowledgeEntityType
+    target_id: NonBlankStr
+    target_hash: Sha256Str
+    status: CurationStatus
+    curator_id: NonBlankStr
+    rationale: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    supersedes_curation_id: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> KnowledgeCurationRecord:
+        from .serialization import content_hash
+
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("KnowledgeCurationRecord evidence_refs must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"curation_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"knowledge-curation-{content_hash(identity)[:24]}"
+        if self.curation_id != expected_id:
+            raise ValueError("KnowledgeCurationRecord curation_id is not content-bound")
+        if self.supersedes_curation_id == self.curation_id:
+            raise ValueError("KnowledgeCurationRecord cannot supersede itself")
+        payload = {"curation_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("KnowledgeCurationRecord content_hash is invalid")
         return self
 
 
@@ -943,6 +996,9 @@ class KnowledgeSnapshot(StrictModel):
     knowledge_relation_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
+    curation_record_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_snapshot_id(self) -> KnowledgeSnapshot:
@@ -963,6 +1019,7 @@ class KnowledgeGraphNode(StrictModel):
     record_type: KnowledgeEntityType
     record_id: NonBlankStr
     record_hash: Sha256Str
+    curation_status: CurationStatus | None = None
 
     @model_validator(mode="after")
     def validate_node_id(self) -> KnowledgeGraphNode:
@@ -981,10 +1038,12 @@ class KnowledgeGraphEdge(StrictModel):
     predicate: KnowledgePredicate
     object_node_id: NonBlankStr
     evidence_refs: tuple[NonBlankStr, ...] = ()
+    curation_status: CurationStatus | None = None
 
 
 class KnowledgeGraph(StrictModel):
     graph_id: NonBlankStr
+    view_mode: KnowledgeViewMode
     domain_filter: NonBlankStr | None = None
     topic_filter: NonBlankStr | None = None
     nodes: tuple[KnowledgeGraphNode, ...]
@@ -1008,6 +1067,19 @@ class KnowledgeGraph(StrictModel):
                 or edge.object_node_id not in known_nodes
             ):
                 raise ValueError("KnowledgeGraph edge references an unknown node")
+        if self.view_mode == KnowledgeViewMode.TRUSTED:
+            for node in self.nodes:
+                if (
+                    node.record_type
+                    in {"literature_document", "expert_opinion", "knowledge_relation"}
+                    and node.curation_status != CurationStatus.ACCEPTED
+                ):
+                    raise ValueError("trusted KnowledgeGraph contains an unaccepted entity")
+            if any(
+                edge.curation_status != CurationStatus.ACCEPTED
+                for edge in self.edges
+            ):
+                raise ValueError("trusted KnowledgeGraph contains an unaccepted relation")
         if tuple(sorted(self.nodes, key=lambda item: (item.record_type, item.record_id))) != self.nodes:
             raise ValueError("KnowledgeGraph nodes must be deterministically ordered")
         if tuple(sorted(self.edges, key=lambda item: item.relation_id)) != self.edges:

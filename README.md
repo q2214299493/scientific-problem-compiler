@@ -143,13 +143,19 @@ capability models rather than creating parallel scientific records. Repository
 writes bind each safe record key to its model identity and reject conflicting
 overwrites; relation IDs are unique and content-bound.
 
-`KnowledgeSnapshot` now binds accepted literature documents, accepted expert
-opinions, accepted relations, expert profiles, and the existing Phase 2
-knowledge/evidence records. Non-accepted literature, opinions, and relations do
-not enter the trusted snapshot. `KnowledgeGraphBuilder` deterministically
-projects repository IDs and hashes into nodes and relation references into
-edges. Mermaid output is only a reproducible view: immutable repository records
-remain authoritative.
+K1A.1 separates scientific identity from curation state. Literature IDs use a
+normalized DOI when available, otherwise normalized title, authors, and year;
+changing curation status never changes literature, opinion, or relation IDs.
+Every transition is instead an immutable, hash-bound `KnowledgeCurationRecord`
+that supersedes the prior decision without overwriting it.
+
+`KnowledgeSnapshot` binds only accepted records whose current curation chain,
+source document, evidence spans, expert/profile references, claims, workflows,
+and relation endpoints pass `TrustedKnowledgeValidator`. Missing or tampered
+provenance fails closed. `KnowledgeGraphBuilder` defaults to this trusted view;
+its audit view may show all curation states and labels each node and edge status
+in text. Mermaid output remains only a reproducible view: immutable repository
+and curation records are authoritative.
 
 The package includes an offline, non-FT fixture with one literature claim
 relation, one expert-opinion provenance relation, and one literature-workflow

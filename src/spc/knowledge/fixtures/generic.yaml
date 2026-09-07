@@ -1,18 +1,82 @@
+curations:
+  - content_hash: f6362d34f3ee728d37e5e6a1d678d778eca4acb4fdcaaf2041757d1378c582d1
+    curation_id: knowledge-curation-d78bd14b120aae6aa9a1ad31
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 586f665937703bf5238be50c3d626c7ab19db370dc41e624c019bd55b4edc7cf
+    target_id: literature-7eae49b2b522af21a08b565c
+    target_type: literature_document
+  - content_hash: 29f7dafdee2403d4e51ba14ac535203c364e5dc4a0aa39b8edb5ae6963305561
+    curation_id: knowledge-curation-becd7a5898f398153c0bb0f8
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: e4161d5ee9c7edda943f23f03a3e3843375b074fccded56ac0f92ea510b9b737
+    target_id: expert-opinion-3188d7527af4e1c4e9e325d2
+    target_type: expert_opinion
+  - content_hash: c9d6c98fc5a02282fcd81bc518082506c5eac4fd839b02435ba384b5b04e104b
+    curation_id: knowledge-curation-32fb4af74f54a9cee317cf64
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: ad845e20ba78844343465a2b832854f40abcf8c7c9d31e5c34c96ce589f3631d
+    target_id: knowledge-relation-16e174e9a6f57a4bbc5c0ca0
+    target_type: knowledge_relation
+  - content_hash: 9f9bb9b557ee18118a1486b181a2f0d7efec4b9df4393f0a9d88e351cf7ba9d3
+    curation_id: knowledge-curation-d40c69447e2642f04061afe5
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 4e264e5d582ccbac1b408f325325504d8a825f3120b74119750a0dfd258cdccf
+    target_id: knowledge-relation-4a25e4c51b19c6c0ed87efe9
+    target_type: knowledge_relation
+  - content_hash: 672d777ee7237cc2b5ec23b225e9364ca21d68a9a3e4c149de0fa13240473832
+    curation_id: knowledge-curation-ee98bed51e68c6db38358e27
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 67a62241d653f4e2447c8282a45d8f362ba3a8602e9e6e2dbf0ec3ecb5300521
+    target_id: knowledge-relation-22a41465767cfced2a495be7
+    target_type: knowledge_relation
+evidence_spans:
+  - content_sha256: 3dfdb337950433d1fbf1e94703b69eb16ab303afddcd0755e62223082af60f45
+    end_offset: 64
+    evidence_id: ev-literature-connectivity
+    source_id: source-generic-paper
+    source_version: v1
+    start_offset: 0
+    text: A pathway comparison requires connectivity-preserving endpoints.
+  - content_sha256: 3dfdb337950433d1fbf1e94703b69eb16ab303afddcd0755e62223082af60f45
+    end_offset: 125
+    evidence_id: ev-expert-guidance
+    source_id: source-generic-paper
+    source_version: v1
+    start_offset: 65
+    text: Endpoint selection should preserve mechanistic connectivity.
 expert_opinions:
-  - conditions:
-      - Atom identity and boundary conditions remain consistent.
-    content_hash: b9ae127a1b458652edbdb715314592974ff685bd8c249508ba28063a3d3f2550
+  - conditions: [Atom identity and boundary conditions remain consistent.]
+    content_hash: e4161d5ee9c7edda943f23f03a3e3843375b074fccded56ac0f92ea510b9b737
     domain: base
     evidence_refs: [ev-expert-guidance]
     expert_id: expert-methodology-001
-    opinion_id: expert-opinion-6682fa29fa608209fd3d0a4c
+    opinion_id: expert-opinion-3188d7527af4e1c4e9e325d2
     opinion_type: methodological_guidance
     rationale: Disconnected endpoints cannot support a coherent pathway comparison.
     related_claim_refs: [claim-connectivity-001]
     related_workflow_refs: [workflow-connectivity-001]
     scope: Scientific pathway planning
     statement: Endpoint selection should preserve mechanistic connectivity.
-    status: accepted
     supersedes: null
     topic: endpoint selection
 expert_profiles:
@@ -27,13 +91,12 @@ literature_documents:
   - authors: [A. Researcher, B. Curator]
     canonical_text_ref: texts/generic-paper.txt
     citation_refs: [citation-example-1]
-    content_hash: 9cb1bcfd4eed7d551043031585b8d98e90ca8b39ae27fa4767ae5907a0cc541c
-    curation_status: accepted
+    content_hash: 586f665937703bf5238be50c3d626c7ab19db370dc41e624c019bd55b4edc7cf
     doi: 10.0000/example.k1a
     domain: base
     journal: Journal of Reproducible Science
     keywords: [endpoint selection, provenance]
-    literature_id: literature-005eae2be812a4db3c662738
+    literature_id: literature-7eae49b2b522af21a08b565c
     raw_artifact_ref: artifacts/generic-paper.pdf
     source_id: source-generic-paper
     source_version: v1
@@ -42,38 +105,35 @@ literature_documents:
     url: https://example.org/literature/k1a
     year: 2026
 relations:
-  - content_hash: cd6885c4c248a3d02930d727043b05230fe4d0bb37863446d2fc2e89407bdd2a
+  - content_hash: ad845e20ba78844343465a2b832854f40abcf8c7c9d31e5c34c96ce589f3631d
     domain: base
     evidence_refs: [ev-literature-connectivity]
     object_id: claim-connectivity-001
     object_type: source_claim
     predicate: supports
     rationale: The curated document is the provenance source for the claim.
-    relation_id: knowledge-relation-7fdb5267955cfec4a06fab6d
-    status: accepted
-    subject_id: literature-005eae2be812a4db3c662738
+    relation_id: knowledge-relation-16e174e9a6f57a4bbc5c0ca0
+    subject_id: literature-7eae49b2b522af21a08b565c
     subject_type: literature_document
-  - content_hash: 995bc093244e1f4a1c0dbaebe6f67bf528037d838d21b873dca7a9e9893c0818
+  - content_hash: 4e264e5d582ccbac1b408f325325504d8a825f3120b74119750a0dfd258cdccf
     domain: base
     evidence_refs: [ev-expert-guidance]
     object_id: expert-methodology-001
     object_type: expert_profile
     predicate: derived_from
     rationale: The opinion is attributed to the persisted expert profile.
-    relation_id: knowledge-relation-220dab253880036bc87a684f
-    status: accepted
-    subject_id: expert-opinion-6682fa29fa608209fd3d0a4c
+    relation_id: knowledge-relation-4a25e4c51b19c6c0ed87efe9
+    subject_id: expert-opinion-3188d7527af4e1c4e9e325d2
     subject_type: expert_opinion
-  - content_hash: eb3d767f34189fb191dff0e98f8341b2e29545d2985ea1aaa1363a6c15531d8d
+  - content_hash: 67a62241d653f4e2447c8282a45d8f362ba3a8602e9e6e2dbf0ec3ecb5300521
     domain: base
     evidence_refs: [ev-literature-connectivity]
     object_id: workflow-connectivity-001
     object_type: workflow_pattern
     predicate: applies_to
     rationale: The literature guidance applies to this workflow pattern.
-    relation_id: knowledge-relation-a35b16e2bd46a9f64e125daf
-    status: accepted
-    subject_id: literature-005eae2be812a4db3c662738
+    relation_id: knowledge-relation-22a41465767cfced2a495be7
+    subject_id: literature-7eae49b2b522af21a08b565c
     subject_type: literature_document
 source_claims:
   - claim_id: claim-connectivity-001
@@ -84,6 +144,13 @@ source_claims:
     source_quote_refs: [quote-connectivity-001]
     source_role: author
     text: A pathway comparison requires connectivity-preserving endpoints.
+source_artifacts:
+  - path: generic-source.txt
+    source_id: source-generic-paper
+    source_role: literature_author
+    source_type: literature_article
+    source_version: v1
+    title: Generic methodology source
 workflow_patterns:
   - domain: base
     evidence_refs: [ev-literature-connectivity]

@@ -10,13 +10,13 @@ from typing import Generic, Iterable, TypeVar
 from pydantic import BaseModel
 
 from .models import (
-    CurationStatus,
     DomainProfile,
     EvidenceSpan,
     ExpertCase,
     ExpertOpinion,
     ExpertProfile,
     KnowledgeSnapshot,
+    KnowledgeCurationRecord,
     KnowledgeRelation,
     LiteratureDocument,
     LiteratureWorkflowPattern,
@@ -151,19 +151,14 @@ class SourceEvidenceStore:
     def get(self, key: str) -> EvidenceSpan:
         return self.evidence_records.get(key)
 
-    def _verify_evidence_against_source(self, evidence: EvidenceSpan) -> SourceDocument:
-        require_safe_path_component(evidence.source_id, field="evidence source_id")
-        require_safe_path_component(evidence.source_version, field="evidence source_version")
-        source = self.source_records.get(f"{evidence.source_id}--{evidence.source_version}")
-        if (source.source_id, source.version) != (
-            evidence.source_id,
-            evidence.source_version,
-        ):
-            raise ValueError("SourceDocument source_id/version does not match EvidenceSpan")
+    def verify_source_integrity(self, source: SourceDocument) -> SourceDocument:
+        require_safe_path_component(source.source_id, field="source_id")
+        require_safe_path_component(source.version, field="source version")
+        stored_source = self.source_records.get(f"{source.source_id}--{source.version}")
+        if stored_source != source:
+            raise ValueError("SourceDocument differs from its repository record")
         if not source.read_only:
             raise ValueError("SourceDocument must be marked read_only")
-        if source.content_sha256 != evidence.content_sha256:
-            raise ValueError("EvidenceSpan content hash does not match SourceDocument")
         stored = PurePosixPath(source.stored_path)
         expected = PurePosixPath("sources") / source.source_id / source.version / "content"
         if stored != expected or stored.is_absolute() or ".." in stored.parts:
@@ -178,6 +173,22 @@ class SourceEvidenceStore:
         content = content_path.read_bytes()
         if hashlib.sha256(content).hexdigest() != source.content_sha256:
             raise ValueError("stored source content hash does not match SourceDocument")
+        return source
+
+    def _verify_evidence_against_source(self, evidence: EvidenceSpan) -> SourceDocument:
+        require_safe_path_component(evidence.source_id, field="evidence source_id")
+        require_safe_path_component(evidence.source_version, field="evidence source_version")
+        source = self.source_records.get(f"{evidence.source_id}--{evidence.source_version}")
+        if (source.source_id, source.version) != (
+            evidence.source_id,
+            evidence.source_version,
+        ):
+            raise ValueError("SourceDocument source_id/version does not match EvidenceSpan")
+        self.verify_source_integrity(source)
+        if source.content_sha256 != evidence.content_sha256:
+            raise ValueError("EvidenceSpan content hash does not match SourceDocument")
+        content_path = self.state_root.joinpath(*PurePosixPath(source.stored_path).parts)
+        content = content_path.read_bytes()
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -359,6 +370,17 @@ class KnowledgeRelationRepository(IdentityBoundRepository[KnowledgeRelation]):
         return super().put(key, model)
 
 
+class KnowledgeCurationRepository(
+    IdentityBoundRepository[KnowledgeCurationRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "curations",
+            KnowledgeCurationRecord,
+            "curation_id",
+        )
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -369,6 +391,7 @@ class KnowledgeRepositories:
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.relations = KnowledgeRelationRepository(root)
+        self.curations = KnowledgeCurationRepository(root)
         self.source_quotes = IdentityBoundRepository(
             root / "source_quotes", SourceQuote, "quote_id"
         )
@@ -415,11 +438,18 @@ class KnowledgeRepositories:
         for record in records:
             self.relations.put(record.relation_id, record)
 
+    def load_curations(self, records: Iterable[KnowledgeCurationRecord]) -> None:
+        for record in records:
+            self.curations.put(record.curation_id, record)
+
     def create_snapshot(
         self,
         evidence_store: SourceEvidenceStore,
         domain_profile: DomainProfile,
     ) -> KnowledgeSnapshot:
+        from .knowledge.trust import TrustedKnowledgeValidator
+
+        trusted = TrustedKnowledgeValidator(self, evidence_store).validate()
         payload = {
             "domain_profile_hash": content_hash(domain_profile),
             "expert_case_hashes": {
@@ -440,22 +470,22 @@ class KnowledgeRepositories:
             },
             "literature_document_hashes": {
                 item.literature_id: item.content_hash
-                for item in self.literature_documents.list()
-                if item.curation_status == CurationStatus.ACCEPTED
+                for item in trusted.literature_documents
             },
             "expert_profile_hashes": {
                 item.expert_id: item.content_hash
-                for item in self.expert_profiles.list()
+                for item in trusted.expert_profiles
             },
             "expert_opinion_hashes": {
                 item.opinion_id: item.content_hash
-                for item in self.expert_opinions.list()
-                if item.status == CurationStatus.ACCEPTED
+                for item in trusted.expert_opinions
             },
             "knowledge_relation_hashes": {
                 item.relation_id: item.content_hash
-                for item in self.relations.list()
-                if item.status == CurationStatus.ACCEPTED
+                for item in trusted.relations
+            },
+            "curation_record_hashes": {
+                item.curation_id: item.content_hash for item in trusted.curations
             },
         }
         snapshot_identity = {
@@ -468,6 +498,7 @@ class KnowledgeRepositories:
                 "expert_profile_hashes",
                 "expert_opinion_hashes",
                 "knowledge_relation_hashes",
+                "curation_record_hashes",
             }
         }
         return KnowledgeSnapshot(
