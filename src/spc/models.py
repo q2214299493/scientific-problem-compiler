@@ -91,6 +91,12 @@ class CurationStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class LiteratureIngestionStatus(StrEnum):
+    ACCEPTED = "accepted"
+    REQUIRES_OCR = "requires_ocr"
+    FAILED = "failed"
+
+
 class KnowledgeViewMode(StrEnum):
     TRUSTED = "trusted"
     AUDIT = "audit"
@@ -685,21 +691,209 @@ class LiteratureDocument(StrictModel):
             values = getattr(self, field_name)
             if len(set(values)) != len(values):
                 raise ValueError(f"LiteratureDocument {field_name} must be unique")
-        if self.doi is not None:
-            stable_identity = {"doi": _normalize_doi(self.doi)}
-        else:
-            stable_identity = {
-                "title": _normalize_identity_text(self.title),
-                "authors": tuple(_normalize_identity_text(item) for item in self.authors),
-                "year": self.year,
-            }
-        expected_id = f"literature-{content_hash(stable_identity)[:24]}"
+        expected_id = literature_identity_id(
+            title=self.title,
+            authors=self.authors,
+            year=self.year,
+            doi=self.doi,
+        )
         if self.literature_id != expected_id:
             raise ValueError("LiteratureDocument literature_id is not content-bound")
         payload = self.model_dump(mode="json", exclude={"content_hash"}, exclude_none=True)
         if self.content_hash != content_hash(payload):
             raise ValueError("LiteratureDocument content_hash is invalid")
         return self
+
+
+def literature_identity_id(
+    *,
+    title: str,
+    authors: tuple[str, ...],
+    year: int,
+    doi: str | None,
+) -> str:
+    from .serialization import content_hash
+
+    if doi is not None:
+        stable_identity = {"doi": _normalize_doi(doi)}
+    else:
+        stable_identity = {
+            "title": _normalize_identity_text(title),
+            "authors": tuple(_normalize_identity_text(item) for item in authors),
+            "year": year,
+        }
+    return f"literature-{content_hash(stable_identity)[:24]}"
+
+
+class RawLiteratureArtifact(StrictModel):
+    artifact_id: NonBlankStr
+    literature_id: NonBlankStr
+    original_filename: NonBlankStr
+    media_type: NonBlankStr = "application/pdf"
+    byte_size: int = Field(gt=0)
+    sha256: Sha256Str
+    stored_path: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> RawLiteratureArtifact:
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        from .serialization import content_hash
+
+        if (
+            PurePosixPath(self.original_filename).name != self.original_filename
+            or PureWindowsPath(self.original_filename).name != self.original_filename
+        ):
+            raise ValueError("RawLiteratureArtifact original_filename must be a basename")
+        if self.media_type != "application/pdf":
+            raise ValueError("RawLiteratureArtifact must use application/pdf")
+        identity = {"literature_id": self.literature_id, "sha256": self.sha256}
+        expected_id = f"literature-artifact-{content_hash(identity)[:24]}"
+        if self.artifact_id != expected_id:
+            raise ValueError("RawLiteratureArtifact artifact_id is not content-bound")
+        expected_path = f"literature_artifacts/{expected_id}/artifact.pdf"
+        if self.stored_path != expected_path:
+            raise ValueError("RawLiteratureArtifact stored_path is not canonical")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("RawLiteratureArtifact content_hash is invalid")
+        return self
+
+
+class CanonicalTextBlock(StrictModel):
+    block_id: NonBlankStr
+    page_number: int = Field(ge=1)
+    block_type: NonBlankStr
+    section_path: tuple[NonBlankStr, ...] = ()
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    text_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> CanonicalTextBlock:
+        from .serialization import content_hash
+
+        if self.end_offset <= self.start_offset:
+            raise ValueError("CanonicalTextBlock end_offset must exceed start_offset")
+        identity = self.model_dump(mode="json", exclude={"block_id"})
+        expected_id = f"canonical-block-{content_hash(identity)[:24]}"
+        if self.block_id != expected_id:
+            raise ValueError("CanonicalTextBlock block_id is not content-bound")
+        return self
+
+
+class CanonicalTextArtifact(StrictModel):
+    canonical_text_id: NonBlankStr
+    literature_id: NonBlankStr
+    raw_artifact_id: NonBlankStr
+    raw_artifact_hash: Sha256Str
+    parser_id: NonBlankStr
+    parser_version: NonBlankStr
+    parser_config_hash: Sha256Str
+    text_sha256: Sha256Str
+    stored_path: NonBlankStr
+    character_count: int = Field(gt=0)
+    page_count: int = Field(gt=0)
+    blocks: tuple[CanonicalTextBlock, ...] = Field(min_length=1)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> CanonicalTextArtifact:
+        from .serialization import content_hash
+
+        block_ids = [block.block_id for block in self.blocks]
+        if len(set(block_ids)) != len(block_ids):
+            raise ValueError("CanonicalTextArtifact block IDs must be unique")
+        ordering = [
+            (block.page_number, block.start_offset, block.end_offset)
+            for block in self.blocks
+        ]
+        if ordering != sorted(ordering):
+            raise ValueError("CanonicalTextArtifact blocks must be deterministically ordered")
+        if any(
+            right.start_offset < left.end_offset
+            for left, right in zip(self.blocks, self.blocks[1:])
+        ):
+            raise ValueError("CanonicalTextArtifact blocks must not overlap")
+        if any(
+            block.page_number > self.page_count
+            or block.end_offset > self.character_count
+            for block in self.blocks
+        ):
+            raise ValueError("CanonicalTextArtifact block bounds are invalid")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"canonical_text_id", "stored_path", "content_hash"},
+        )
+        expected_id = f"canonical-text-{content_hash(identity)[:24]}"
+        if self.canonical_text_id != expected_id:
+            raise ValueError("CanonicalTextArtifact canonical_text_id is not content-bound")
+        expected_path = f"canonical_text/{expected_id}/content.txt"
+        if self.stored_path != expected_path:
+            raise ValueError("CanonicalTextArtifact stored_path is not canonical")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("CanonicalTextArtifact content_hash is invalid")
+        return self
+
+
+class LiteratureIngestionRecord(StrictModel):
+    ingestion_id: NonBlankStr
+    literature_id: NonBlankStr
+    raw_artifact_id: NonBlankStr
+    raw_artifact_hash: Sha256Str
+    canonical_text_id: NonBlankStr | None = None
+    canonical_text_hash: Sha256Str | None = None
+    source_id: NonBlankStr | None = None
+    source_version: NonBlankStr | None = None
+    parser_id: NonBlankStr
+    parser_version: NonBlankStr
+    parser_config_hash: Sha256Str
+    ingestion_status: LiteratureIngestionStatus
+    warnings: tuple[NonBlankStr, ...] = ()
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureIngestionRecord:
+        from .serialization import content_hash
+
+        if len(set(self.warnings)) != len(self.warnings):
+            raise ValueError("LiteratureIngestionRecord warnings must be unique")
+        canonical_binding = (
+            self.canonical_text_id,
+            self.canonical_text_hash,
+            self.source_id,
+            self.source_version,
+        )
+        if self.ingestion_status == LiteratureIngestionStatus.ACCEPTED:
+            if any(value is None for value in canonical_binding):
+                raise ValueError("accepted literature ingestion requires canonical/source binding")
+        elif any(value is not None for value in canonical_binding):
+            raise ValueError("non-accepted literature ingestion cannot bind canonical/source records")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"ingestion_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"literature-ingestion-{content_hash(identity)[:24]}"
+        if self.ingestion_id != expected_id:
+            raise ValueError("LiteratureIngestionRecord ingestion_id is not content-bound")
+        payload = {"ingestion_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("LiteratureIngestionRecord content_hash is invalid")
+        return self
+
+
+class LiteratureIngestionOutcome(StrictModel):
+    literature_id: NonBlankStr
+    artifact_id: NonBlankStr
+    canonical_text_id: NonBlankStr | None = None
+    ingestion_id: NonBlankStr
+    source_id: NonBlankStr | None = None
+    source_version: NonBlankStr | None = None
+    warnings: tuple[NonBlankStr, ...] = ()
+    requires_ocr: bool = False
 
 
 class ExpertProfile(StrictModel):
@@ -1020,6 +1214,15 @@ class KnowledgeSnapshot(StrictModel):
     evidence_span_hashes: dict[NonBlankStr, Sha256Str]
     evidence_source_versions: dict[NonBlankStr, Sha256Str]
     literature_document_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    raw_literature_artifact_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    canonical_text_artifact_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    literature_ingestion_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
     expert_profile_hashes: dict[NonBlankStr, Sha256Str] = Field(

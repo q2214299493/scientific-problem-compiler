@@ -39,6 +39,8 @@ from .models import (
     ApprovalReviewRecord,
     ApprovalReviewScores,
     ApprovalVerdict,
+    CanonicalTextArtifact,
+    CanonicalTextBlock,
     CandidatePlanDraft,
     CandidateTaskDraft,
     ComparisonBaselineDraft,
@@ -69,6 +71,8 @@ from .models import (
     KnowledgeRelation,
     KnowledgeSnapshot,
     LiteratureDocument,
+    LiteratureIngestionOutcome,
+    LiteratureIngestionRecord,
     MethodFingerprint,
     MethodFact,
     ModelFact,
@@ -79,6 +83,7 @@ from .models import (
     PlanningProposalSet,
     ProposedDeviationDraft,
     ProjectTrustPolicy,
+    RawLiteratureArtifact,
     RequiredFix,
     RetrievalHit,
     RetrievalManifest,
@@ -106,6 +111,7 @@ from .planning import (
     StructuredLLMPlanningProvider,
     StructuredOutputError,
 )
+from .knowledge.ingestion import LiteratureIngestionService
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
@@ -153,6 +159,26 @@ def ingest(
         source_type=source_type,
     )
     typer.echo(record.model_dump_json(indent=2))
+
+
+@app.command("ingest-literature")
+def ingest_literature(
+    paper: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    metadata: Annotated[Path, typer.Option("--metadata", exists=True, dir_okay=False, readable=True)],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Persist a born-digital PDF and its canonical UTF-8 representation."""
+    metadata_payload = load_data(metadata)
+    if not isinstance(metadata_payload, dict):
+        raise typer.BadParameter("--metadata must contain a mapping")
+    outcome = LiteratureIngestionService().ingest(
+        paper,
+        metadata_payload,
+        KnowledgeRepositories(knowledge_dir),
+        SourceEvidenceStore(state_dir),
+    )
+    typer.echo(outcome.model_dump_json(indent=2))
 
 
 @app.command()
@@ -699,6 +725,11 @@ def schema_command(
         RetrievalQuery,
         RetrievalHit,
         LiteratureDocument,
+        RawLiteratureArtifact,
+        CanonicalTextBlock,
+        CanonicalTextArtifact,
+        LiteratureIngestionRecord,
+        LiteratureIngestionOutcome,
         ExpertProfile,
         ExpertOpinion,
         KnowledgeRelation,

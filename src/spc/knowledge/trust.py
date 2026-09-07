@@ -12,6 +12,7 @@ from ..interpretation.validators import (
     source_quote_record_issues,
 )
 from ..models import (
+    CanonicalTextArtifact,
     CurationStatus,
     EvidenceSpan,
     ExpertAttributionRecord,
@@ -21,14 +22,19 @@ from ..models import (
     KnowledgeCurationRecord,
     KnowledgeRelation,
     LiteratureDocument,
+    LiteratureIngestionRecord,
+    LiteratureIngestionStatus,
     LiteratureWorkflowPattern,
     MethodFact,
     ModelFact,
     ReportedResult,
+    RawLiteratureArtifact,
     ScientificCapability,
     SourceClaim,
     SourceDocument,
     SourceQuote,
+    SourceRole,
+    SourceType,
 )
 from ..serialization import content_hash
 
@@ -38,6 +44,9 @@ if TYPE_CHECKING:
 
 REPOSITORY_NODE_SPECS = (
     ("literature_document", "literature_documents", "literature_id"),
+    ("raw_literature_artifact", "raw_literature_artifacts", "artifact_id"),
+    ("canonical_text_artifact", "canonical_text_artifacts", "canonical_text_id"),
+    ("literature_ingestion", "literature_ingestions", "ingestion_id"),
     ("expert_profile", "expert_profiles", "expert_id"),
     ("expert_attribution", "expert_attributions", "attribution_id"),
     ("expert_opinion", "expert_opinions", "opinion_id"),
@@ -187,6 +196,11 @@ class TrustedKnowledgeValidator:
             ("scientific_capability", item.capability_id)
             for item in self.repositories.capabilities.list()
         )
+        roots.update(
+            ("literature_ingestion", item.ingestion_id)
+            for item in self.repositories.literature_ingestions.list()
+            if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
+        )
         for key in sorted(roots):
             self._validate_record(key, current, set())
 
@@ -225,7 +239,13 @@ class TrustedKnowledgeValidator:
         visiting.add(key)
         try:
             if isinstance(record, LiteratureDocument):
-                self._validate_literature(record)
+                self._validate_literature(record, current, visiting)
+            elif isinstance(record, RawLiteratureArtifact):
+                self.repositories.raw_literature_artifacts.get(record.artifact_id)
+            elif isinstance(record, CanonicalTextArtifact):
+                self._validate_canonical_text(record, current, visiting)
+            elif isinstance(record, LiteratureIngestionRecord):
+                self._validate_ingestion(record, current, visiting)
             elif isinstance(record, ExpertProfile):
                 pass
             elif isinstance(record, ExpertAttributionRecord):
@@ -256,8 +276,126 @@ class TrustedKnowledgeValidator:
         finally:
             visiting.remove(key)
 
-    def _validate_literature(self, document: LiteratureDocument) -> None:
+    def _validate_literature(
+        self,
+        document: LiteratureDocument,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        ingestions = tuple(
+            ingestion
+            for ingestion in self.repositories.literature_ingestions.list()
+            if ingestion.literature_id == document.literature_id
+        )
+        if ingestions:
+            matching = tuple(
+                ingestion
+                for ingestion in ingestions
+                if ingestion.ingestion_status == LiteratureIngestionStatus.ACCEPTED
+                and ingestion.source_id == document.source_id
+                and ingestion.source_version == document.source_version
+            )
+            if len(matching) != 1:
+                raise TrustedKnowledgeError(
+                    "INVALID_LITERATURE_INGESTION_BINDING",
+                    f"LiteratureDocument must bind one accepted ingestion: {document.literature_id}",
+                )
+            ingestion = matching[0]
+            raw = self._require_record(
+                "raw_literature_artifact", ingestion.raw_artifact_id
+            )
+            canonical = self._require_record(
+                "canonical_text_artifact", ingestion.canonical_text_id or ""
+            )
+            if (
+                not isinstance(raw, RawLiteratureArtifact)
+                or not isinstance(canonical, CanonicalTextArtifact)
+                or document.raw_artifact_ref != raw.stored_path
+                or document.canonical_text_ref != canonical.stored_path
+            ):
+                raise TrustedKnowledgeError(
+                    "INVALID_LITERATURE_INGESTION_BINDING",
+                    f"LiteratureDocument artifact paths do not match ingestion: {document.literature_id}",
+                )
+            self._validate_record(
+                ("literature_ingestion", ingestion.ingestion_id), current, visiting
+            )
+            return
         source = self._verify_source(document.source_id, document.source_version)
+        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+
+    def _validate_canonical_text(
+        self,
+        canonical: CanonicalTextArtifact,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        self.repositories.canonical_text_artifacts.get(canonical.canonical_text_id)
+        raw = self._validate_record(
+            ("raw_literature_artifact", canonical.raw_artifact_id), current, visiting
+        )
+        if (
+            not isinstance(raw, RawLiteratureArtifact)
+            or canonical.raw_artifact_hash != raw.content_hash
+            or canonical.literature_id != raw.literature_id
+        ):
+            raise TrustedKnowledgeError(
+                "CANONICAL_RAW_ARTIFACT_MISMATCH",
+                f"canonical text does not bind its raw artifact: {canonical.canonical_text_id}",
+            )
+
+    def _validate_ingestion(
+        self,
+        ingestion: LiteratureIngestionRecord,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        if ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED:
+            raise TrustedKnowledgeError(
+                "UNTRUSTED_LITERATURE_INGESTION",
+                f"only accepted ingestion records are trusted: {ingestion.ingestion_id}",
+            )
+        document = self._require_record("literature_document", ingestion.literature_id)
+        if not isinstance(document, LiteratureDocument):
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_INGESTION_BINDING",
+                f"ingestion has no LiteratureDocument: {ingestion.ingestion_id}",
+            )
+        raw = self._validate_record(
+            ("raw_literature_artifact", ingestion.raw_artifact_id), current, visiting
+        )
+        canonical = self._validate_record(
+            ("canonical_text_artifact", ingestion.canonical_text_id or ""),
+            current,
+            visiting,
+        )
+        if (
+            not isinstance(raw, RawLiteratureArtifact)
+            or not isinstance(canonical, CanonicalTextArtifact)
+            or ingestion.raw_artifact_hash != raw.content_hash
+            or ingestion.canonical_text_hash != canonical.content_hash
+            or ingestion.literature_id != raw.literature_id
+            or ingestion.literature_id != canonical.literature_id
+            or ingestion.parser_id != canonical.parser_id
+            or ingestion.parser_version != canonical.parser_version
+            or ingestion.parser_config_hash != canonical.parser_config_hash
+        ):
+            raise TrustedKnowledgeError(
+                "LITERATURE_INGESTION_HASH_MISMATCH",
+                f"ingestion artifact/parser binding is invalid: {ingestion.ingestion_id}",
+            )
+        source = self._verify_source(
+            ingestion.source_id or "", ingestion.source_version or ""
+        )
+        if (
+            source.content_sha256 != canonical.text_sha256
+            or source.source_role != SourceRole.LITERATURE_AUTHOR
+            or source.source_type != SourceType.LITERATURE_ARTICLE
+        ):
+            raise TrustedKnowledgeError(
+                "CANONICAL_SOURCE_HASH_MISMATCH",
+                f"SourceDocument is not the canonical literature source: {ingestion.ingestion_id}",
+            )
         self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
 
     def _validate_attribution(self, attribution: ExpertAttributionRecord) -> None:

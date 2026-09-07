@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Generic, Iterable, TypeVar
@@ -10,6 +11,8 @@ from typing import Generic, Iterable, TypeVar
 from pydantic import BaseModel
 
 from .models import (
+    CanonicalTextArtifact,
+    CanonicalTextBlock,
     DomainProfile,
     EvidenceSpan,
     ExpertAttributionRecord,
@@ -20,9 +23,11 @@ from .models import (
     KnowledgeCurationRecord,
     KnowledgeRelation,
     LiteratureDocument,
+    LiteratureIngestionRecord,
     LiteratureWorkflowPattern,
     MethodFact,
     ModelFact,
+    RawLiteratureArtifact,
     ReportedResult,
     ScientificCapability,
     SourceClaim,
@@ -393,6 +398,234 @@ class KnowledgeCurationRepository(
         )
 
 
+class RawLiteratureArtifactRepository:
+    def __init__(self, knowledge_root: Path) -> None:
+        self.knowledge_root = knowledge_root
+        self.root = knowledge_root / "literature_artifacts"
+
+    def put(self, source_path: Path, literature_id: str) -> RawLiteratureArtifact:
+        require_safe_path_component(literature_id, field="literature_id")
+        if source_path.is_symlink() or not source_path.is_file():
+            raise ValueError("raw literature source must be a regular non-symlink file")
+        content = source_path.read_bytes()
+        if not content.startswith(b"%PDF-"):
+            raise ValueError("raw literature artifact is not a PDF")
+        digest = hashlib.sha256(content).hexdigest()
+        identity = {"literature_id": literature_id, "sha256": digest}
+        artifact_id = f"literature-artifact-{content_hash(identity)[:24]}"
+        payload = {
+            "artifact_id": artifact_id,
+            "literature_id": literature_id,
+            "original_filename": source_path.name,
+            "media_type": "application/pdf",
+            "byte_size": len(content),
+            "sha256": digest,
+            "stored_path": f"literature_artifacts/{artifact_id}/artifact.pdf",
+        }
+        record = RawLiteratureArtifact(
+            **payload,
+            content_hash=content_hash(payload),
+        )
+        destination = self.root / artifact_id
+        if destination.exists():
+            existing = self.get(artifact_id)
+            if existing != record:
+                raise FileExistsError(
+                    f"refusing to overwrite different raw artifact: {artifact_id}"
+                )
+            return existing
+        self._write_directory(destination, "artifact.pdf", content, record)
+        return self.get(artifact_id)
+
+    def get(self, artifact_id: str) -> RawLiteratureArtifact:
+        require_safe_path_component(artifact_id, field="artifact_id")
+        directory = self.root / artifact_id
+        content_path = directory / "artifact.pdf"
+        metadata_path = directory / "metadata.json"
+        self._validate_paths(directory, content_path, metadata_path)
+        record = load_model(metadata_path, RawLiteratureArtifact)
+        if record.artifact_id != artifact_id:
+            raise ValueError("raw artifact metadata ID does not match its directory")
+        content = content_path.read_bytes()
+        if len(content) != record.byte_size:
+            raise ValueError("raw literature artifact byte size changed")
+        if hashlib.sha256(content).hexdigest() != record.sha256:
+            raise ValueError("raw literature artifact hash changed")
+        if not content.startswith(b"%PDF-"):
+            raise ValueError("stored raw literature artifact is not a PDF")
+        return record
+
+    def list(self) -> tuple[RawLiteratureArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(
+            self.get(path.name)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir() or path.is_symlink()
+        )
+
+    def _write_directory(
+        self,
+        destination: Path,
+        content_name: str,
+        content: bytes,
+        record: BaseModel,
+    ) -> None:
+        if self.root.exists() and self.root.is_symlink():
+            raise ValueError("literature artifact store root cannot be a symlink")
+        self.root.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(prefix=".staging-", dir=self.root)
+        )
+        try:
+            content_path = staging / content_name
+            content_path.write_bytes(content)
+            dump_json(staging / "metadata.json", record)
+            os.chmod(content_path, 0o444)
+            os.chmod(staging / "metadata.json", 0o444)
+            os.replace(staging, destination)
+        finally:
+            if staging.exists():
+                resolved_staging = staging.resolve()
+                resolved_root = self.root.resolve()
+                if not resolved_staging.is_relative_to(resolved_root):
+                    raise ValueError("artifact staging path escaped its store")
+                shutil.rmtree(staging)
+
+    def _validate_paths(
+        self,
+        directory: Path,
+        content_path: Path,
+        metadata_path: Path,
+    ) -> None:
+        resolved_root = self.root.resolve()
+        if self.root.is_symlink() or directory.is_symlink():
+            raise ValueError("literature artifact store paths cannot be symlinks")
+        for path in (content_path, metadata_path):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("literature artifact file is missing or is a symlink")
+            if not path.resolve().is_relative_to(resolved_root):
+                raise ValueError("literature artifact path escapes its store")
+
+
+class CanonicalTextArtifactRepository(RawLiteratureArtifactRepository):
+    def __init__(self, knowledge_root: Path) -> None:
+        self.knowledge_root = knowledge_root
+        self.root = knowledge_root / "canonical_text"
+
+    def put(
+        self,
+        text: str,
+        *,
+        literature_id: str,
+        raw_artifact: RawLiteratureArtifact,
+        parser_id: str,
+        parser_version: str,
+        parser_config_hash: str,
+        page_count: int,
+        blocks: tuple[CanonicalTextBlock, ...],
+    ) -> CanonicalTextArtifact:
+        require_safe_path_component(literature_id, field="literature_id")
+        require_safe_path_component(parser_id, field="parser_id")
+        require_safe_path_component(parser_version, field="parser_version")
+        encoded = text.encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        identity = {
+            "literature_id": literature_id,
+            "raw_artifact_id": raw_artifact.artifact_id,
+            "raw_artifact_hash": raw_artifact.content_hash,
+            "parser_id": parser_id,
+            "parser_version": parser_version,
+            "parser_config_hash": parser_config_hash,
+            "text_sha256": digest,
+            "character_count": len(text),
+            "page_count": page_count,
+            "blocks": blocks,
+        }
+        canonical_text_id = f"canonical-text-{content_hash(identity)[:24]}"
+        payload = {
+            "canonical_text_id": canonical_text_id,
+            **identity,
+            "stored_path": f"canonical_text/{canonical_text_id}/content.txt",
+        }
+        record = CanonicalTextArtifact(
+            **payload,
+            content_hash=content_hash(payload),
+        )
+        self._verify_blocks(record, text)
+        destination = self.root / canonical_text_id
+        if destination.exists():
+            existing = self.get(canonical_text_id)
+            if existing != record:
+                raise FileExistsError(
+                    f"refusing to overwrite different canonical text: {canonical_text_id}"
+                )
+            return existing
+        self._write_directory(destination, "content.txt", encoded, record)
+        return self.get(canonical_text_id)
+
+    def get(self, canonical_text_id: str) -> CanonicalTextArtifact:
+        require_safe_path_component(canonical_text_id, field="canonical_text_id")
+        directory = self.root / canonical_text_id
+        content_path = directory / "content.txt"
+        metadata_path = directory / "metadata.json"
+        self._validate_paths(directory, content_path, metadata_path)
+        record = load_model(metadata_path, CanonicalTextArtifact)
+        if record.canonical_text_id != canonical_text_id:
+            raise ValueError("canonical text metadata ID does not match its directory")
+        try:
+            text = content_path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("canonical text is not valid UTF-8") from error
+        if len(text) != record.character_count:
+            raise ValueError("canonical text character count changed")
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != record.text_sha256:
+            raise ValueError("canonical text hash changed")
+        self._verify_blocks(record, text)
+        return record
+
+    def read_text(self, canonical_text_id: str) -> str:
+        record = self.get(canonical_text_id)
+        return self.knowledge_root.joinpath(
+            *PurePosixPath(record.stored_path).parts
+        ).read_text(encoding="utf-8")
+
+    def list(self) -> tuple[CanonicalTextArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(
+            self.get(path.name)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir() or path.is_symlink()
+        )
+
+    @staticmethod
+    def _verify_blocks(record: CanonicalTextArtifact, text: str) -> None:
+        for block in record.blocks:
+            recovered = text[block.start_offset : block.end_offset]
+            if hashlib.sha256(recovered.encode("utf-8")).hexdigest() != block.text_hash:
+                raise ValueError(
+                    f"canonical text block does not recover its text hash: {block.block_id}"
+                )
+
+
+class LiteratureArtifactStore:
+    def __init__(self, knowledge_root: Path) -> None:
+        self.raw_artifacts = RawLiteratureArtifactRepository(knowledge_root)
+        self.canonical_texts = CanonicalTextArtifactRepository(knowledge_root)
+
+
+class LiteratureIngestionRepository(
+    IdentityBoundRepository[LiteratureIngestionRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "literature_ingestions",
+            LiteratureIngestionRecord,
+            "ingestion_id",
+        )
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -400,6 +633,10 @@ class KnowledgeRepositories:
         self.workflow_patterns = LiteratureWorkflowRepository(root)
         self.capabilities = ScientificCapabilityRepository(root)
         self.literature_documents = LiteratureDocumentRepository(root)
+        self.literature_artifacts = LiteratureArtifactStore(root)
+        self.raw_literature_artifacts = self.literature_artifacts.raw_artifacts
+        self.canonical_text_artifacts = self.literature_artifacts.canonical_texts
+        self.literature_ingestions = LiteratureIngestionRepository(root)
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.expert_attributions = ExpertAttributionRepository(root)
@@ -438,6 +675,12 @@ class KnowledgeRepositories:
     ) -> None:
         for record in records:
             self.literature_documents.put(record.literature_id, record)
+
+    def load_literature_ingestions(
+        self, records: Iterable[LiteratureIngestionRecord]
+    ) -> None:
+        for record in records:
+            self.literature_ingestions.put(record.ingestion_id, record)
 
     def load_expert_profiles(self, records: Iterable[ExpertProfile]) -> None:
         for record in records:
@@ -491,6 +734,21 @@ class KnowledgeRepositories:
                 item.literature_id: item.content_hash
                 for item in trusted.literature_documents
             },
+            "raw_literature_artifact_hashes": {
+                record_id: record.content_hash
+                for (record_type, record_id), record in trusted.trusted_records.items()
+                if record_type == "raw_literature_artifact"
+            },
+            "canonical_text_artifact_hashes": {
+                record_id: record.content_hash
+                for (record_type, record_id), record in trusted.trusted_records.items()
+                if record_type == "canonical_text_artifact"
+            },
+            "literature_ingestion_hashes": {
+                record_id: record.content_hash
+                for (record_type, record_id), record in trusted.trusted_records.items()
+                if record_type == "literature_ingestion"
+            },
             "expert_profile_hashes": {
                 item.expert_id: item.content_hash
                 for item in trusted.expert_profiles
@@ -524,6 +782,9 @@ class KnowledgeRepositories:
             or key
             not in {
                 "literature_document_hashes",
+                "raw_literature_artifact_hashes",
+                "canonical_text_artifact_hashes",
+                "literature_ingestion_hashes",
                 "expert_profile_hashes",
                 "expert_opinion_hashes",
                 "expert_attribution_hashes",

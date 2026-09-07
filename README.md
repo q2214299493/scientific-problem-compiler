@@ -169,5 +169,21 @@ remain available for compatibility.
 The package includes an offline, non-FT fixture with independent literature and
 expert-note sources, one literature claim relation, one expert-opinion
 provenance relation, and one literature-workflow relation. K1A does not parse
-PDFs, call external services or LLMs, build an
-embedding/vector store, or authorize or execute scientific work.
+PDFs, call external services or LLMs, build an embedding/vector store, or
+authorize or execute scientific work.
+
+## Knowledge Layer K1B
+
+K1B stores each born-digital PDF as an immutable `RawLiteratureArtifact`, then
+uses a replaceable, versioned `LiteratureTextExtractor` to produce a canonical
+UTF-8 `CanonicalTextArtifact` with deterministic page/block offsets. A
+`LiteratureIngestionRecord` binds both artifacts, parser configuration and the
+canonical `SourceDocument`; PDF bytes are never an `EvidenceSpan` source.
+Textless PDFs fail closed as `requires_ocr`, and K1B performs no OCR or claim
+extraction. Reprocessing with another parser version retains the stable
+DOI/bibliographic literature identity while adding a new immutable canonical
+artifact, source version and ingestion record.
+
+The `spc ingest-literature` command accepts a PDF plus bibliographic metadata.
+Trusted snapshots recursively verify the raw bytes, canonical UTF-8 text,
+block offsets, ingestion hashes and SourceDocument binding before use.
