@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ...models import (
     EvidenceSpan,
+    ExpertAttributionRecord,
     ExpertOpinion,
     ExpertProfile,
     KnowledgeCurationRecord,
@@ -11,6 +12,7 @@ from ...models import (
     LiteratureDocument,
     LiteratureWorkflowPattern,
     SourceClaim,
+    SourceQuote,
 )
 from ...repositories import KnowledgeRepositories, SourceEvidenceStore
 from ...serialization import load_data
@@ -54,6 +56,13 @@ def load_knowledge_fixture(
         ExpertOpinion.model_validate(item)
         for item in payload.get("expert_opinions", ())
     )
+    attributions = tuple(
+        ExpertAttributionRecord.model_validate(item)
+        for item in payload.get("expert_attributions", ())
+    )
+    quotes = tuple(
+        SourceQuote.model_validate(item) for item in payload.get("source_quotes", ())
+    )
     claims = tuple(
         SourceClaim.model_validate(item) for item in payload.get("source_claims", ())
     )
@@ -71,7 +80,10 @@ def load_knowledge_fixture(
     )
     repositories.load_literature_documents(literature)
     repositories.load_expert_profiles(profiles)
+    repositories.load_expert_attributions(attributions)
     repositories.load_expert_opinions(opinions)
+    for quote in quotes:
+        repositories.source_quotes.put(quote.quote_id, quote)
     for claim in claims:
         repositories.source_claims.put(claim.claim_id, claim)
     repositories.load_workflow_patterns(workflows)

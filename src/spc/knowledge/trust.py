@@ -6,13 +6,29 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from pydantic import BaseModel
 
+from ..interpretation.validators import (
+    result_context_record_issues,
+    source_claim_binding_issues,
+    source_quote_record_issues,
+)
 from ..models import (
     CurationStatus,
+    EvidenceSpan,
+    ExpertAttributionRecord,
+    ExpertCase,
     ExpertOpinion,
     ExpertProfile,
     KnowledgeCurationRecord,
     KnowledgeRelation,
     LiteratureDocument,
+    LiteratureWorkflowPattern,
+    MethodFact,
+    ModelFact,
+    ReportedResult,
+    ScientificCapability,
+    SourceClaim,
+    SourceDocument,
+    SourceQuote,
 )
 from ..serialization import content_hash
 
@@ -23,6 +39,7 @@ if TYPE_CHECKING:
 REPOSITORY_NODE_SPECS = (
     ("literature_document", "literature_documents", "literature_id"),
     ("expert_profile", "expert_profiles", "expert_id"),
+    ("expert_attribution", "expert_attributions", "attribution_id"),
     ("expert_opinion", "expert_opinions", "opinion_id"),
     ("expert_case", "expert_cases", "case_id"),
     ("workflow_pattern", "workflow_patterns", "pattern_id"),
@@ -50,10 +67,12 @@ class TrustedKnowledgeError(ValueError):
 class TrustedKnowledgeSelection:
     literature_documents: tuple[LiteratureDocument, ...]
     expert_profiles: tuple[ExpertProfile, ...]
+    expert_attributions: tuple[ExpertAttributionRecord, ...]
     expert_opinions: tuple[ExpertOpinion, ...]
     relations: tuple[KnowledgeRelation, ...]
     curations: tuple[KnowledgeCurationRecord, ...]
     current_curations: Mapping[tuple[str, str], KnowledgeCurationRecord]
+    trusted_records: Mapping[tuple[str, str], BaseModel]
 
 
 class TrustedKnowledgeValidator:
@@ -65,6 +84,7 @@ class TrustedKnowledgeValidator:
         self.repositories = repositories
         self.evidence_store = evidence_store
         self.records = self.record_index(repositories)
+        self._reachable: dict[tuple[str, str], BaseModel] = {}
 
     @staticmethod
     def record_index(
@@ -143,6 +163,7 @@ class TrustedKnowledgeValidator:
                 "EVIDENCE_STORE_REQUIRED",
                 "trusted knowledge validation requires a SourceEvidenceStore",
             )
+        self._reachable = {}
         current = self.resolve_current_curations()
         accepted = {
             key: curation
@@ -151,147 +172,293 @@ class TrustedKnowledgeValidator:
         }
         for curation in accepted.values():
             self._verify_evidence_refs(curation.evidence_refs)
+            self._reachable[("knowledge_curation", curation.curation_id)] = curation
 
-        documents = tuple(
-            sorted(
-                (
-                    record
-                    for record in self.repositories.literature_documents.list()
-                    if ("literature_document", record.literature_id) in accepted
-                ),
-                key=lambda item: item.literature_id,
-            )
+        roots = set(accepted)
+        roots.update(
+            ("expert_case", item.case_id)
+            for item in self.repositories.expert_cases.list()
         )
-        opinions = tuple(
-            sorted(
-                (
-                    record
-                    for record in self.repositories.expert_opinions.list()
-                    if ("expert_opinion", record.opinion_id) in accepted
-                ),
-                key=lambda item: item.opinion_id,
-            )
+        roots.update(
+            ("workflow_pattern", item.pattern_id)
+            for item in self.repositories.workflow_patterns.list()
         )
-        relations = tuple(
-            sorted(
-                (
-                    record
-                    for record in self.repositories.relations.list()
-                    if ("knowledge_relation", record.relation_id) in accepted
-                ),
-                key=lambda item: item.relation_id,
-            )
+        roots.update(
+            ("scientific_capability", item.capability_id)
+            for item in self.repositories.capabilities.list()
         )
+        for key in sorted(roots):
+            self._validate_record(key, current, set())
 
-        for document in documents:
-            self._validate_literature(document)
-        for opinion in opinions:
-            self._validate_opinion(opinion)
-        for relation in relations:
-            self._validate_relation(relation, current, set())
-
-        profile_ids = {item.expert_id for item in opinions}
-        for relation in relations:
-            if relation.subject_type == "expert_profile":
-                profile_ids.add(relation.subject_id)
-            if relation.object_type == "expert_profile":
-                profile_ids.add(relation.object_id)
-        profiles = tuple(
-            sorted(
-                (
-                    record
-                    for record in self.repositories.expert_profiles.list()
-                    if record.expert_id in profile_ids
-                ),
-                key=lambda item: item.expert_id,
-            )
+        documents = self._records_of_type("literature_document", LiteratureDocument)
+        profiles = self._records_of_type("expert_profile", ExpertProfile)
+        attributions = self._records_of_type(
+            "expert_attribution", ExpertAttributionRecord
         )
+        opinions = self._records_of_type("expert_opinion", ExpertOpinion)
+        relations = self._records_of_type("knowledge_relation", KnowledgeRelation)
         accepted_curations = tuple(
             sorted(accepted.values(), key=lambda item: item.curation_id)
         )
         return TrustedKnowledgeSelection(
             literature_documents=documents,
             expert_profiles=profiles,
+            expert_attributions=attributions,
             expert_opinions=opinions,
             relations=relations,
             curations=accepted_curations,
             current_curations=current,
+            trusted_records=MappingProxyType(dict(sorted(self._reachable.items()))),
         )
 
-    def _validate_literature(self, document: LiteratureDocument) -> None:
+    def _validate_record(
+        self,
+        key: tuple[str, str],
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> BaseModel:
+        if key in self._reachable:
+            return self._reachable[key]
+        if key in visiting:
+            return self._require_record(*key)
+        record = self._require_record(*key)
+        visiting.add(key)
         try:
-            source = self.evidence_store.source_records.get(
-                f"{document.source_id}--{document.source_version}"
-            )
-            if (source.source_id, source.version) != (
-                document.source_id,
-                document.source_version,
-            ):
-                raise ValueError("source identity mismatch")
-            self.evidence_store.verify_source_integrity(source)
-        except Exception as error:
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_SOURCE",
-                f"literature source is unavailable or invalid: {document.literature_id}",
-            ) from error
+            if isinstance(record, LiteratureDocument):
+                self._validate_literature(record)
+            elif isinstance(record, ExpertProfile):
+                pass
+            elif isinstance(record, ExpertAttributionRecord):
+                self._validate_attribution(record)
+            elif isinstance(record, ExpertOpinion):
+                self._validate_opinion(record, current, visiting)
+            elif isinstance(record, KnowledgeRelation):
+                self._validate_relation(record, current, visiting)
+            elif isinstance(record, SourceQuote):
+                self._validate_source_quote(record)
+            elif isinstance(record, SourceClaim):
+                self._validate_source_claim(record, current, visiting)
+            elif isinstance(record, MethodFact | ModelFact):
+                self._verify_evidence_refs(record.evidence_refs)
+            elif isinstance(record, ReportedResult):
+                self._validate_reported_result(record, current, visiting)
+            elif isinstance(record, ExpertCase | LiteratureWorkflowPattern):
+                self._verify_evidence_refs(record.evidence_refs)
+            elif isinstance(record, ScientificCapability):
+                pass
+            else:
+                raise TrustedKnowledgeError(
+                    "UNSUPPORTED_TRUSTED_RECORD",
+                    f"no provenance validator for {key[0]}:{key[1]}",
+                )
+            self._reachable[key] = record
+            return record
+        finally:
+            visiting.remove(key)
 
-    def _validate_opinion(self, opinion: ExpertOpinion) -> None:
-        self._require_record("expert_profile", opinion.expert_id)
+    def _validate_literature(self, document: LiteratureDocument) -> None:
+        source = self._verify_source(document.source_id, document.source_version)
+        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+
+    def _validate_attribution(self, attribution: ExpertAttributionRecord) -> None:
+        source = self._verify_source(attribution.source_id, attribution.source_version)
+        for evidence_id in attribution.evidence_refs:
+            evidence, evidence_source = self._verify_evidence(evidence_id)
+            if (evidence.source_id, evidence.source_version) != (
+                attribution.source_id,
+                attribution.source_version,
+            ):
+                raise TrustedKnowledgeError(
+                    "EXPERT_ATTRIBUTION_SOURCE_MISMATCH",
+                    f"attribution evidence comes from another source: {evidence_id}",
+                )
+            self._remember_evidence(evidence, evidence_source)
+        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+
+    def _validate_opinion(
+        self,
+        opinion: ExpertOpinion,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        self._validate_record(("expert_profile", opinion.expert_id), current, visiting)
+        if not opinion.attribution_refs:
+            raise TrustedKnowledgeError(
+                "MISSING_EXPERT_ATTRIBUTION",
+                f"accepted ExpertOpinion has no attribution: {opinion.opinion_id}",
+            )
+        attributed_evidence: set[str] = set()
+        for attribution_id in opinion.attribution_refs:
+            attribution = self._validate_record(
+                ("expert_attribution", attribution_id), current, visiting
+            )
+            if not isinstance(attribution, ExpertAttributionRecord):
+                raise TrustedKnowledgeError(
+                    "INVALID_EXPERT_ATTRIBUTION",
+                    f"record is not an ExpertAttributionRecord: {attribution_id}",
+                )
+            if attribution.expert_id != opinion.expert_id:
+                raise TrustedKnowledgeError(
+                    "EXPERT_ATTRIBUTION_OWNER_MISMATCH",
+                    f"attribution belongs to another expert: {attribution_id}",
+                )
+            attributed_evidence.update(attribution.evidence_refs)
+        if not set(opinion.evidence_refs).issubset(attributed_evidence):
+            raise TrustedKnowledgeError(
+                "EXPERT_OPINION_EVIDENCE_NOT_ATTRIBUTED",
+                f"opinion evidence is not covered by its attributions: {opinion.opinion_id}",
+            )
         self._verify_evidence_refs(opinion.evidence_refs)
         for claim_id in opinion.related_claim_refs:
-            self._require_record("source_claim", claim_id)
+            self._validate_record(("source_claim", claim_id), current, visiting)
         for workflow_id in opinion.related_workflow_refs:
-            self._require_record("workflow_pattern", workflow_id)
+            self._validate_record(("workflow_pattern", workflow_id), current, visiting)
         if opinion.supersedes is not None:
-            self._require_record("expert_opinion", opinion.supersedes)
+            self._validate_record(("expert_opinion", opinion.supersedes), current, visiting)
 
     def _validate_relation(
         self,
         relation: KnowledgeRelation,
         current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        seen: set[str],
+        visiting: set[tuple[str, str]],
     ) -> None:
-        if relation.relation_id in seen:
-            return
-        seen.add(relation.relation_id)
         self._verify_evidence_refs(relation.evidence_refs)
         for key in (
             (relation.subject_type, relation.subject_id),
             (relation.object_type, relation.object_id),
         ):
-            endpoint = self._require_record(*key)
+            self._require_record(*key)
             curation = current.get(key)
-            if (
-                key[0] in CURATION_REQUIRED_TYPES or curation is not None
-            ) and (
+            if (key[0] in CURATION_REQUIRED_TYPES or curation is not None) and (
                 curation is None or curation.status != CurationStatus.ACCEPTED
             ):
                 raise TrustedKnowledgeError(
                     "UNTRUSTED_RELATION_ENDPOINT",
                     f"accepted relation points to untrusted target {key[0]}:{key[1]}",
                 )
-            if isinstance(endpoint, LiteratureDocument):
-                self._validate_literature(endpoint)
-            elif isinstance(endpoint, ExpertOpinion):
-                self._validate_opinion(endpoint)
-            elif isinstance(endpoint, KnowledgeRelation):
-                self._validate_relation(endpoint, current, seen)
+            self._validate_record(key, current, visiting)
 
-    def _verify_evidence_refs(self, evidence_refs: tuple[str, ...]) -> None:
+    def _validate_source_quote(self, quote: SourceQuote) -> None:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
                 "EVIDENCE_STORE_REQUIRED",
                 "trusted knowledge validation requires a SourceEvidenceStore",
             )
+        issues, source = source_quote_record_issues(
+            quote,
+            self.evidence_store,
+            path=f"source_quote:{quote.quote_id}",
+        )
+        self._raise_issues(issues)
+        evidence, evidence_source = self._verify_evidence(quote.evidence_ref)
+        self._remember_evidence(evidence, evidence_source)
+        if source is not None:
+            self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+
+    def _validate_source_claim(
+        self,
+        claim: SourceClaim,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        quotes_by_id = {
+            quote_id: quote
+            for quote_id in claim.source_quote_refs
+            if isinstance(
+                (quote := self.records.get(("source_quote", quote_id))), SourceQuote
+            )
+        }
+        self._raise_issues(
+            source_claim_binding_issues(
+                claim,
+                quotes_by_id,
+                path=f"source_claim:{claim.claim_id}",
+            )
+        )
+        self._verify_evidence_refs(claim.evidence_refs)
+        for quote_id in claim.source_quote_refs:
+            self._validate_record(("source_quote", quote_id), current, visiting)
+
+    def _validate_reported_result(
+        self,
+        result: ReportedResult,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        self._verify_evidence_refs(result.evidence_refs)
+        result_context = result.result_context
+        if result_context is None:
+            return
+        method_facts = {
+            fact_id: fact
+            for fact_id in result_context.method_fact_refs
+            if isinstance((fact := self.records.get(("method_fact", fact_id))), MethodFact)
+        }
+        model_facts = {
+            fact_id: fact
+            for fact_id in result_context.model_fact_refs
+            if isinstance((fact := self.records.get(("model_fact", fact_id))), ModelFact)
+        }
+        self._raise_issues(
+            result_context_record_issues(
+                result,
+                method_facts,
+                model_facts,
+                path=f"reported_result:{result.result_id}.result_context",
+                require_context=False,
+            )
+        )
+        for fact_id in result_context.method_fact_refs:
+            self._validate_record(("method_fact", fact_id), current, visiting)
+        for fact_id in result_context.model_fact_refs:
+            self._validate_record(("model_fact", fact_id), current, visiting)
+
+    def _verify_evidence_refs(self, evidence_refs: tuple[str, ...]) -> None:
         for evidence_id in evidence_refs:
-            try:
-                evidence = self.evidence_store.get(evidence_id)
-                self.evidence_store.verify_evidence_integrity(evidence)
-            except Exception as error:
-                raise TrustedKnowledgeError(
-                    "INVALID_KNOWLEDGE_EVIDENCE",
-                    f"evidence is unavailable or invalid: {evidence_id}",
-                ) from error
+            evidence, source = self._verify_evidence(evidence_id)
+            self._remember_evidence(evidence, source)
+
+    def _verify_evidence(self, evidence_id: str) -> tuple[EvidenceSpan, SourceDocument]:
+        if self.evidence_store is None:
+            raise TrustedKnowledgeError(
+                "EVIDENCE_STORE_REQUIRED",
+                "trusted knowledge validation requires a SourceEvidenceStore",
+            )
+        try:
+            evidence = self.evidence_store.get(evidence_id)
+            source = self.evidence_store.verify_evidence_integrity(evidence)
+        except Exception as error:
+            raise TrustedKnowledgeError(
+                "INVALID_KNOWLEDGE_EVIDENCE",
+                f"evidence is unavailable or invalid: {evidence_id}",
+            ) from error
+        return evidence, source
+
+    def _verify_source(self, source_id: str, source_version: str) -> SourceDocument:
+        if self.evidence_store is None:
+            raise TrustedKnowledgeError(
+                "EVIDENCE_STORE_REQUIRED",
+                "trusted knowledge validation requires a SourceEvidenceStore",
+            )
+        try:
+            source = self.evidence_store.source_records.get(
+                f"{source_id}--{source_version}"
+            )
+            if (source.source_id, source.version) != (source_id, source_version):
+                raise ValueError("source identity mismatch")
+            self.evidence_store.verify_source_integrity(source)
+        except Exception as error:
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_SOURCE",
+                f"source is unavailable or invalid: {source_id}@{source_version}",
+            ) from error
+        return source
+
+    def _remember_evidence(
+        self, evidence: EvidenceSpan, source: SourceDocument
+    ) -> None:
+        self._reachable[("evidence_span", evidence.evidence_id)] = evidence
+        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
 
     def _require_record(self, record_type: str, record_id: str) -> BaseModel:
         record = self.records.get((record_type, record_id))
@@ -301,6 +468,19 @@ class TrustedKnowledgeValidator:
                 f"record does not exist: {record_type}:{record_id}",
             )
         return record
+
+    def _records_of_type(self, record_type: str, model_type: type[Any]) -> tuple[Any, ...]:
+        return tuple(
+            record
+            for (kind, _), record in sorted(self._reachable.items())
+            if kind == record_type and isinstance(record, model_type)
+        )
+
+    @staticmethod
+    def _raise_issues(issues: list[Any]) -> None:
+        if issues:
+            issue = issues[0]
+            raise TrustedKnowledgeError(issue.code, issue.message)
 
     @staticmethod
     def _record_hash(record: BaseModel) -> str:

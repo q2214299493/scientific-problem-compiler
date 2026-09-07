@@ -732,6 +732,37 @@ class ExpertProfile(StrictModel):
         return self
 
 
+class ExpertAttributionRecord(StrictModel):
+    attribution_id: NonBlankStr
+    expert_id: NonBlankStr
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    medium: NonBlankStr
+    attribution_basis: NonBlankStr
+    captured_at: datetime | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_provenance(self) -> ExpertAttributionRecord:
+        from .serialization import content_hash
+
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("ExpertAttributionRecord evidence_refs must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"attribution_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"expert-attribution-{content_hash(identity)[:24]}"
+        if self.attribution_id != expected_id:
+            raise ValueError("ExpertAttributionRecord attribution_id is not content-bound")
+        payload = {"attribution_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ExpertAttributionRecord content_hash is invalid")
+        return self
+
+
 class ExpertOpinion(StrictModel):
     opinion_id: NonBlankStr
     expert_id: NonBlankStr
@@ -743,6 +774,7 @@ class ExpertOpinion(StrictModel):
     rationale: NonBlankStr
     conditions: tuple[NonBlankStr, ...] = ()
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    attribution_refs: tuple[NonBlankStr, ...] = ()
     related_claim_refs: tuple[NonBlankStr, ...] = ()
     related_workflow_refs: tuple[NonBlankStr, ...] = ()
     supersedes: NonBlankStr | None = None
@@ -755,6 +787,7 @@ class ExpertOpinion(StrictModel):
         for field_name in (
             "conditions",
             "evidence_refs",
+            "attribution_refs",
             "related_claim_refs",
             "related_workflow_refs",
         ):
@@ -766,6 +799,8 @@ class ExpertOpinion(StrictModel):
             exclude={"opinion_id", "content_hash"},
             exclude_none=True,
         )
+        if not self.attribution_refs:
+            identity.pop("attribution_refs")
         expected_id = f"expert-opinion-{content_hash(identity)[:24]}"
         if self.opinion_id != expected_id:
             raise ValueError("ExpertOpinion opinion_id is not content-bound")
@@ -993,10 +1028,16 @@ class KnowledgeSnapshot(StrictModel):
     expert_opinion_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
+    expert_attribution_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     knowledge_relation_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
     curation_record_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    trusted_record_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
 

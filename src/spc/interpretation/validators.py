@@ -8,9 +8,13 @@ from typing import Iterable
 
 from ..models import (
     EpistemicStatus,
+    MethodFact,
+    ModelFact,
     ReportedResult,
     ScientificContextPacket,
     ScientificEvidencePacket,
+    SourceClaim,
+    SourceDocument,
     SourceRole,
     SourceQuote,
     SourceType,
@@ -89,6 +93,166 @@ def validate_claim_evidence_refs(
     return _report(issues)
 
 
+def source_quote_record_issues(
+    quote: SourceQuote,
+    evidence_repository: EvidenceSpanRepository,
+    *,
+    path: str,
+    allowed_evidence_ids: set[str] | None = None,
+) -> tuple[list[ValidationIssue], SourceDocument | None]:
+    """Validate one quote against its immutable evidence and source records."""
+
+    issues: list[ValidationIssue] = []
+    if allowed_evidence_ids is not None and quote.evidence_ref not in allowed_evidence_ids:
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_QUOTE_NOT_RETRIEVED",
+                message=f"SourceQuote evidence was not retrieved: {quote.evidence_ref}",
+                path=path,
+            )
+        )
+        return issues, None
+    try:
+        evidence = evidence_repository.get(quote.evidence_ref)
+        source = evidence_repository.verify_evidence_integrity(evidence)
+    except (FileNotFoundError, KeyError, OSError, ValueError) as error:
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_QUOTE_INTEGRITY_FAILURE",
+                message=f"cannot verify SourceQuote: {error}",
+                path=path,
+            )
+        )
+        return issues, None
+    if quote.relative_end_offset > len(evidence.text):
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_QUOTE_OUT_OF_BOUNDS",
+                message="SourceQuote offsets exceed its EvidenceSpan",
+                path=path,
+            )
+        )
+    elif evidence.text[
+        quote.relative_start_offset : quote.relative_end_offset
+    ] != quote.text:
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_QUOTE_TEXT_MISMATCH",
+                message="SourceQuote offsets must recover its exact text from EvidenceSpan",
+                path=path,
+            )
+        )
+    if (
+        quote.source_id,
+        quote.source_version,
+        quote.source_role,
+        quote.source_type,
+    ) != (
+        source.source_id,
+        source.version,
+        source.source_role,
+        source.source_type,
+    ):
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_QUOTE_PROVENANCE_MISMATCH",
+                message="SourceQuote provenance does not match SourceDocument",
+                path=path,
+            )
+        )
+    return issues, source
+
+
+def source_claim_binding_issues(
+    claim: SourceClaim,
+    quotes_by_id: dict[str, SourceQuote],
+    *,
+    path: str,
+) -> list[ValidationIssue]:
+    """Apply the Phase 2B epistemic and quote-binding rules to one claim."""
+
+    issues: list[ValidationIssue] = []
+    if claim.claim_type == "hypothesis" and claim.epistemic_status != EpistemicStatus.SOURCE_HYPOTHESIS:
+        issues.append(
+            ValidationIssue(
+                code="SOURCE_HYPOTHESIS_PROMOTED",
+                message="an author hypothesis must remain source_hypothesis",
+                path=path,
+            )
+        )
+    if claim.claim_type == "reviewer_question" and claim.epistemic_status != EpistemicStatus.UNRESOLVED:
+        issues.append(
+            ValidationIssue(
+                code="REVIEWER_QUESTION_PROMOTED",
+                message="a reviewer question must remain unresolved",
+                path=path,
+            )
+        )
+    referenced_quotes = [
+        quotes_by_id[quote_id]
+        for quote_id in claim.source_quote_refs
+        if quote_id in quotes_by_id
+    ]
+    if len(referenced_quotes) != len(claim.source_quote_refs) or not referenced_quotes:
+        issues.append(
+            ValidationIssue(
+                code="UNKNOWN_SOURCE_QUOTE_REF",
+                message="SourceClaim must reference existing SourceQuote records",
+                path=path,
+            )
+        )
+    elif set(claim.evidence_refs) != {quote.evidence_ref for quote in referenced_quotes}:
+        issues.append(
+            ValidationIssue(
+                code="CLAIM_QUOTE_EVIDENCE_MISMATCH",
+                message="SourceClaim evidence_refs must match its SourceQuote evidence",
+                path=path,
+            )
+        )
+    explicit_roles = {
+        quote.source_role
+        for quote in referenced_quotes
+        if quote.source_role != SourceRole.UNSPECIFIED
+    }
+    if len(explicit_roles) == 1 and claim.source_role not in explicit_roles:
+        issues.append(
+            ValidationIssue(
+                code="CLAIM_SOURCE_ROLE_MISMATCH",
+                message="SourceClaim role does not match SourceDocument provenance",
+                path=path,
+            )
+        )
+    source_types = {quote.source_type for quote in referenced_quotes}
+    if (
+        SourceRole.REVIEWER in explicit_roles
+        or SourceType.REVIEWER_COMMENT in source_types
+    ) and claim.epistemic_status != EpistemicStatus.UNRESOLVED:
+        issues.append(
+            ValidationIssue(
+                code="REVIEWER_CLAIM_PROMOTED",
+                message="reviewer provenance must remain epistemically unresolved",
+                path=path,
+            )
+        )
+    if SourceType.AUTHOR_RESPONSE in source_types and claim.source_role != SourceRole.AUTHOR:
+        issues.append(
+            ValidationIssue(
+                code="AUTHOR_RESPONSE_ROLE_MISMATCH",
+                message="author_response provenance requires author source role",
+                path=path,
+            )
+        )
+    if SourceType.LITERATURE_ARTICLE in source_types and claim.source_role == SourceRole.REVIEWER:
+        issues.append(
+            ValidationIssue(
+                code="LITERATURE_ROLE_MISCLASSIFIED",
+                message="literature_article punctuation cannot imply reviewer provenance",
+                path=path,
+            )
+        )
+    return issues
+
+
 def _source_quote_issues(
     packet: ScientificEvidencePacket,
     context: ScientificContextPacket,
@@ -107,64 +271,15 @@ def _source_quote_issues(
         )
     for index, quote in enumerate(packet.source_quotes):
         path = f"source_quotes[{index}]"
-        if quote.evidence_ref not in _context_evidence_ids(context):
-            issues.append(
-                ValidationIssue(
-                    code="SOURCE_QUOTE_NOT_RETRIEVED",
-                    message=f"SourceQuote evidence was not retrieved: {quote.evidence_ref}",
-                    path=path,
-                )
-            )
-            continue
-        try:
-            evidence = evidence_repository.get(quote.evidence_ref)
-            source = evidence_repository.verify_evidence_integrity(evidence)
+        quote_issues, source = source_quote_record_issues(
+            quote,
+            evidence_repository,
+            path=path,
+            allowed_evidence_ids=_context_evidence_ids(context),
+        )
+        issues.extend(quote_issues)
+        if source is not None:
             source_document_hashes[f"{source.source_id}@{source.version}"] = content_hash(source)
-        except (FileNotFoundError, KeyError, OSError, ValueError) as error:
-            issues.append(
-                ValidationIssue(
-                    code="SOURCE_QUOTE_INTEGRITY_FAILURE",
-                    message=f"cannot verify SourceQuote: {error}",
-                    path=path,
-                )
-            )
-            continue
-        if quote.relative_end_offset > len(evidence.text):
-            issues.append(
-                ValidationIssue(
-                    code="SOURCE_QUOTE_OUT_OF_BOUNDS",
-                    message="SourceQuote offsets exceed its EvidenceSpan",
-                    path=path,
-                )
-            )
-        elif evidence.text[
-            quote.relative_start_offset : quote.relative_end_offset
-        ] != quote.text:
-            issues.append(
-                ValidationIssue(
-                    code="SOURCE_QUOTE_TEXT_MISMATCH",
-                    message="SourceQuote offsets must recover its exact text from EvidenceSpan",
-                    path=path,
-                )
-            )
-        if (
-            quote.source_id,
-            quote.source_version,
-            quote.source_role,
-            quote.source_type,
-        ) != (
-            source.source_id,
-            source.version,
-            source.source_role,
-            source.source_type,
-        ):
-            issues.append(
-                ValidationIssue(
-                    code="SOURCE_QUOTE_PROVENANCE_MISMATCH",
-                    message="SourceQuote provenance does not match SourceDocument",
-                    path=path,
-                )
-            )
     if packet.provenance_manifest.get("source_document_hashes") != source_document_hashes:
         issues.append(
             ValidationIssue(
@@ -192,84 +307,13 @@ def validate_claim_source_binding(
 ) -> ValidationReport:
     issues, quotes_by_id = _source_quote_issues(packet, context, evidence_repository)
     for index, claim in enumerate(packet.source_claims):
-        if claim.claim_type == "hypothesis" and claim.epistemic_status != EpistemicStatus.SOURCE_HYPOTHESIS:
-            issues.append(
-                ValidationIssue(
-                    code="SOURCE_HYPOTHESIS_PROMOTED",
-                    message="an author hypothesis must remain source_hypothesis",
-                    path=f"source_claims[{index}]",
-                )
+        issues.extend(
+            source_claim_binding_issues(
+                claim,
+                quotes_by_id,
+                path=f"source_claims[{index}]",
             )
-        if claim.claim_type == "reviewer_question" and claim.epistemic_status != EpistemicStatus.UNRESOLVED:
-            issues.append(
-                ValidationIssue(
-                    code="REVIEWER_QUESTION_PROMOTED",
-                    message="a reviewer question must remain unresolved",
-                    path=f"source_claims[{index}]",
-                )
-            )
-        referenced_quotes = [
-            quotes_by_id[quote_id]
-            for quote_id in claim.source_quote_refs
-            if quote_id in quotes_by_id
-        ]
-        if len(referenced_quotes) != len(claim.source_quote_refs) or not referenced_quotes:
-            issues.append(
-                ValidationIssue(
-                    code="UNKNOWN_SOURCE_QUOTE_REF",
-                    message="SourceClaim must reference existing SourceQuote records",
-                    path=f"source_claims[{index}]",
-                )
-            )
-        elif set(claim.evidence_refs) != {quote.evidence_ref for quote in referenced_quotes}:
-            issues.append(
-                ValidationIssue(
-                    code="CLAIM_QUOTE_EVIDENCE_MISMATCH",
-                    message="SourceClaim evidence_refs must match its SourceQuote evidence",
-                    path=f"source_claims[{index}]",
-                )
-            )
-        explicit_roles = {
-            quote.source_role
-            for quote in referenced_quotes
-            if quote.source_role != SourceRole.UNSPECIFIED
-        }
-        if len(explicit_roles) == 1 and claim.source_role not in explicit_roles:
-            issues.append(
-                ValidationIssue(
-                    code="CLAIM_SOURCE_ROLE_MISMATCH",
-                    message="SourceClaim role does not match SourceDocument provenance",
-                    path=f"source_claims[{index}]",
-                )
-            )
-        source_types = {quote.source_type for quote in referenced_quotes}
-        if (
-            SourceRole.REVIEWER in explicit_roles
-            or SourceType.REVIEWER_COMMENT in source_types
-        ) and claim.epistemic_status != EpistemicStatus.UNRESOLVED:
-            issues.append(
-                ValidationIssue(
-                    code="REVIEWER_CLAIM_PROMOTED",
-                    message="reviewer provenance must remain epistemically unresolved",
-                    path=f"source_claims[{index}]",
-                )
-            )
-        if SourceType.AUTHOR_RESPONSE in source_types and claim.source_role != SourceRole.AUTHOR:
-            issues.append(
-                ValidationIssue(
-                    code="AUTHOR_RESPONSE_ROLE_MISMATCH",
-                    message="author_response provenance requires author source role",
-                    path=f"source_claims[{index}]",
-                )
-            )
-        if SourceType.LITERATURE_ARTICLE in source_types and claim.source_role == SourceRole.REVIEWER:
-            issues.append(
-                ValidationIssue(
-                    code="LITERATURE_ROLE_MISCLASSIFIED",
-                    message="literature_article punctuation cannot imply reviewer provenance",
-                    path=f"source_claims[{index}]",
-                )
-            )
+        )
     return _report(issues)
 
 
@@ -342,14 +386,18 @@ def validate_result_provenance(
     return _report(issues)
 
 
-def validate_result_context(packet: ScientificEvidencePacket) -> ValidationReport:
+def result_context_record_issues(
+    result: ReportedResult,
+    method_facts: dict[str, MethodFact],
+    model_facts: dict[str, ModelFact],
+    *,
+    path: str,
+    require_context: bool,
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    method_facts = {fact.fact_id: fact for fact in packet.method_facts}
-    model_facts = {fact.fact_id: fact for fact in packet.model_facts}
-    for index, result in enumerate(packet.reported_results):
-        path = f"reported_results[{index}].result_context"
-        result_context = result.result_context
-        if result_context is None:
+    result_context = result.result_context
+    if result_context is None:
+        if require_context:
             issues.append(
                 ValidationIssue(
                     code="MISSING_RESULT_CONTEXT",
@@ -357,60 +405,77 @@ def validate_result_context(packet: ScientificEvidencePacket) -> ValidationRepor
                     path=path,
                 )
             )
-            continue
-        if (
-            result_context.system_context != result.system_context
-            or result_context.method_context != result.method_context
-        ):
-            issues.append(
-                ValidationIssue(
-                    code="RESULT_CONTEXT_MISMATCH",
-                    message="ResultContext must preserve the result system and method context",
-                    path=path,
-                )
+        return issues
+    if (
+        result_context.system_context != result.system_context
+        or result_context.method_context != result.method_context
+    ):
+        issues.append(
+            ValidationIssue(
+                code="RESULT_CONTEXT_MISMATCH",
+                message="ResultContext must preserve the result system and method context",
+                path=path,
             )
-        if not set(result_context.method_fact_refs).issubset(method_facts):
-            issues.append(
-                ValidationIssue(
-                    code="UNKNOWN_RESULT_METHOD_FACT",
-                    message="ResultContext references an unknown MethodFact",
-                    path=path,
-                )
+        )
+    if not set(result_context.method_fact_refs).issubset(method_facts):
+        issues.append(
+            ValidationIssue(
+                code="UNKNOWN_RESULT_METHOD_FACT",
+                message="ResultContext references an unknown MethodFact",
+                path=path,
             )
-        if not set(result_context.model_fact_refs).issubset(model_facts):
-            issues.append(
-                ValidationIssue(
-                    code="UNKNOWN_RESULT_MODEL_FACT",
-                    message="ResultContext references an unknown ModelFact",
-                    path=path,
-                )
+        )
+    if not set(result_context.model_fact_refs).issubset(model_facts):
+        issues.append(
+            ValidationIssue(
+                code="UNKNOWN_RESULT_MODEL_FACT",
+                message="ResultContext references an unknown ModelFact",
+                path=path,
             )
-        applicable_methods = {
-            fact.fact_id
-            for fact in method_facts.values()
-            if set(fact.evidence_refs) & set(result.evidence_refs)
-        }
-        applicable_models = {
-            fact.fact_id
-            for fact in model_facts.values()
-            if set(fact.evidence_refs) & set(result.evidence_refs)
-        }
-        if not applicable_methods.issubset(set(result_context.method_fact_refs)):
-            issues.append(
-                ValidationIssue(
-                    code="MISSING_RESULT_METHOD_FACT_REF",
-                    message="ResultContext omits an applicable MethodFact",
-                    path=path,
-                )
+        )
+    applicable_methods = {
+        fact.fact_id
+        for fact in method_facts.values()
+        if set(fact.evidence_refs) & set(result.evidence_refs)
+    }
+    applicable_models = {
+        fact.fact_id
+        for fact in model_facts.values()
+        if set(fact.evidence_refs) & set(result.evidence_refs)
+    }
+    if not applicable_methods.issubset(set(result_context.method_fact_refs)):
+        issues.append(
+            ValidationIssue(
+                code="MISSING_RESULT_METHOD_FACT_REF",
+                message="ResultContext omits an applicable MethodFact",
+                path=path,
             )
-        if not applicable_models.issubset(set(result_context.model_fact_refs)):
-            issues.append(
-                ValidationIssue(
-                    code="MISSING_RESULT_MODEL_FACT_REF",
-                    message="ResultContext omits an applicable ModelFact",
-                    path=path,
-                )
+        )
+    if not applicable_models.issubset(set(result_context.model_fact_refs)):
+        issues.append(
+            ValidationIssue(
+                code="MISSING_RESULT_MODEL_FACT_REF",
+                message="ResultContext omits an applicable ModelFact",
+                path=path,
             )
+        )
+    return issues
+
+
+def validate_result_context(packet: ScientificEvidencePacket) -> ValidationReport:
+    issues: list[ValidationIssue] = []
+    method_facts = {fact.fact_id: fact for fact in packet.method_facts}
+    model_facts = {fact.fact_id: fact for fact in packet.model_facts}
+    for index, result in enumerate(packet.reported_results):
+        issues.extend(
+            result_context_record_issues(
+                result,
+                method_facts,
+                model_facts,
+                path=f"reported_results[{index}].result_context",
+                require_context=True,
+            )
+        )
     return _report(issues)
 
 

@@ -18,6 +18,7 @@ from spc.models import (
     CurationStatus,
     EpistemicStatus,
     EvidenceSpan,
+    ExpertAttributionRecord,
     ExpertOpinion,
     ExpertProfile,
     KnowledgeCurationRecord,
@@ -26,7 +27,12 @@ from spc.models import (
     KnowledgeViewMode,
     LiteratureDocument,
     LiteratureWorkflowPattern,
+    MethodFact,
+    ModelFact,
+    ReportedResult,
+    ResultContext,
     SourceClaim,
+    SourceQuote,
     SourceRole,
     SourceType,
 )
@@ -36,7 +42,8 @@ from spc.serialization import content_hash, dump_json
 
 LITERATURE_TEXT = "A pathway comparison requires connectivity-preserving endpoints."
 EXPERT_TEXT = "Endpoint selection should preserve mechanistic connectivity."
-SOURCE_TEXT = f"{LITERATURE_TEXT}\n{EXPERT_TEXT}\n"
+LITERATURE_SOURCE_TEXT = f"{LITERATURE_TEXT}\n"
+EXPERT_SOURCE_TEXT = f"{EXPERT_TEXT}\n"
 
 
 def _normalized(value: str) -> str:
@@ -98,6 +105,23 @@ def make_expert_profile(**updates) -> ExpertProfile:
     return ExpertProfile(**identity, content_hash=content_hash(identity))
 
 
+def make_attribution(**updates) -> ExpertAttributionRecord:
+    identity = {
+        "expert_id": "expert-methodology-001",
+        "source_id": "source-expert-note",
+        "source_version": "v1",
+        "evidence_refs": ("ev-expert-guidance",),
+        "medium": "internal_note",
+        "attribution_basis": "Authenticated meeting note authored by the named expert.",
+        "captured_at": None,
+    }
+    identity.update(updates)
+    clean_identity = {key: value for key, value in identity.items() if value is not None}
+    attribution_id = f"expert-attribution-{content_hash(clean_identity)[:24]}"
+    payload = {"attribution_id": attribution_id, **clean_identity}
+    return ExpertAttributionRecord(**payload, content_hash=content_hash(payload))
+
+
 def make_expert_opinion(**updates) -> ExpertOpinion:
     identity = {
         "expert_id": "expert-methodology-001",
@@ -109,12 +133,15 @@ def make_expert_opinion(**updates) -> ExpertOpinion:
         "rationale": "Disconnected endpoints cannot support a coherent pathway comparison.",
         "conditions": ("Atom identity and boundary conditions remain consistent.",),
         "evidence_refs": ("ev-expert-guidance",),
+        "attribution_refs": (make_attribution().attribution_id,),
         "related_claim_refs": ("claim-connectivity-001",),
         "related_workflow_refs": ("workflow-connectivity-001",),
         "supersedes": None,
     }
     identity.update(updates)
     clean_identity = {key: value for key, value in identity.items() if value is not None}
+    if not clean_identity.get("attribution_refs"):
+        clean_identity.pop("attribution_refs", None)
     opinion_id = f"expert-opinion-{content_hash(clean_identity)[:24]}"
     payload = {"opinion_id": opinion_id, **clean_identity}
     return ExpertOpinion(**payload, content_hash=content_hash(payload))
@@ -168,34 +195,67 @@ def make_curation(
 
 
 def prepare_evidence_store(tmp_path) -> SourceEvidenceStore:
-    source_path = tmp_path / "generic-source.txt"
-    source_path.write_bytes(SOURCE_TEXT.encode("utf-8"))
     store = SourceEvidenceStore(tmp_path / ".spc")
-    source = store.ingest(
-        source_path,
+    literature_path = tmp_path / "generic-paper.txt"
+    literature_path.write_bytes(LITERATURE_SOURCE_TEXT.encode("utf-8"))
+    literature_source = store.ingest(
+        literature_path,
         "source-generic-paper",
         "v1",
         "Generic methodology source",
         source_role=SourceRole.LITERATURE_AUTHOR,
         source_type=SourceType.LITERATURE_ARTICLE,
     )
-    for evidence_id, text in (
-        ("ev-literature-connectivity", LITERATURE_TEXT),
-        ("ev-expert-guidance", EXPERT_TEXT),
+    expert_path = tmp_path / "expert-note.txt"
+    expert_path.write_bytes(EXPERT_SOURCE_TEXT.encode("utf-8"))
+    expert_source = store.ingest(
+        expert_path,
+        "source-expert-note",
+        "v1",
+        "Expert methodology meeting note",
+        source_role=SourceRole.INTERNAL_RESEARCHER,
+        source_type=SourceType.INTERNAL_NOTE,
+    )
+    for evidence_id, text, source in (
+        ("ev-literature-connectivity", LITERATURE_TEXT, literature_source),
+        ("ev-expert-guidance", EXPERT_TEXT, expert_source),
     ):
-        start = SOURCE_TEXT.index(text)
         store.add_evidence(
             EvidenceSpan(
                 evidence_id=evidence_id,
                 source_id=source.source_id,
                 source_version=source.version,
                 content_sha256=source.content_sha256,
-                start_offset=start,
-                end_offset=start + len(text),
+                start_offset=0,
+                end_offset=len(text),
                 text=text,
             )
         )
     return store
+
+
+def make_literature_quote(**updates) -> SourceQuote:
+    identity = {
+        "evidence_ref": "ev-literature-connectivity",
+        "relative_start_offset": 0,
+        "relative_end_offset": len(LITERATURE_TEXT),
+        "text": LITERATURE_TEXT,
+        "source_id": "source-generic-paper",
+        "source_version": "v1",
+        "source_role": SourceRole.LITERATURE_AUTHOR,
+        "source_type": SourceType.LITERATURE_ARTICLE,
+    }
+    identity.update(updates)
+    quote_identity = {
+        "evidence_ref": identity["evidence_ref"],
+        "relative_start_offset": identity["relative_start_offset"],
+        "relative_end_offset": identity["relative_end_offset"],
+        "text_hash": content_hash({"text": identity["text"]}),
+    }
+    return SourceQuote(
+        quote_id=f"quote-{content_hash(quote_identity)[:24]}",
+        **identity,
+    )
 
 
 def populate_generic_knowledge(
@@ -207,14 +267,18 @@ def populate_generic_knowledge(
 ) -> tuple[LiteratureDocument, ExpertOpinion, tuple[KnowledgeRelation, ...]]:
     literature = make_literature()
     profile = make_expert_profile()
-    opinion = make_expert_opinion()
+    attribution = make_attribution()
+    opinion = make_expert_opinion(
+        attribution_refs=(attribution.attribution_id,)
+    )
+    quote = make_literature_quote()
     claim = SourceClaim(
         claim_id="claim-connectivity-001",
         text=LITERATURE_TEXT,
         claim_type="methodological_claim",
-        source_role=SourceRole.AUTHOR,
+        source_role=SourceRole.LITERATURE_AUTHOR,
         evidence_refs=("ev-literature-connectivity",),
-        source_quote_refs=("quote-connectivity-001",),
+        source_quote_refs=(quote.quote_id,),
         claim_strength="reported guidance",
         epistemic_status=EpistemicStatus.SOURCE_REPORTED,
     )
@@ -228,7 +292,9 @@ def populate_generic_knowledge(
     )
     repositories.literature_documents.put(literature.literature_id, literature)
     repositories.expert_profiles.put(profile.expert_id, profile)
+    repositories.expert_attributions.put(attribution.attribution_id, attribution)
     repositories.expert_opinions.put(opinion.opinion_id, opinion)
+    repositories.source_quotes.put(quote.quote_id, quote)
     repositories.source_claims.put(claim.claim_id, claim)
     repositories.workflow_patterns.put(workflow.pattern_id, workflow)
     relations = (
@@ -257,6 +323,46 @@ def populate_generic_knowledge(
     )
     repositories.load_curations(curations)
     return literature, opinion, relations
+
+
+def make_source_claim(**updates) -> SourceClaim:
+    quote = make_literature_quote()
+    payload = {
+        "claim_id": "claim-connectivity-001",
+        "text": LITERATURE_TEXT,
+        "claim_type": "methodological_claim",
+        "source_role": SourceRole.LITERATURE_AUTHOR,
+        "evidence_refs": ("ev-literature-connectivity",),
+        "source_quote_refs": (quote.quote_id,),
+        "claim_strength": "reported guidance",
+        "epistemic_status": EpistemicStatus.SOURCE_REPORTED,
+    }
+    payload.update(updates)
+    return SourceClaim(**payload)
+
+
+def trust_relation_endpoint(
+    repositories: KnowledgeRepositories,
+    record_type: str,
+    record_id: str,
+) -> None:
+    literature = make_literature()
+    if not (repositories.literature_documents.root / f"{literature.literature_id}.json").exists():
+        repositories.literature_documents.put(literature.literature_id, literature)
+        curation = make_curation(
+            "literature_document", literature, CurationStatus.ACCEPTED
+        )
+        repositories.curations.put(curation.curation_id, curation)
+    relation = make_relation(
+        object_type=record_type,
+        object_id=record_id,
+        evidence_refs=(),
+    )
+    repositories.relations.put(relation.relation_id, relation)
+    curation = make_curation(
+        "knowledge_relation", relation, CurationStatus.ACCEPTED
+    )
+    repositories.curations.put(curation.curation_id, curation)
 
 
 def test_literature_document_id_and_hash_are_deterministic() -> None:
@@ -391,17 +497,25 @@ def test_snapshot_binds_valid_accepted_knowledge_and_curations(tmp_path) -> None
 
 def test_accepted_opinion_with_missing_evidence_is_rejected(tmp_path) -> None:
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
-    opinion = make_expert_opinion(evidence_refs=("ev-missing",), related_claim_refs=(), related_workflow_refs=())
+    attribution = make_attribution(evidence_refs=("ev-missing",))
+    opinion = make_expert_opinion(
+        evidence_refs=("ev-missing",),
+        attribution_refs=(attribution.attribution_id,),
+        related_claim_refs=(),
+        related_workflow_refs=(),
+    )
     profile = make_expert_profile()
     repositories.expert_profiles.put(profile.expert_id, profile)
+    repositories.expert_attributions.put(attribution.attribution_id, attribution)
     repositories.expert_opinions.put(opinion.opinion_id, opinion)
     repositories.curations.put(
         (curation := make_curation("expert_opinion", opinion, CurationStatus.ACCEPTED)).curation_id,
         curation,
     )
+    store = prepare_evidence_store(tmp_path)
     with pytest.raises(TrustedKnowledgeError, match="INVALID_KNOWLEDGE_EVIDENCE"):
         repositories.create_snapshot(
-            SourceEvidenceStore(tmp_path / ".spc"),
+            store,
             DomainPackLoader().load("base").profile,
         )
 
@@ -420,16 +534,9 @@ def test_accepted_opinion_requires_all_related_records(tmp_path, updates) -> Non
     store = prepare_evidence_store(tmp_path)
     opinion = make_expert_opinion(**updates)
     profile = make_expert_profile()
-    claim = SourceClaim(
-        claim_id="claim-connectivity-001",
-        text=LITERATURE_TEXT,
-        claim_type="methodological_claim",
-        source_role=SourceRole.AUTHOR,
-        evidence_refs=("ev-literature-connectivity",),
-        source_quote_refs=("quote-connectivity-001",),
-        claim_strength="reported guidance",
-        epistemic_status=EpistemicStatus.SOURCE_REPORTED,
-    )
+    attribution = make_attribution()
+    quote = make_literature_quote()
+    claim = make_source_claim()
     workflow = LiteratureWorkflowPattern(
         pattern_id="workflow-connectivity-001",
         domain="base",
@@ -437,6 +544,8 @@ def test_accepted_opinion_requires_all_related_records(tmp_path, updates) -> Non
         workflow_capabilities=("comparative_analysis",),
     )
     repositories.expert_profiles.put(profile.expert_id, profile)
+    repositories.expert_attributions.put(attribution.attribution_id, attribution)
+    repositories.source_quotes.put(quote.quote_id, quote)
     repositories.source_claims.put(claim.claim_id, claim)
     repositories.workflow_patterns.put(workflow.pattern_id, workflow)
     repositories.expert_opinions.put(opinion.opinion_id, opinion)
@@ -526,7 +635,9 @@ def test_tampered_evidence_prevents_trusted_snapshot(tmp_path) -> None:
     store = prepare_evidence_store(tmp_path)
     opinion = make_expert_opinion(related_claim_refs=(), related_workflow_refs=())
     profile = make_expert_profile()
+    attribution = make_attribution()
     repositories.expert_profiles.put(profile.expert_id, profile)
+    repositories.expert_attributions.put(attribution.attribution_id, attribution)
     repositories.expert_opinions.put(opinion.opinion_id, opinion)
     curation = make_curation("expert_opinion", opinion, CurationStatus.ACCEPTED)
     repositories.curations.put(curation.curation_id, curation)
@@ -588,6 +699,273 @@ def test_graph_rejects_relation_with_unknown_record_in_audit_mode(tmp_path) -> N
         )
 
 
+def test_source_claim_with_missing_quote_cannot_enter_trusted_graph(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    claim = make_source_claim(source_quote_refs=("quote-missing",))
+    repositories.source_claims.put(claim.claim_id, claim)
+    trust_relation_endpoint(repositories, "source_claim", claim.claim_id)
+    with pytest.raises(TrustedKnowledgeError, match="UNKNOWN_SOURCE_QUOTE_REF"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
+def test_source_claim_quote_evidence_mismatch_is_rejected(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    quote = make_literature_quote()
+    claim = make_source_claim(evidence_refs=("ev-expert-guidance",))
+    repositories.source_quotes.put(quote.quote_id, quote)
+    repositories.source_claims.put(claim.claim_id, claim)
+    trust_relation_endpoint(repositories, "source_claim", claim.claim_id)
+    with pytest.raises(TrustedKnowledgeError, match="CLAIM_QUOTE_EVIDENCE_MISMATCH"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
+def test_source_claim_source_role_mismatch_is_rejected(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    quote = make_literature_quote()
+    claim = make_source_claim(source_role=SourceRole.AUTHOR)
+    repositories.source_quotes.put(quote.quote_id, quote)
+    repositories.source_claims.put(claim.claim_id, claim)
+    trust_relation_endpoint(repositories, "source_claim", claim.claim_id)
+    with pytest.raises(TrustedKnowledgeError, match="CLAIM_SOURCE_ROLE_MISMATCH"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
+def test_tampered_source_quote_is_rejected(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    quote = make_literature_quote(source_role=SourceRole.INTERNAL_RESEARCHER)
+    repositories.source_quotes.put(quote.quote_id, quote)
+    trust_relation_endpoint(repositories, "source_quote", quote.quote_id)
+    with pytest.raises(TrustedKnowledgeError, match="SOURCE_QUOTE_PROVENANCE_MISMATCH"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
+@pytest.mark.parametrize(
+    ("record_type", "record"),
+    (
+        (
+            "method_fact",
+            MethodFact(
+                fact_id="method-invalid-evidence",
+                text="A method statement.",
+                attributes={},
+                evidence_refs=("ev-missing",),
+            ),
+        ),
+        (
+            "model_fact",
+            ModelFact(
+                fact_id="model-invalid-evidence",
+                text="A model statement.",
+                attributes={},
+                evidence_refs=("ev-missing",),
+            ),
+        ),
+        (
+            "reported_result",
+            ReportedResult(
+                result_id="result-invalid-evidence",
+                quantity="barrier",
+                value=1.2,
+                unit="eV",
+                system_context={"system": "generic"},
+                method_context={"method": "reported"},
+                evidence_refs=("ev-missing",),
+                result_status="literature_reported",
+            ),
+        ),
+    ),
+)
+def test_scientific_record_with_invalid_evidence_is_rejected(
+    tmp_path, record_type, record
+) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    identity_field = "result_id" if record_type == "reported_result" else "fact_id"
+    repository_name = {
+        "method_fact": "method_facts",
+        "model_fact": "model_facts",
+        "reported_result": "reported_results",
+    }[record_type]
+    record_id = getattr(record, identity_field)
+    getattr(repositories, repository_name).put(record_id, record)
+    trust_relation_endpoint(repositories, record_type, record_id)
+    with pytest.raises(TrustedKnowledgeError, match="INVALID_KNOWLEDGE_EVIDENCE"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
+def test_snapshot_binds_reachable_quote_claim_result_and_fact_hashes(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    quote = make_literature_quote()
+    claim = make_source_claim()
+    method = MethodFact(
+        fact_id="method-connectivity-001",
+        text="The endpoint comparison preserves atom identity.",
+        attributes={"method": "pathway comparison"},
+        evidence_refs=("ev-literature-connectivity",),
+    )
+    model = ModelFact(
+        fact_id="model-connectivity-001",
+        text="The compared endpoints share a connectivity model.",
+        attributes={"model": "connectivity preserving"},
+        evidence_refs=("ev-literature-connectivity",),
+    )
+    context_identity = {
+        "system_context": {"system": "generic"},
+        "method_context": {"method": "pathway comparison"},
+        "method_fact_refs": (method.fact_id,),
+        "model_fact_refs": (model.fact_id,),
+    }
+    result_context = ResultContext(
+        context_id=f"result-context-{content_hash(context_identity)[:24]}",
+        **context_identity,
+    )
+    result = ReportedResult(
+        result_id="result-connectivity-001",
+        quantity="connectivity score",
+        value=1.0,
+        unit="dimensionless",
+        system_context=context_identity["system_context"],
+        method_context=context_identity["method_context"],
+        result_context=result_context,
+        evidence_refs=("ev-literature-connectivity",),
+        result_status="literature_reported",
+    )
+    repositories.source_quotes.put(quote.quote_id, quote)
+    repositories.source_claims.put(claim.claim_id, claim)
+    repositories.method_facts.put(method.fact_id, method)
+    repositories.model_facts.put(model.fact_id, model)
+    repositories.reported_results.put(result.result_id, result)
+    trust_relation_endpoint(repositories, "source_claim", claim.claim_id)
+    trust_relation_endpoint(repositories, "reported_result", result.result_id)
+    snapshot = repositories.create_snapshot(
+        store, DomainPackLoader().load("base").profile
+    )
+    expected = {
+        f"source_quote:{quote.quote_id}": content_hash(quote),
+        f"source_claim:{claim.claim_id}": content_hash(claim),
+        f"reported_result:{result.result_id}": content_hash(result),
+        f"method_fact:{method.fact_id}": content_hash(method),
+        f"model_fact:{model.fact_id}": content_hash(model),
+    }
+    assert expected.items() <= snapshot.trusted_record_hashes.items()
+
+
+def test_snapshot_changes_when_reachable_source_claim_changes(tmp_path) -> None:
+    snapshots = []
+    for name, claim_text in (("first", LITERATURE_TEXT), ("second", "Normalized claim text.")):
+        root = tmp_path / name
+        repositories = KnowledgeRepositories(root / "knowledge")
+        store = prepare_evidence_store(root)
+        quote = make_literature_quote()
+        claim = make_source_claim(text=claim_text)
+        repositories.source_quotes.put(quote.quote_id, quote)
+        repositories.source_claims.put(claim.claim_id, claim)
+        trust_relation_endpoint(repositories, "source_claim", claim.claim_id)
+        snapshots.append(
+            repositories.create_snapshot(
+                store, DomainPackLoader().load("base").profile
+            )
+        )
+    assert snapshots[0].snapshot_id != snapshots[1].snapshot_id
+
+
+def test_expert_opinion_rejects_attribution_owned_by_another_expert(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    profile = make_expert_profile()
+    attribution = make_attribution(expert_id="expert-other")
+    opinion = make_expert_opinion(
+        attribution_refs=(attribution.attribution_id,),
+        related_claim_refs=(),
+        related_workflow_refs=(),
+    )
+    repositories.expert_profiles.put(profile.expert_id, profile)
+    repositories.expert_attributions.put(attribution.attribution_id, attribution)
+    repositories.expert_opinions.put(opinion.opinion_id, opinion)
+    curation = make_curation("expert_opinion", opinion, CurationStatus.ACCEPTED)
+    repositories.curations.put(curation.curation_id, curation)
+    with pytest.raises(TrustedKnowledgeError, match="EXPERT_ATTRIBUTION_OWNER_MISMATCH"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
+def test_expert_opinion_requires_explicit_attribution_for_literature_evidence(
+    tmp_path,
+) -> None:
+    profile = make_expert_profile()
+    store = prepare_evidence_store(tmp_path)
+    invalid_repositories = KnowledgeRepositories(tmp_path / "invalid-knowledge")
+    expert_attribution = make_attribution()
+    invalid_opinion = make_expert_opinion(
+        evidence_refs=("ev-literature-connectivity",),
+        attribution_refs=(expert_attribution.attribution_id,),
+        related_claim_refs=(),
+        related_workflow_refs=(),
+    )
+    invalid_repositories.expert_profiles.put(profile.expert_id, profile)
+    invalid_repositories.expert_attributions.put(
+        expert_attribution.attribution_id, expert_attribution
+    )
+    invalid_repositories.expert_opinions.put(
+        invalid_opinion.opinion_id, invalid_opinion
+    )
+    curation = make_curation(
+        "expert_opinion", invalid_opinion, CurationStatus.ACCEPTED
+    )
+    invalid_repositories.curations.put(curation.curation_id, curation)
+    with pytest.raises(
+        TrustedKnowledgeError, match="EXPERT_OPINION_EVIDENCE_NOT_ATTRIBUTED"
+    ):
+        invalid_repositories.create_snapshot(
+            store, DomainPackLoader().load("base").profile
+        )
+
+    valid_repositories = KnowledgeRepositories(tmp_path / "valid-knowledge")
+    literature_attribution = make_attribution(
+        source_id="source-generic-paper",
+        evidence_refs=("ev-literature-connectivity",),
+        attribution_basis="Explicit authorship attribution for the literature source.",
+    )
+    valid_opinion = make_expert_opinion(
+        evidence_refs=("ev-literature-connectivity",),
+        attribution_refs=(literature_attribution.attribution_id,),
+        related_claim_refs=(),
+        related_workflow_refs=(),
+    )
+    valid_repositories.expert_profiles.put(profile.expert_id, profile)
+    valid_repositories.expert_attributions.put(
+        literature_attribution.attribution_id, literature_attribution
+    )
+    valid_repositories.expert_opinions.put(valid_opinion.opinion_id, valid_opinion)
+    valid_curation = make_curation(
+        "expert_opinion", valid_opinion, CurationStatus.ACCEPTED
+    )
+    valid_repositories.curations.put(valid_curation.curation_id, valid_curation)
+    snapshot = valid_repositories.create_snapshot(
+        store, DomainPackLoader().load("base").profile
+    )
+    assert literature_attribution.attribution_id in snapshot.expert_attribution_hashes
+
+
+def test_accepted_expert_opinion_requires_attribution_record(tmp_path) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    profile = make_expert_profile()
+    opinion = make_expert_opinion(
+        attribution_refs=(), related_claim_refs=(), related_workflow_refs=()
+    )
+    repositories.expert_profiles.put(profile.expert_id, profile)
+    repositories.expert_opinions.put(opinion.opinion_id, opinion)
+    curation = make_curation("expert_opinion", opinion, CurationStatus.ACCEPTED)
+    repositories.curations.put(curation.curation_id, curation)
+    with pytest.raises(TrustedKnowledgeError, match="MISSING_EXPERT_ATTRIBUTION"):
+        repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+
 def test_generic_non_ft_knowledge_fixture_works(tmp_path) -> None:
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
     store = SourceEvidenceStore(tmp_path / ".spc")
@@ -601,3 +979,12 @@ def test_generic_non_ft_knowledge_fixture_works(tmp_path) -> None:
     )
     assert all("fischer_tropsch" not in node.record_id for node in graph.nodes)
     assert len(graph.edges) == 3
+    sources = {item.source_id: item for item in store.source_records.list()}
+    assert sources["source-generic-paper"].source_type == SourceType.LITERATURE_ARTICLE
+    assert sources["source-expert-note"].source_type == SourceType.INTERNAL_NOTE
+    assert repositories.source_claims.get(
+        "claim-connectivity-001"
+    ).source_role == SourceRole.LITERATURE_AUTHOR
+    opinion = repositories.expert_opinions.list()[0]
+    attribution = repositories.expert_attributions.get(opinion.attribution_refs[0])
+    assert attribution.source_id == "source-expert-note"

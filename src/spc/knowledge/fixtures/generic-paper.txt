@@ -1,2 +1,1 @@
 A pathway comparison requires connectivity-preserving endpoints.
-Endpoint selection should preserve mechanistic connectivity.

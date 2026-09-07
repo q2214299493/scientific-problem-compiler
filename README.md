@@ -157,7 +157,17 @@ its audit view may show all curation states and labels each node and edge status
 in text. Mermaid output remains only a reproducible view: immutable repository
 and curation records are authoritative.
 
-The package includes an offline, non-FT fixture with one literature claim
-relation, one expert-opinion provenance relation, and one literature-workflow
-relation. K1A does not parse PDFs, call external services or LLMs, build an
+K1A.2 closes provenance recursively for every scientific record reachable from
+trusted relations. Quote offsets and source metadata, claim/quote evidence
+equality and epistemic restrictions, result contexts, fact references, and
+case/workflow evidence are validated with the Phase 2B binding rules. Expert
+opinions require an immutable `ExpertAttributionRecord` whose named expert,
+source version, and verified evidence cover the opinion. `trusted_record_hashes`
+binds all reachable records into the snapshot while the earlier typed hash maps
+remain available for compatibility.
+
+The package includes an offline, non-FT fixture with independent literature and
+expert-note sources, one literature claim relation, one expert-opinion
+provenance relation, and one literature-workflow relation. K1A does not parse
+PDFs, call external services or LLMs, build an
 embedding/vector store, or authorize or execute scientific work.

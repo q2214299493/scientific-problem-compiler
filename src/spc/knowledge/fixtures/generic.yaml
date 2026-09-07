@@ -1,92 +1,31 @@
-curations:
-  - content_hash: f6362d34f3ee728d37e5e6a1d678d778eca4acb4fdcaaf2041757d1378c582d1
-    curation_id: knowledge-curation-d78bd14b120aae6aa9a1ad31
-    curator_id: curator-k1a1
-    evidence_refs: []
-    rationale: "Curation decision: accepted"
-    status: accepted
-    supersedes_curation_id: null
-    target_hash: 586f665937703bf5238be50c3d626c7ab19db370dc41e624c019bd55b4edc7cf
-    target_id: literature-7eae49b2b522af21a08b565c
-    target_type: literature_document
-  - content_hash: 29f7dafdee2403d4e51ba14ac535203c364e5dc4a0aa39b8edb5ae6963305561
-    curation_id: knowledge-curation-becd7a5898f398153c0bb0f8
-    curator_id: curator-k1a1
-    evidence_refs: []
-    rationale: "Curation decision: accepted"
-    status: accepted
-    supersedes_curation_id: null
-    target_hash: e4161d5ee9c7edda943f23f03a3e3843375b074fccded56ac0f92ea510b9b737
-    target_id: expert-opinion-3188d7527af4e1c4e9e325d2
-    target_type: expert_opinion
-  - content_hash: c9d6c98fc5a02282fcd81bc518082506c5eac4fd839b02435ba384b5b04e104b
-    curation_id: knowledge-curation-32fb4af74f54a9cee317cf64
-    curator_id: curator-k1a1
-    evidence_refs: []
-    rationale: "Curation decision: accepted"
-    status: accepted
-    supersedes_curation_id: null
-    target_hash: ad845e20ba78844343465a2b832854f40abcf8c7c9d31e5c34c96ce589f3631d
-    target_id: knowledge-relation-16e174e9a6f57a4bbc5c0ca0
-    target_type: knowledge_relation
-  - content_hash: 9f9bb9b557ee18118a1486b181a2f0d7efec4b9df4393f0a9d88e351cf7ba9d3
-    curation_id: knowledge-curation-d40c69447e2642f04061afe5
-    curator_id: curator-k1a1
-    evidence_refs: []
-    rationale: "Curation decision: accepted"
-    status: accepted
-    supersedes_curation_id: null
-    target_hash: 4e264e5d582ccbac1b408f325325504d8a825f3120b74119750a0dfd258cdccf
-    target_id: knowledge-relation-4a25e4c51b19c6c0ed87efe9
-    target_type: knowledge_relation
-  - content_hash: 672d777ee7237cc2b5ec23b225e9364ca21d68a9a3e4c149de0fa13240473832
-    curation_id: knowledge-curation-ee98bed51e68c6db38358e27
-    curator_id: curator-k1a1
-    evidence_refs: []
-    rationale: "Curation decision: accepted"
-    status: accepted
-    supersedes_curation_id: null
-    target_hash: 67a62241d653f4e2447c8282a45d8f362ba3a8602e9e6e2dbf0ec3ecb5300521
-    target_id: knowledge-relation-22a41465767cfced2a495be7
-    target_type: knowledge_relation
+source_artifacts:
+  - path: generic-paper.txt
+    source_id: source-generic-paper
+    source_role: literature_author
+    source_type: literature_article
+    source_version: v1
+    title: Generic literature source
+  - path: expert-note.txt
+    source_id: source-expert-note
+    source_role: internal_researcher
+    source_type: internal_note
+    source_version: v1
+    title: Expert methodology meeting note
 evidence_spans:
-  - content_sha256: 3dfdb337950433d1fbf1e94703b69eb16ab303afddcd0755e62223082af60f45
+  - content_sha256: 85143170f95aa09e361f22a8f35abd2edc16a7326104dfd6e0bbbc2f02466104
     end_offset: 64
     evidence_id: ev-literature-connectivity
     source_id: source-generic-paper
     source_version: v1
     start_offset: 0
     text: A pathway comparison requires connectivity-preserving endpoints.
-  - content_sha256: 3dfdb337950433d1fbf1e94703b69eb16ab303afddcd0755e62223082af60f45
-    end_offset: 125
+  - content_sha256: 0a0037d5612be7d254ecc0dd7ccc507f5a05afefe86645ba50c9c564ec093004
+    end_offset: 60
     evidence_id: ev-expert-guidance
-    source_id: source-generic-paper
+    source_id: source-expert-note
     source_version: v1
-    start_offset: 65
+    start_offset: 0
     text: Endpoint selection should preserve mechanistic connectivity.
-expert_opinions:
-  - conditions: [Atom identity and boundary conditions remain consistent.]
-    content_hash: e4161d5ee9c7edda943f23f03a3e3843375b074fccded56ac0f92ea510b9b737
-    domain: base
-    evidence_refs: [ev-expert-guidance]
-    expert_id: expert-methodology-001
-    opinion_id: expert-opinion-3188d7527af4e1c4e9e325d2
-    opinion_type: methodological_guidance
-    rationale: Disconnected endpoints cannot support a coherent pathway comparison.
-    related_claim_refs: [claim-connectivity-001]
-    related_workflow_refs: [workflow-connectivity-001]
-    scope: Scientific pathway planning
-    statement: Endpoint selection should preserve mechanistic connectivity.
-    supersedes: null
-    topic: endpoint selection
-expert_profiles:
-  - affiliations: [Generic Scientific Methods Group]
-    content_hash: 86b8e79282ef65f8d63b0939a99be8cb8c877c21e2b26227ba6210980bf9b2bb
-    display_name: Methodology Expert
-    expert_id: expert-methodology-001
-    expertise_domains: [base]
-    expertise_topics: [mechanistic connectivity, endpoint selection]
-    profile_source_refs: [profile-source-methodology-001]
 literature_documents:
   - authors: [A. Researcher, B. Curator]
     canonical_text_ref: texts/generic-paper.txt
@@ -104,6 +43,64 @@ literature_documents:
     topics: [mechanistic connectivity, workflow validation]
     url: https://example.org/literature/k1a
     year: 2026
+expert_profiles:
+  - affiliations: [Generic Scientific Methods Group]
+    content_hash: 86b8e79282ef65f8d63b0939a99be8cb8c877c21e2b26227ba6210980bf9b2bb
+    display_name: Methodology Expert
+    expert_id: expert-methodology-001
+    expertise_domains: [base]
+    expertise_topics: [mechanistic connectivity, endpoint selection]
+    profile_source_refs: [profile-source-methodology-001]
+expert_attributions:
+  - attribution_basis: Authenticated meeting note authored by the named expert.
+    attribution_id: expert-attribution-e64f6afd2839cc1530b00ade
+    content_hash: 28f906d0314740853b18cec0d9fabf0cbd9a3ea20e4d8073a0d585b20848892c
+    evidence_refs: [ev-expert-guidance]
+    expert_id: expert-methodology-001
+    medium: internal_note
+    source_id: source-expert-note
+    source_version: v1
+expert_opinions:
+  - attribution_refs: [expert-attribution-e64f6afd2839cc1530b00ade]
+    conditions: [Atom identity and boundary conditions remain consistent.]
+    content_hash: 8ae5d8c942c3e241c3923b73c7b96d5500883da19189535ce4b5e830c0543e6a
+    domain: base
+    evidence_refs: [ev-expert-guidance]
+    expert_id: expert-methodology-001
+    opinion_id: expert-opinion-1744bf37d296a3bb6f08f516
+    opinion_type: methodological_guidance
+    rationale: Disconnected endpoints cannot support a coherent pathway comparison.
+    related_claim_refs: [claim-connectivity-001]
+    related_workflow_refs: [workflow-connectivity-001]
+    scope: Scientific pathway planning
+    statement: Endpoint selection should preserve mechanistic connectivity.
+    topic: endpoint selection
+source_quotes:
+  - evidence_ref: ev-literature-connectivity
+    quote_id: quote-4143c2bd4ffb4ab654128393
+    relative_end_offset: 64
+    relative_start_offset: 0
+    source_id: source-generic-paper
+    source_role: literature_author
+    source_type: literature_article
+    source_version: v1
+    text: A pathway comparison requires connectivity-preserving endpoints.
+source_claims:
+  - claim_id: claim-connectivity-001
+    claim_strength: reported guidance
+    claim_type: methodological_claim
+    epistemic_status: source_reported
+    evidence_refs: [ev-literature-connectivity]
+    source_quote_refs: [quote-4143c2bd4ffb4ab654128393]
+    source_role: literature_author
+    text: A pathway comparison requires connectivity-preserving endpoints.
+workflow_patterns:
+  - domain: base
+    evidence_refs: [ev-literature-connectivity]
+    limitations: [Planning guidance only.]
+    pattern_id: workflow-connectivity-001
+    trigger: A scientific comparison requires consistent endpoints.
+    workflow_capabilities: [comparative_analysis]
 relations:
   - content_hash: ad845e20ba78844343465a2b832854f40abcf8c7c9d31e5c34c96ce589f3631d
     domain: base
@@ -115,15 +112,15 @@ relations:
     relation_id: knowledge-relation-16e174e9a6f57a4bbc5c0ca0
     subject_id: literature-7eae49b2b522af21a08b565c
     subject_type: literature_document
-  - content_hash: 4e264e5d582ccbac1b408f325325504d8a825f3120b74119750a0dfd258cdccf
+  - content_hash: 3c2283006b598ae1d94cf5eacde51a02b217f3933fc6acaf13538ad934129f75
     domain: base
     evidence_refs: [ev-expert-guidance]
     object_id: expert-methodology-001
     object_type: expert_profile
     predicate: derived_from
     rationale: The opinion is attributed to the persisted expert profile.
-    relation_id: knowledge-relation-4a25e4c51b19c6c0ed87efe9
-    subject_id: expert-opinion-3188d7527af4e1c4e9e325d2
+    relation_id: knowledge-relation-e57e4657f4fc49731f65822d
+    subject_id: expert-opinion-1744bf37d296a3bb6f08f516
     subject_type: expert_opinion
   - content_hash: 67a62241d653f4e2447c8282a45d8f362ba3a8602e9e6e2dbf0ec3ecb5300521
     domain: base
@@ -135,26 +132,54 @@ relations:
     relation_id: knowledge-relation-22a41465767cfced2a495be7
     subject_id: literature-7eae49b2b522af21a08b565c
     subject_type: literature_document
-source_claims:
-  - claim_id: claim-connectivity-001
-    claim_strength: reported guidance
-    claim_type: methodological_claim
-    epistemic_status: source_reported
-    evidence_refs: [ev-literature-connectivity]
-    source_quote_refs: [quote-connectivity-001]
-    source_role: author
-    text: A pathway comparison requires connectivity-preserving endpoints.
-source_artifacts:
-  - path: generic-source.txt
-    source_id: source-generic-paper
-    source_role: literature_author
-    source_type: literature_article
-    source_version: v1
-    title: Generic methodology source
-workflow_patterns:
-  - domain: base
-    evidence_refs: [ev-literature-connectivity]
-    limitations: [Planning guidance only.]
-    pattern_id: workflow-connectivity-001
-    trigger: A scientific comparison requires consistent endpoints.
-    workflow_capabilities: [comparative_analysis]
+curations:
+  - content_hash: f6362d34f3ee728d37e5e6a1d678d778eca4acb4fdcaaf2041757d1378c582d1
+    curation_id: knowledge-curation-d78bd14b120aae6aa9a1ad31
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 586f665937703bf5238be50c3d626c7ab19db370dc41e624c019bd55b4edc7cf
+    target_id: literature-7eae49b2b522af21a08b565c
+    target_type: literature_document
+  - content_hash: 0b6bd11d0241075e40456e797335047dbddea493b2c68d5851c76e927d7a6e1a
+    curation_id: knowledge-curation-137584dad43e4735ab6ae480
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 8ae5d8c942c3e241c3923b73c7b96d5500883da19189535ce4b5e830c0543e6a
+    target_id: expert-opinion-1744bf37d296a3bb6f08f516
+    target_type: expert_opinion
+  - content_hash: c9d6c98fc5a02282fcd81bc518082506c5eac4fd839b02435ba384b5b04e104b
+    curation_id: knowledge-curation-32fb4af74f54a9cee317cf64
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: ad845e20ba78844343465a2b832854f40abcf8c7c9d31e5c34c96ce589f3631d
+    target_id: knowledge-relation-16e174e9a6f57a4bbc5c0ca0
+    target_type: knowledge_relation
+  - content_hash: 713efbc5e57e78aad1377b0dd96f497780bb624f2904c3773e5621044dd8afd1
+    curation_id: knowledge-curation-32efe92ac2b0f3e8471f0436
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 3c2283006b598ae1d94cf5eacde51a02b217f3933fc6acaf13538ad934129f75
+    target_id: knowledge-relation-e57e4657f4fc49731f65822d
+    target_type: knowledge_relation
+  - content_hash: 672d777ee7237cc2b5ec23b225e9364ca21d68a9a3e4c149de0fa13240473832
+    curation_id: knowledge-curation-ee98bed51e68c6db38358e27
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    supersedes_curation_id: null
+    target_hash: 67a62241d653f4e2447c8282a45d8f362ba3a8602e9e6e2dbf0ec3ecb5300521
+    target_id: knowledge-relation-22a41465767cfced2a495be7
+    target_type: knowledge_relation

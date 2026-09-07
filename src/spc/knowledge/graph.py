@@ -14,7 +14,11 @@ from ..models import (
 )
 from ..repositories import KnowledgeRepositories, SourceEvidenceStore
 from ..serialization import canonical_json_bytes, content_hash
-from .trust import TrustedKnowledgeSelection, TrustedKnowledgeValidator
+from .trust import (
+    REPOSITORY_NODE_SPECS,
+    TrustedKnowledgeSelection,
+    TrustedKnowledgeValidator,
+)
 
 
 class KnowledgeGraphError(ValueError):
@@ -136,9 +140,11 @@ class KnowledgeGraphBuilder:
             ("expert_opinion", item.opinion_id)
             for item in trusted.expert_opinions
         )
-        for relation in trusted.relations:
-            allowed.add((relation.subject_type, relation.subject_id))
-            allowed.add((relation.object_type, relation.object_id))
+        allowed.update(
+            key for key in trusted.trusted_records if key[0] in {
+                record_type for record_type, _, _ in REPOSITORY_NODE_SPECS
+            }
+        )
         return allowed
 
     @staticmethod

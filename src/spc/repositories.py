@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .models import (
     DomainProfile,
     EvidenceSpan,
+    ExpertAttributionRecord,
     ExpertCase,
     ExpertOpinion,
     ExpertProfile,
@@ -355,6 +356,17 @@ class ExpertOpinionRepository(IdentityBoundRepository[ExpertOpinion]):
         )
 
 
+class ExpertAttributionRepository(
+    IdentityBoundRepository[ExpertAttributionRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "expert_attributions",
+            ExpertAttributionRecord,
+            "attribution_id",
+        )
+
+
 class KnowledgeRelationRepository(IdentityBoundRepository[KnowledgeRelation]):
     def __init__(self, knowledge_root: Path) -> None:
         super().__init__(
@@ -390,6 +402,7 @@ class KnowledgeRepositories:
         self.literature_documents = LiteratureDocumentRepository(root)
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
+        self.expert_attributions = ExpertAttributionRepository(root)
         self.relations = KnowledgeRelationRepository(root)
         self.curations = KnowledgeCurationRepository(root)
         self.source_quotes = IdentityBoundRepository(
@@ -433,6 +446,12 @@ class KnowledgeRepositories:
     def load_expert_opinions(self, records: Iterable[ExpertOpinion]) -> None:
         for record in records:
             self.expert_opinions.put(record.opinion_id, record)
+
+    def load_expert_attributions(
+        self, records: Iterable[ExpertAttributionRecord]
+    ) -> None:
+        for record in records:
+            self.expert_attributions.put(record.attribution_id, record)
 
     def load_relations(self, records: Iterable[KnowledgeRelation]) -> None:
         for record in records:
@@ -480,12 +499,22 @@ class KnowledgeRepositories:
                 item.opinion_id: item.content_hash
                 for item in trusted.expert_opinions
             },
+            "expert_attribution_hashes": {
+                item.attribution_id: item.content_hash
+                for item in trusted.expert_attributions
+            },
             "knowledge_relation_hashes": {
                 item.relation_id: item.content_hash
                 for item in trusted.relations
             },
             "curation_record_hashes": {
                 item.curation_id: item.content_hash for item in trusted.curations
+            },
+            "trusted_record_hashes": {
+                f"{record_type}:{record_id}": (
+                    getattr(record, "content_hash", None) or content_hash(record)
+                )
+                for (record_type, record_id), record in trusted.trusted_records.items()
             },
         }
         snapshot_identity = {
@@ -497,8 +526,10 @@ class KnowledgeRepositories:
                 "literature_document_hashes",
                 "expert_profile_hashes",
                 "expert_opinion_hashes",
+                "expert_attribution_hashes",
                 "knowledge_relation_hashes",
                 "curation_record_hashes",
+                "trusted_record_hashes",
             }
         }
         return KnowledgeSnapshot(
