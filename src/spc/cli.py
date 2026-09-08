@@ -59,6 +59,7 @@ from .models import (
     ExportManifest,
     FixResolution,
     GateVerdict,
+    FullTextCandidate,
     HistoricalLiteratureEvidenceAuthorization,
     HumanDecisionResolution,
     IndependentApprovalReceipt,
@@ -71,6 +72,9 @@ from .models import (
     KnowledgeGraphNode,
     KnowledgeRelation,
     KnowledgeSnapshot,
+    LiteratureAcquisitionOutcome,
+    LiteratureAcquisitionRecord,
+    LiteratureAcquisitionRequest,
     LiteratureDocument,
     LiteratureIngestionOutcome,
     LiteratureIngestionRecord,
@@ -92,6 +96,7 @@ from .models import (
     RetrievalManifest,
     RetrievalQuery,
     ReportedResult,
+    ResolvedLiteratureResource,
     ResultContext,
     ScientificCapability,
     ScientificContextPacket,
@@ -118,6 +123,7 @@ from .knowledge.ingestion import (
     LiteratureIngestionService,
     LiteratureRepresentationSelector,
 )
+from .knowledge.acquisition import LiteratureAcquisitionService
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
@@ -181,6 +187,25 @@ def ingest_literature(
     outcome = LiteratureIngestionService().ingest(
         paper,
         metadata_payload,
+        KnowledgeRepositories(knowledge_dir),
+        SourceEvidenceStore(state_dir),
+    )
+    typer.echo(outcome.model_dump_json(indent=2))
+
+
+@app.command("add-literature")
+def add_literature(
+    source: Annotated[str, typer.Argument()],
+    domain: Annotated[str, typer.Option("--domain")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Resolve a DOI, article URL, or local PDF without trusting its science."""
+    outcome = LiteratureAcquisitionService().add(
+        source,
+        domain,
         KnowledgeRepositories(knowledge_dir),
         SourceEvidenceStore(state_dir),
     )
@@ -730,6 +755,11 @@ def schema_command(
 ) -> None:
     """Export JSON Schemas for core contracts."""
     models = (
+        LiteratureAcquisitionRequest,
+        FullTextCandidate,
+        ResolvedLiteratureResource,
+        LiteratureAcquisitionRecord,
+        LiteratureAcquisitionOutcome,
         SourceDocument,
         EvidenceSpan,
         EvidenceReference,

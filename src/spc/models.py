@@ -97,6 +97,39 @@ class LiteratureIngestionStatus(StrEnum):
     FAILED = "failed"
 
 
+class AcquisitionInputKind(StrEnum):
+    DOI = "doi"
+    URL = "url"
+    LOCAL_FILE = "local_file"
+
+
+class AcquisitionStatus(StrEnum):
+    DISCOVERED = "discovered"
+    METADATA_RESOLVED = "metadata_resolved"
+    FULLTEXT_FOUND = "fulltext_found"
+    INGESTED = "ingested"
+    METADATA_ONLY = "metadata_only"
+    FULLTEXT_UNAVAILABLE = "fulltext_unavailable"
+    REQUIRES_AUTHENTICATION = "requires_authentication"
+    UNSUPPORTED_MEDIA = "unsupported_media"
+    FAILED = "failed"
+
+
+class FullTextAccessStatus(StrEnum):
+    DISCOVERED = "discovered"
+    ACCESSIBLE = "accessible"
+    REQUIRES_AUTHENTICATION = "requires_authentication"
+    UNAVAILABLE = "unavailable"
+
+
+class FullTextSourceKind(StrEnum):
+    LOCAL_FILE = "local_file"
+    DIRECT_PDF = "direct_pdf"
+    HTML_ARTICLE = "html_article"
+    LANDING_PAGE_PDF = "landing_page_pdf"
+    METADATA_LINK = "metadata_link"
+
+
 class KnowledgeViewMode(StrEnum):
     TRUSTED = "trusted"
     AUDIT = "audit"
@@ -723,6 +756,173 @@ def literature_identity_id(
             "year": year,
         }
     return f"literature-{content_hash(stable_identity)[:24]}"
+
+
+class LiteratureAcquisitionRequest(StrictModel):
+    request_id: NonBlankStr
+    original_input: NonBlankStr
+    input_kind: AcquisitionInputKind
+    requested_domain: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureAcquisitionRequest:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"request_id", "content_hash"}
+        )
+        expected_id = f"literature-acquisition-request-{content_hash(identity)[:24]}"
+        if self.request_id != expected_id:
+            raise ValueError("LiteratureAcquisitionRequest request_id is not content-bound")
+        payload = {"request_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("LiteratureAcquisitionRequest content_hash is invalid")
+        return self
+
+
+class FullTextCandidate(StrictModel):
+    candidate_id: NonBlankStr
+    url: NonBlankStr | None = None
+    local_path_ref: NonBlankStr | None = None
+    media_type: NonBlankStr
+    access_status: FullTextAccessStatus
+    source_kind: FullTextSourceKind
+    priority: int = Field(ge=0)
+    content_sha256: Sha256Str | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> FullTextCandidate:
+        from .serialization import content_hash
+
+        if (self.url is None) == (self.local_path_ref is None):
+            raise ValueError("FullTextCandidate requires exactly one URL or local path")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"candidate_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"fulltext-candidate-{content_hash(identity)[:24]}"
+        if self.candidate_id != expected_id:
+            raise ValueError("FullTextCandidate candidate_id is not content-bound")
+        payload = {"candidate_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("FullTextCandidate content_hash is invalid")
+        return self
+
+
+class ResolvedLiteratureResource(StrictModel):
+    resource_id: NonBlankStr
+    canonical_identifier: NonBlankStr
+    doi: NonBlankStr | None = None
+    title: NonBlankStr | None = None
+    authors: tuple[NonBlankStr, ...] = ()
+    year: int | None = Field(default=None, ge=1000, le=9999)
+    journal: NonBlankStr | None = None
+    landing_url: NonBlankStr | None = None
+    metadata_source: NonBlankStr
+    fulltext_candidates: tuple[FullTextCandidate, ...] = ()
+    resolution_status: AcquisitionStatus
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ResolvedLiteratureResource:
+        from .serialization import content_hash
+
+        candidate_ids = [item.candidate_id for item in self.fulltext_candidates]
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("ResolvedLiteratureResource candidate IDs must be unique")
+        if tuple(candidate_ids) != tuple(
+            item.candidate_id
+            for item in sorted(
+                self.fulltext_candidates,
+                key=lambda item: (item.priority, item.candidate_id),
+            )
+        ):
+            raise ValueError("full-text candidates must be deterministically ordered")
+        identity = self.model_dump(
+            mode="json", exclude={"resource_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"resolved-literature-{content_hash(identity)[:24]}"
+        if self.resource_id != expected_id:
+            raise ValueError("ResolvedLiteratureResource resource_id is not content-bound")
+        payload = {"resource_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ResolvedLiteratureResource content_hash is invalid")
+        return self
+
+
+class LiteratureAcquisitionRecord(StrictModel):
+    acquisition_id: NonBlankStr
+    request_id: NonBlankStr
+    request_hash: Sha256Str
+    resolver_id: NonBlankStr
+    resolver_version: NonBlankStr
+    resolved_resource_id: NonBlankStr
+    resolved_resource_hash: Sha256Str
+    selected_candidate_id: NonBlankStr | None = None
+    selected_candidate_hash: Sha256Str | None = None
+    resulting_literature_id: NonBlankStr | None = None
+    resulting_ingestion_id: NonBlankStr | None = None
+    resulting_canonical_text_id: NonBlankStr | None = None
+    status: AcquisitionStatus
+    warnings: tuple[NonBlankStr, ...] = ()
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureAcquisitionRecord:
+        from .serialization import content_hash
+
+        if len(set(self.warnings)) != len(self.warnings):
+            raise ValueError("LiteratureAcquisitionRecord warnings must be unique")
+        candidate_binding = (
+            self.selected_candidate_id,
+            self.selected_candidate_hash,
+        )
+        if any(value is None for value in candidate_binding) and any(
+            value is not None for value in candidate_binding
+        ):
+            raise ValueError("selected full-text candidate binding must be complete")
+        required_result_binding = (
+            self.resulting_literature_id,
+            self.resulting_ingestion_id,
+        )
+        result_binding = (*required_result_binding, self.resulting_canonical_text_id)
+        if self.status == AcquisitionStatus.INGESTED and any(
+            value is None for value in required_result_binding
+        ):
+            raise ValueError("ingested acquisition requires literature and ingestion bindings")
+        if self.status != AcquisitionStatus.INGESTED and any(
+            value is not None for value in result_binding
+        ):
+            raise ValueError("non-ingested acquisition cannot bind K1B results")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"acquisition_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"literature-acquisition-{content_hash(identity)[:24]}"
+        if self.acquisition_id != expected_id:
+            raise ValueError("LiteratureAcquisitionRecord acquisition_id is not content-bound")
+        payload = {"acquisition_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("LiteratureAcquisitionRecord content_hash is invalid")
+        return self
+
+
+class LiteratureAcquisitionOutcome(StrictModel):
+    input_kind: AcquisitionInputKind
+    canonical_identifier: NonBlankStr
+    doi: NonBlankStr | None = None
+    title: NonBlankStr | None = None
+    acquisition_status: AcquisitionStatus
+    fulltext_status: AcquisitionStatus
+    literature_id: NonBlankStr | None = None
+    ingestion_id: NonBlankStr | None = None
+    canonical_text_id: NonBlankStr | None = None
+    acquisition_id: NonBlankStr
+    warnings: tuple[NonBlankStr, ...] = ()
 
 
 class RawLiteratureArtifact(StrictModel):

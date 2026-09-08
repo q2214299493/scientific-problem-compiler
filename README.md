@@ -199,3 +199,28 @@ default, while historical evidence requires both explicit historical mode and
 a record authorizing the exact evidence IDs before trusted scientific use.
 Ingestion records retain page-level text coverage, and expected parser failures
 persist a non-sensitive `failed` audit record after the raw PDF has been stored.
+
+## Knowledge Layer K1C
+
+K1C adds one acquisition gateway for DOI strings, HTTP(S) article resources,
+and existing local PDFs. Immutable request, resolved-resource, full-text
+candidate, and acquisition records preserve the resolver identity and the
+complete handoff into K1B. DOI metadata resolution and article-page discovery
+never fabricate unavailable full text. Local and downloaded PDFs use the same
+K1B artifact, canonical-text, ingestion, and representation-promotion rules;
+acquisition never curates or selects the new representation.
+
+```powershell
+spc add-literature 10.1234/example `
+  --domain base `
+  --knowledge-dir knowledge `
+  --state-dir .spc
+```
+
+The replaceable network boundary accepts only HTTP(S), resolves and checks every
+redirect target, rejects local/private/link-local destinations, enforces time
+and size limits, and validates response media types. Remote PDFs are signature-
+and hash-checked in a controlled staging directory before K1B ingestion. HTML
+articles are canonicalized as deterministic UTF-8 blocks while retaining their
+source URL and raw-artifact hash; they are not misrepresented as PDF ingestion.
+CI uses injected offline transports and never requires live network access.

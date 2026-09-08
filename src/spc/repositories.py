@@ -23,6 +23,8 @@ from .models import (
     KnowledgeSnapshot,
     KnowledgeCurationRecord,
     KnowledgeRelation,
+    LiteratureAcquisitionRecord,
+    LiteratureAcquisitionRequest,
     LiteratureDocument,
     LiteratureIngestionRecord,
     LiteratureRepresentationSelection,
@@ -31,6 +33,7 @@ from .models import (
     ModelFact,
     RawLiteratureArtifact,
     ReportedResult,
+    ResolvedLiteratureResource,
     ScientificCapability,
     SourceClaim,
     SourceDocument,
@@ -741,6 +744,39 @@ class HistoricalLiteratureEvidenceAuthorizationRepository(
         )
 
 
+class LiteratureAcquisitionRequestRepository(
+    IdentityBoundRepository[LiteratureAcquisitionRequest]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "literature_acquisition_requests",
+            LiteratureAcquisitionRequest,
+            "request_id",
+        )
+
+
+class ResolvedLiteratureResourceRepository(
+    IdentityBoundRepository[ResolvedLiteratureResource]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "resolved_literature_resources",
+            ResolvedLiteratureResource,
+            "resource_id",
+        )
+
+
+class LiteratureAcquisitionRepository(
+    IdentityBoundRepository[LiteratureAcquisitionRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "literature_acquisitions",
+            LiteratureAcquisitionRecord,
+            "acquisition_id",
+        )
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -758,6 +794,11 @@ class KnowledgeRepositories:
         self.historical_evidence_authorizations = (
             HistoricalLiteratureEvidenceAuthorizationRepository(root)
         )
+        self.acquisition_requests = LiteratureAcquisitionRequestRepository(root)
+        self.resolved_literature_resources = (
+            ResolvedLiteratureResourceRepository(root)
+        )
+        self.literature_acquisitions = LiteratureAcquisitionRepository(root)
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.expert_attributions = ExpertAttributionRepository(root)
@@ -818,6 +859,24 @@ class KnowledgeRepositories:
             self.historical_evidence_authorizations.put(
                 record.authorization_id, record
             )
+
+    def load_acquisition_requests(
+        self, records: Iterable[LiteratureAcquisitionRequest]
+    ) -> None:
+        for record in records:
+            self.acquisition_requests.put(record.request_id, record)
+
+    def load_resolved_literature_resources(
+        self, records: Iterable[ResolvedLiteratureResource]
+    ) -> None:
+        for record in records:
+            self.resolved_literature_resources.put(record.resource_id, record)
+
+    def load_literature_acquisitions(
+        self, records: Iterable[LiteratureAcquisitionRecord]
+    ) -> None:
+        for record in records:
+            self.literature_acquisitions.put(record.acquisition_id, record)
 
     def load_expert_profiles(self, records: Iterable[ExpertProfile]) -> None:
         for record in records:
