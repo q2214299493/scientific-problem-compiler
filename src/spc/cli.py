@@ -27,6 +27,7 @@ from .interpretation import (
     ScientificEvidencePacketBuilder,
 )
 from .models import (
+    AcquisitionAttemptRecord,
     AmbiguityAssessment,
     AgentCapabilityCatalog,
     AgentHandoffPackage,
@@ -41,6 +42,7 @@ from .models import (
     ApprovalVerdict,
     CanonicalTextArtifact,
     CanonicalTextBlock,
+    CanonicalHTMLTextArtifact,
     CandidatePlanDraft,
     CandidateTaskDraft,
     ComparisonBaselineDraft,
@@ -61,6 +63,7 @@ from .models import (
     GateVerdict,
     FullTextCandidate,
     HistoricalLiteratureEvidenceAuthorization,
+    HTMLLiteratureIngestionRecord,
     HumanDecisionResolution,
     IndependentApprovalReceipt,
     IntentFingerprint,
@@ -80,6 +83,9 @@ from .models import (
     LiteratureIngestionRecord,
     LiteratureRepresentationSelection,
     LiteratureRepresentationSelectionOutcome,
+    LiteratureRepresentationReference,
+    MetadataMergeManifest,
+    MetadataRetrievalRecord,
     MethodFingerprint,
     MethodFact,
     ModelFact,
@@ -91,6 +97,7 @@ from .models import (
     ProposedDeviationDraft,
     ProjectTrustPolicy,
     RawLiteratureArtifact,
+    RawHTMLLiteratureArtifact,
     RequiredFix,
     RetrievalHit,
     RetrievalManifest,
@@ -201,13 +208,21 @@ def add_literature(
         "knowledge"
     ),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    metadata: Annotated[
+        Path | None,
+        typer.Option("--metadata", exists=True, dir_okay=False, readable=True),
+    ] = None,
 ) -> None:
     """Resolve a DOI, article URL, or local PDF without trusting its science."""
+    metadata_payload = load_data(metadata) if metadata is not None else None
+    if metadata_payload is not None and not isinstance(metadata_payload, dict):
+        raise typer.BadParameter("--metadata must contain a mapping")
     outcome = LiteratureAcquisitionService().add(
         source,
         domain,
         KnowledgeRepositories(knowledge_dir),
         SourceEvidenceStore(state_dir),
+        explicit_metadata=metadata_payload,
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -755,11 +770,18 @@ def schema_command(
 ) -> None:
     """Export JSON Schemas for core contracts."""
     models = (
+        AcquisitionAttemptRecord,
         LiteratureAcquisitionRequest,
         FullTextCandidate,
         ResolvedLiteratureResource,
         LiteratureAcquisitionRecord,
         LiteratureAcquisitionOutcome,
+        MetadataRetrievalRecord,
+        MetadataMergeManifest,
+        RawHTMLLiteratureArtifact,
+        CanonicalHTMLTextArtifact,
+        HTMLLiteratureIngestionRecord,
+        LiteratureRepresentationReference,
         SourceDocument,
         EvidenceSpan,
         EvidenceReference,

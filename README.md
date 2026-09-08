@@ -224,3 +224,19 @@ and hash-checked in a controlled staging directory before K1B ingestion. HTML
 articles are canonicalized as deterministic UTF-8 blocks while retaining their
 source URL and raw-artifact hash; they are not misrepresented as PDF ingestion.
 CI uses injected offline transports and never requires live network access.
+
+K1C.1 persists HTML full text as immutable raw bytes plus canonical UTF-8 text,
+exact recoverable blocks, a `SourceDocument`, and a common PDF/HTML literature
+representation reference. Each candidate attempt is recorded in deterministic
+priority order, so an inaccessible or invalid first candidate can fall through
+to the next usable PDF or HTML source. DOI acquisition retains the exact
+Crossref response hash and payload and, when Crossref supplies no full-text
+link, safely inspects the landing page for additional candidates. Metadata is
+merged with explicit input taking precedence over resolved and embedded PDF
+metadata while conflicts remain visible in an immutable merge manifest.
+
+The network transport pins every request to the exact public IP set validated
+before connection, while preserving the original Host header and TLS SNI, and
+repeats DNS validation after every redirect. Acquisition still creates no
+curation decision or scientific claim, fact, result, relation, or expert
+opinion.

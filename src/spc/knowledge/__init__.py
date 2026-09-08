@@ -9,11 +9,13 @@ from .acquisition import (
     HTTPResponse,
     LiteratureAcquisitionService,
     LocalPDFResolver,
+    PinnedHTTPTransport,
     ResourceResolver,
     SafeHTTPError,
     SafeHTTPFetcher,
     detect_acquisition_input,
     normalize_doi,
+    validate_literature_representation,
 )
 from .graph import KnowledgeGraphBuilder, KnowledgeGraphError
 from .ingestion import (
@@ -48,6 +50,7 @@ __all__ = [
     "PypdfLiteratureTextExtractor",
     "LiteratureRepresentationSelector",
     "LocalPDFResolver",
+    "PinnedHTTPTransport",
     "ResourceResolver",
     "SafeHTTPError",
     "SafeHTTPFetcher",
@@ -56,4 +59,5 @@ __all__ = [
     "detect_acquisition_input",
     "knowledge_graph_to_mermaid",
     "normalize_doi",
+    "validate_literature_representation",
 ]

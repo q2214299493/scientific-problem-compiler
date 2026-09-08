@@ -130,6 +130,18 @@ class FullTextSourceKind(StrEnum):
     METADATA_LINK = "metadata_link"
 
 
+class LiteratureRepresentationKind(StrEnum):
+    PDF = "pdf"
+    HTML = "html"
+
+
+class MetadataValueOrigin(StrEnum):
+    EXPLICIT = "explicit"
+    RESOLVED = "resolved"
+    EMBEDDED = "embedded"
+    UNRESOLVED = "unresolved"
+
+
 class KnowledgeViewMode(StrEnum):
     TRUSTED = "trusted"
     AUDIT = "audit"
@@ -788,6 +800,8 @@ class FullTextCandidate(StrictModel):
     media_type: NonBlankStr
     access_status: FullTextAccessStatus
     source_kind: FullTextSourceKind
+    discovered_by: NonBlankStr = "unspecified"
+    discovery_source_url: NonBlankStr | None = None
     priority: int = Field(ge=0)
     content_sha256: Sha256Str | None = None
     content_hash: Sha256Str
@@ -822,6 +836,8 @@ class ResolvedLiteratureResource(StrictModel):
     journal: NonBlankStr | None = None
     landing_url: NonBlankStr | None = None
     metadata_source: NonBlankStr
+    metadata_retrieval_refs: tuple[NonBlankStr, ...] = ()
+    metadata_retrieval_hashes: tuple[Sha256Str, ...] = ()
     fulltext_candidates: tuple[FullTextCandidate, ...] = ()
     resolution_status: AcquisitionStatus
     content_hash: Sha256Str
@@ -833,6 +849,14 @@ class ResolvedLiteratureResource(StrictModel):
         candidate_ids = [item.candidate_id for item in self.fulltext_candidates]
         if len(set(candidate_ids)) != len(candidate_ids):
             raise ValueError("ResolvedLiteratureResource candidate IDs must be unique")
+        if len(set(self.metadata_retrieval_refs)) != len(
+            self.metadata_retrieval_refs
+        ):
+            raise ValueError("metadata retrieval refs must be unique")
+        if len(self.metadata_retrieval_refs) != len(
+            self.metadata_retrieval_hashes
+        ):
+            raise ValueError("metadata retrieval ID/hash bindings must align")
         if tuple(candidate_ids) != tuple(
             item.candidate_id
             for item in sorted(
@@ -863,9 +887,15 @@ class LiteratureAcquisitionRecord(StrictModel):
     resolved_resource_hash: Sha256Str
     selected_candidate_id: NonBlankStr | None = None
     selected_candidate_hash: Sha256Str | None = None
+    metadata_merge_manifest_id: NonBlankStr | None = None
+    metadata_merge_manifest_hash: Sha256Str | None = None
+    attempt_refs: tuple[NonBlankStr, ...] = ()
+    attempt_hashes: tuple[Sha256Str, ...] = ()
     resulting_literature_id: NonBlankStr | None = None
     resulting_ingestion_id: NonBlankStr | None = None
     resulting_canonical_text_id: NonBlankStr | None = None
+    resulting_representation_id: NonBlankStr | None = None
+    resulting_representation_hash: Sha256Str | None = None
     status: AcquisitionStatus
     warnings: tuple[NonBlankStr, ...] = ()
     content_hash: Sha256Str
@@ -876,6 +906,10 @@ class LiteratureAcquisitionRecord(StrictModel):
 
         if len(set(self.warnings)) != len(self.warnings):
             raise ValueError("LiteratureAcquisitionRecord warnings must be unique")
+        if len(set(self.attempt_refs)) != len(self.attempt_refs):
+            raise ValueError("LiteratureAcquisitionRecord attempt_refs must be unique")
+        if len(self.attempt_refs) != len(self.attempt_hashes):
+            raise ValueError("acquisition attempt ID/hash bindings must align")
         candidate_binding = (
             self.selected_candidate_id,
             self.selected_candidate_hash,
@@ -884,6 +918,26 @@ class LiteratureAcquisitionRecord(StrictModel):
             value is not None for value in candidate_binding
         ):
             raise ValueError("selected full-text candidate binding must be complete")
+        for name, binding in (
+            (
+                "metadata merge manifest",
+                (
+                    self.metadata_merge_manifest_id,
+                    self.metadata_merge_manifest_hash,
+                ),
+            ),
+            (
+                "literature representation",
+                (
+                    self.resulting_representation_id,
+                    self.resulting_representation_hash,
+                ),
+            ),
+        ):
+            if any(value is None for value in binding) and any(
+                value is not None for value in binding
+            ):
+                raise ValueError(f"{name} binding must be complete")
         required_result_binding = (
             self.resulting_literature_id,
             self.resulting_ingestion_id,
@@ -921,8 +975,172 @@ class LiteratureAcquisitionOutcome(StrictModel):
     literature_id: NonBlankStr | None = None
     ingestion_id: NonBlankStr | None = None
     canonical_text_id: NonBlankStr | None = None
+    representation_id: NonBlankStr | None = None
     acquisition_id: NonBlankStr
+    attempt_ids: tuple[NonBlankStr, ...] = ()
     warnings: tuple[NonBlankStr, ...] = ()
+
+
+class MetadataRetrievalRecord(StrictModel):
+    retrieval_id: NonBlankStr
+    source_url: NonBlankStr
+    response_sha256: Sha256Str
+    response_byte_size: int = Field(gt=0)
+    media_type: NonBlankStr
+    resolver_id: NonBlankStr
+    resolver_version: NonBlankStr
+    response_payload_utf8: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> MetadataRetrievalRecord:
+        import hashlib
+
+        from .serialization import content_hash
+
+        if self.response_payload_utf8 is not None:
+            encoded = self.response_payload_utf8.encode("utf-8")
+            if (
+                len(encoded) != self.response_byte_size
+                or hashlib.sha256(encoded).hexdigest() != self.response_sha256
+            ):
+                raise ValueError("metadata response payload does not match its hash")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"retrieval_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"metadata-retrieval-{content_hash(identity)[:24]}"
+        if self.retrieval_id != expected_id:
+            raise ValueError("MetadataRetrievalRecord retrieval_id is not content-bound")
+        payload = {"retrieval_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("MetadataRetrievalRecord content_hash is invalid")
+        return self
+
+
+class MetadataAlternative(StrictModel):
+    origin: MetadataValueOrigin
+    value: NonBlankStr | int | tuple[NonBlankStr, ...]
+
+
+class MetadataFieldDecision(StrictModel):
+    field_name: NonBlankStr
+    selected_origin: MetadataValueOrigin
+    selected_value: NonBlankStr | int | tuple[NonBlankStr, ...] | None = None
+    alternatives: tuple[MetadataAlternative, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> MetadataFieldDecision:
+        if self.selected_origin == MetadataValueOrigin.UNRESOLVED:
+            if self.selected_value is not None:
+                raise ValueError("unresolved metadata cannot have a selected value")
+        elif self.selected_value is None:
+            raise ValueError("resolved metadata requires a selected value")
+        origins = [item.origin for item in self.alternatives]
+        if len(set(origins)) != len(origins):
+            raise ValueError("metadata alternatives must have unique origins")
+        return self
+
+
+class MetadataMergeManifest(StrictModel):
+    manifest_id: NonBlankStr
+    decisions: tuple[MetadataFieldDecision, ...]
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> MetadataMergeManifest:
+        from .serialization import content_hash
+
+        fields = [item.field_name for item in self.decisions]
+        if len(set(fields)) != len(fields) or fields != sorted(fields):
+            raise ValueError("metadata decisions must be unique and sorted")
+        identity = self.model_dump(
+            mode="json", exclude={"manifest_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"metadata-merge-{content_hash(identity)[:24]}"
+        if self.manifest_id != expected_id:
+            raise ValueError("MetadataMergeManifest manifest_id is not content-bound")
+        payload = {"manifest_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("MetadataMergeManifest content_hash is invalid")
+        return self
+
+
+class AcquisitionAttemptRecord(StrictModel):
+    attempt_id: NonBlankStr
+    request_id: NonBlankStr
+    request_hash: Sha256Str
+    candidate_id: NonBlankStr
+    candidate_hash: Sha256Str
+    attempt_index: int = Field(ge=0)
+    status: AcquisitionStatus
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    media_type: NonBlankStr
+    failure_code: NonBlankStr | None = None
+    raw_artifact_id: NonBlankStr | None = None
+    raw_artifact_hash: Sha256Str | None = None
+    canonical_text_id: NonBlankStr | None = None
+    canonical_text_hash: Sha256Str | None = None
+    ingestion_id: NonBlankStr | None = None
+    ingestion_hash: Sha256Str | None = None
+    representation_id: NonBlankStr | None = None
+    representation_hash: Sha256Str | None = None
+    metadata_merge_manifest_id: NonBlankStr | None = None
+    metadata_merge_manifest_hash: Sha256Str | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> AcquisitionAttemptRecord:
+        from .serialization import content_hash
+
+        for name, binding in (
+            ("raw artifact", (self.raw_artifact_id, self.raw_artifact_hash)),
+            (
+                "canonical text",
+                (self.canonical_text_id, self.canonical_text_hash),
+            ),
+            ("ingestion", (self.ingestion_id, self.ingestion_hash)),
+            (
+                "representation",
+                (self.representation_id, self.representation_hash),
+            ),
+            (
+                "metadata merge manifest",
+                (
+                    self.metadata_merge_manifest_id,
+                    self.metadata_merge_manifest_hash,
+                ),
+            ),
+        ):
+            if any(value is None for value in binding) and any(
+                value is not None for value in binding
+            ):
+                raise ValueError(f"attempt {name} binding must be complete")
+        if self.status == AcquisitionStatus.INGESTED:
+            if any(
+                value is None
+                for value in (
+                    self.raw_artifact_id,
+                    self.ingestion_id,
+                    self.representation_id,
+                )
+            ):
+                raise ValueError("successful attempt requires artifact and representation")
+            if self.failure_code is not None:
+                raise ValueError("successful attempt cannot have a failure code")
+        elif self.failure_code is None:
+            raise ValueError("unsuccessful attempt requires a failure code")
+        identity = self.model_dump(
+            mode="json", exclude={"attempt_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"acquisition-attempt-{content_hash(identity)[:24]}"
+        if self.attempt_id != expected_id:
+            raise ValueError("AcquisitionAttemptRecord attempt_id is not content-bound")
+        payload = {"attempt_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("AcquisitionAttemptRecord content_hash is invalid")
+        return self
 
 
 class RawLiteratureArtifact(StrictModel):
@@ -1035,6 +1253,162 @@ class CanonicalTextArtifact(StrictModel):
         payload = self.model_dump(mode="json", exclude={"content_hash"})
         if self.content_hash != content_hash(payload):
             raise ValueError("CanonicalTextArtifact content_hash is invalid")
+        return self
+
+
+class RawHTMLLiteratureArtifact(StrictModel):
+    artifact_id: NonBlankStr
+    source_url: NonBlankStr
+    literature_id: NonBlankStr
+    media_type: NonBlankStr
+    byte_size: int = Field(gt=0)
+    sha256: Sha256Str
+    stored_path: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> RawHTMLLiteratureArtifact:
+        from .serialization import content_hash
+
+        if self.media_type not in {"text/html", "application/xhtml+xml"}:
+            raise ValueError("RawHTMLLiteratureArtifact requires an HTML media type")
+        identity = {
+            "source_url": self.source_url,
+            "literature_id": self.literature_id,
+            "sha256": self.sha256,
+        }
+        expected_id = f"html-artifact-{content_hash(identity)[:24]}"
+        if self.artifact_id != expected_id:
+            raise ValueError("RawHTMLLiteratureArtifact artifact_id is not content-bound")
+        expected_path = f"html_literature_artifacts/{expected_id}/artifact.html"
+        if self.stored_path != expected_path:
+            raise ValueError("RawHTMLLiteratureArtifact stored_path is not canonical")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("RawHTMLLiteratureArtifact content_hash is invalid")
+        return self
+
+
+class CanonicalHTMLTextArtifact(StrictModel):
+    canonical_text_id: NonBlankStr
+    literature_id: NonBlankStr
+    raw_artifact_id: NonBlankStr
+    raw_artifact_hash: Sha256Str
+    source_url: NonBlankStr
+    extractor_id: NonBlankStr
+    extractor_version: NonBlankStr
+    extractor_config_hash: Sha256Str
+    text_sha256: Sha256Str
+    stored_path: NonBlankStr
+    character_count: int = Field(gt=0)
+    blocks: tuple[CanonicalTextBlock, ...] = Field(min_length=1)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> CanonicalHTMLTextArtifact:
+        from .serialization import content_hash
+
+        block_ids = [block.block_id for block in self.blocks]
+        if len(set(block_ids)) != len(block_ids):
+            raise ValueError("CanonicalHTMLTextArtifact block IDs must be unique")
+        ordering = [
+            (block.start_offset, block.end_offset) for block in self.blocks
+        ]
+        if ordering != sorted(ordering):
+            raise ValueError("HTML canonical blocks must be ordered")
+        if any(
+            right.start_offset < left.end_offset
+            for left, right in zip(self.blocks, self.blocks[1:])
+        ):
+            raise ValueError("HTML canonical blocks must not overlap")
+        if any(block.end_offset > self.character_count for block in self.blocks):
+            raise ValueError("HTML canonical block bounds are invalid")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"canonical_text_id", "stored_path", "content_hash"},
+        )
+        expected_id = f"canonical-html-text-{content_hash(identity)[:24]}"
+        if self.canonical_text_id != expected_id:
+            raise ValueError("CanonicalHTMLTextArtifact ID is not content-bound")
+        expected_path = f"canonical_html_text/{expected_id}/content.txt"
+        if self.stored_path != expected_path:
+            raise ValueError("CanonicalHTMLTextArtifact stored_path is not canonical")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("CanonicalHTMLTextArtifact content_hash is invalid")
+        return self
+
+
+class HTMLLiteratureIngestionRecord(StrictModel):
+    ingestion_id: NonBlankStr
+    literature_id: NonBlankStr
+    raw_artifact_id: NonBlankStr
+    raw_artifact_hash: Sha256Str
+    canonical_text_id: NonBlankStr
+    canonical_text_hash: Sha256Str
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    extractor_id: NonBlankStr
+    extractor_version: NonBlankStr
+    extractor_config_hash: Sha256Str
+    ingestion_status: LiteratureIngestionStatus = LiteratureIngestionStatus.ACCEPTED
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> HTMLLiteratureIngestionRecord:
+        from .serialization import content_hash
+
+        if self.ingestion_status != LiteratureIngestionStatus.ACCEPTED:
+            raise ValueError("HTML ingestion records represent successful extraction only")
+        identity = self.model_dump(
+            mode="json", exclude={"ingestion_id", "content_hash"}
+        )
+        expected_id = f"html-literature-ingestion-{content_hash(identity)[:24]}"
+        if self.ingestion_id != expected_id:
+            raise ValueError("HTMLLiteratureIngestionRecord ID is not content-bound")
+        payload = {"ingestion_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("HTMLLiteratureIngestionRecord content_hash is invalid")
+        return self
+
+
+class LiteratureRepresentationReference(StrictModel):
+    representation_id: NonBlankStr
+    representation_kind: LiteratureRepresentationKind
+    literature_id: NonBlankStr
+    raw_artifact_id: NonBlankStr
+    raw_artifact_hash: Sha256Str
+    canonical_text_id: NonBlankStr | None = None
+    canonical_text_hash: Sha256Str | None = None
+    ingestion_id: NonBlankStr
+    ingestion_hash: Sha256Str
+    source_id: NonBlankStr | None = None
+    source_version: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureRepresentationReference:
+        from .serialization import content_hash
+
+        canonical_binding = (self.canonical_text_id, self.canonical_text_hash)
+        source_binding = (self.source_id, self.source_version)
+        for name, binding in (
+            ("canonical text", canonical_binding),
+            ("source", source_binding),
+        ):
+            if any(value is None for value in binding) and any(
+                value is not None for value in binding
+            ):
+                raise ValueError(f"representation {name} binding must be complete")
+        identity = self.model_dump(
+            mode="json", exclude={"representation_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"literature-representation-{content_hash(identity)[:24]}"
+        if self.representation_id != expected_id:
+            raise ValueError("LiteratureRepresentationReference ID is not content-bound")
+        payload = {"representation_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("LiteratureRepresentationReference content_hash is invalid")
         return self
 
 

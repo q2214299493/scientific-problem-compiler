@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from html.parser import HTMLParser
+import http.client
 from io import BytesIO
 import ipaddress
 import json
@@ -10,31 +11,49 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import ssl
 import tempfile
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
-from urllib.error import HTTPError
 from urllib.parse import quote, urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 from ..models import (
+    AcquisitionAttemptRecord,
     AcquisitionInputKind,
     AcquisitionStatus,
+    CanonicalHTMLTextArtifact,
     CanonicalTextBlock,
     FullTextAccessStatus,
     FullTextCandidate,
     FullTextSourceKind,
+    HTMLLiteratureIngestionRecord,
     LiteratureAcquisitionOutcome,
     LiteratureAcquisitionRecord,
     LiteratureAcquisitionRequest,
+    LiteratureDocument,
+    LiteratureIngestionStatus,
+    LiteratureRepresentationKind,
+    LiteratureRepresentationReference,
+    MetadataAlternative,
+    MetadataFieldDecision,
+    MetadataMergeManifest,
+    MetadataRetrievalRecord,
+    MetadataValueOrigin,
+    RawHTMLLiteratureArtifact,
     ResolvedLiteratureResource,
+    SourceDocument,
+    literature_identity_id,
 )
 from ..repositories import KnowledgeRepositories, SourceEvidenceStore
 from ..serialization import content_hash
-from .ingestion import LiteratureIngestionService, LiteratureMetadata
+from .ingestion import (
+    LiteratureIngestionService,
+    LiteratureMetadata,
+    validate_literature_ingestion_chain,
+)
 
 
 DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
@@ -59,41 +78,125 @@ class HTTPResponse:
     status: int
     headers: Mapping[str, str]
     body: bytes
+    connected_ip: str
 
 
 class HTTPTransport(Protocol):
-    def request(self, url: str, *, timeout: float, max_bytes: int) -> HTTPResponse:
+    def request(
+        self,
+        url: str,
+        *,
+        validated_ips: tuple[str, ...],
+        timeout: float,
+        max_bytes: int,
+    ) -> HTTPResponse:
+        """Connect only to one of validated_ips; never resolve or follow redirects."""
         ...
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, hostname: str, port: int, pinned_ip: str, timeout: float) -> None:
+        super().__init__(hostname, port, timeout=timeout)
+        self.pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self.pinned_ip, self.port), self.timeout, self.source_address
+        )
 
 
-class UrllibHTTPTransport:
-    def request(self, url: str, *, timeout: float, max_bytes: int) -> HTTPResponse:
-        request = Request(url, headers={"User-Agent": "SPC-Literature-Acquisition/1.0"})
-        opener = build_opener(_NoRedirect)
+class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        pinned_ip: str,
+        timeout: float,
+        context: ssl.SSLContext,
+    ) -> None:
+        super().__init__(hostname, port, pinned_ip, timeout)
+        self.context = context
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is None:
+            raise OSError("pinned HTTPS socket was not created")
+        self.sock = self.context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class PinnedHTTPTransport:
+    """HTTP transport that connects to a prevalidated IP and preserves Host/TLS SNI."""
+
+    def __init__(self, *, ssl_context: ssl.SSLContext | None = None) -> None:
+        self.ssl_context = ssl_context or ssl.create_default_context()
+
+    def request(
+        self,
+        url: str,
+        *,
+        validated_ips: tuple[str, ...],
+        timeout: float,
+        max_bytes: int,
+    ) -> HTTPResponse:
+        if not validated_ips:
+            raise SafeHTTPError("DNS_RESOLUTION_FAILED", "no validated IP was supplied")
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
         try:
-            response = opener.open(request, timeout=timeout)
-        except HTTPError as error:
-            response = error
-        except OSError as error:
-            raise SafeHTTPError(
-                "NETWORK_ERROR", "remote resource could not be fetched"
-            ) from error
-        with response:
-            body = response.read(max_bytes + 1)
-            headers = {
-                key.casefold(): value.strip() for key, value in response.headers.items()
-            }
-            return HTTPResponse(
-                url=response.geturl(),
-                status=response.status,
-                headers=MappingProxyType(headers),
-                body=body,
-            )
+            port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+        except ValueError as error:
+            raise SafeHTTPError("INVALID_URL", "URL port is invalid") from error
+        target = parsed.path or "/"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        host_header = f"[{hostname}]" if ":" in hostname else hostname
+        default_port = 443 if parsed.scheme.casefold() == "https" else 80
+        if port != default_port:
+            host_header = f"{hostname}:{port}"
+        last_error: OSError | None = None
+        for pinned_ip in validated_ips:
+            connection: http.client.HTTPConnection
+            if parsed.scheme.casefold() == "https":
+                connection = _PinnedHTTPSConnection(
+                    hostname, port, pinned_ip, timeout, self.ssl_context
+                )
+            else:
+                connection = _PinnedHTTPConnection(
+                    hostname, port, pinned_ip, timeout
+                )
+            try:
+                connection.request(
+                    "GET",
+                    target,
+                    headers={
+                        "Host": host_header,
+                        "User-Agent": "SPC-Literature-Acquisition/1.1",
+                        "Accept": "*/*",
+                        "Connection": "close",
+                    },
+                )
+                response = connection.getresponse()
+                body = response.read(max_bytes + 1)
+                headers = MappingProxyType(
+                    {
+                        key.casefold(): value.strip()
+                        for key, value in response.getheaders()
+                    }
+                )
+                return HTTPResponse(
+                    url=url,
+                    status=response.status,
+                    headers=headers,
+                    body=body,
+                    connected_ip=pinned_ip,
+                )
+            except OSError as error:
+                last_error = error
+            finally:
+                connection.close()
+        raise SafeHTTPError(
+            "NETWORK_ERROR", "remote resource could not be fetched"
+        ) from last_error
 
 
 class SafeHTTPFetcher:
@@ -108,7 +211,7 @@ class SafeHTTPFetcher:
     ) -> None:
         if timeout <= 0 or max_bytes <= 0 or max_redirects < 0:
             raise ValueError("safe HTTP limits must be positive")
-        self.transport = transport or UrllibHTTPTransport()
+        self.transport = transport or PinnedHTTPTransport()
         self.timeout = timeout
         self.max_bytes = max_bytes
         self.max_redirects = max_redirects
@@ -119,10 +222,18 @@ class SafeHTTPFetcher:
     ) -> HTTPResponse:
         current = url
         for redirect_count in range(self.max_redirects + 1):
-            self._validate_url(current)
+            validated_ips = self._validated_ips(current)
             response = self.transport.request(
-                current, timeout=self.timeout, max_bytes=self.max_bytes
+                current,
+                validated_ips=validated_ips,
+                timeout=self.timeout,
+                max_bytes=self.max_bytes,
             )
+            if response.connected_ip not in validated_ips:
+                raise SafeHTTPError(
+                    "CONNECTION_IP_MISMATCH",
+                    "transport connected outside the validated IP set",
+                )
             if response.url != current:
                 raise SafeHTTPError(
                     "UNVALIDATED_REDIRECT",
@@ -179,10 +290,11 @@ class SafeHTTPFetcher:
                 status=response.status,
                 headers=MappingProxyType(headers),
                 body=response.body,
+                connected_ip=response.connected_ip,
             )
         raise SafeHTTPError("TOO_MANY_REDIRECTS", "redirect limit exceeded")
 
-    def _validate_url(self, url: str) -> None:
+    def _validated_ips(self, url: str) -> tuple[str, ...]:
         parsed = urlparse(url)
         if parsed.scheme.casefold() not in {"http", "https"}:
             raise SafeHTTPError("UNSAFE_URL_SCHEME", "only HTTP/HTTPS are allowed")
@@ -203,6 +315,7 @@ class SafeHTTPFetcher:
                 raise SafeHTTPError("DNS_RESOLUTION_FAILED", "hostname could not resolve") from error
         if not addresses:
             raise SafeHTTPError("DNS_RESOLUTION_FAILED", "hostname resolved to no addresses")
+        validated: list[str] = []
         for address in addresses:
             try:
                 parsed_address = ipaddress.ip_address(address)
@@ -213,6 +326,8 @@ class SafeHTTPFetcher:
                     "PRIVATE_ADDRESS_REJECTED",
                     "loopback, private, link-local, or non-global address is forbidden",
                 )
+            validated.append(str(parsed_address))
+        return tuple(sorted(set(validated)))
 
     @staticmethod
     def _resolve_host(hostname: str) -> tuple[str, ...]:
@@ -276,20 +391,93 @@ def _make_resource(**identity) -> ResolvedLiteratureResource:
             key=lambda item: (item.priority, item.candidate_id),
         )
     )
-    identity = {**identity, "fulltext_candidates": candidates}
+    identity = {
+        **identity,
+        "metadata_retrieval_refs": tuple(
+            identity.get("metadata_retrieval_refs", ())
+        ),
+        "metadata_retrieval_hashes": tuple(
+            identity.get("metadata_retrieval_hashes", ())
+        ),
+        "fulltext_candidates": candidates,
+    }
     identity = {key: value for key, value in identity.items() if value is not None}
     resource_id = f"resolved-literature-{content_hash(identity)[:24]}"
     payload = {"resource_id": resource_id, **identity}
     return ResolvedLiteratureResource(**payload, content_hash=content_hash(payload))
 
 
-def _pdf_metadata(content: bytes, *, filename: str) -> dict[str, object]:
+def _make_metadata_retrieval(
+    response: HTTPResponse,
+    *,
+    resolver_id: str,
+    resolver_version: str,
+) -> MetadataRetrievalRecord:
+    media_type = response.headers.get("content-type", "").split(";", 1)[0]
+    response_payload_utf8: str | None = None
+    if media_type in {"application/json", *SUPPORTED_HTML_TYPES}:
+        try:
+            response_payload_utf8 = response.body.decode("utf-8")
+        except UnicodeDecodeError:
+            response_payload_utf8 = None
+    identity = {
+        "source_url": response.url,
+        "response_sha256": hashlib.sha256(response.body).hexdigest(),
+        "response_byte_size": len(response.body),
+        "media_type": media_type,
+        "resolver_id": resolver_id,
+        "resolver_version": resolver_version,
+        "response_payload_utf8": response_payload_utf8,
+    }
+    identity = {key: value for key, value in identity.items() if value is not None}
+    retrieval_id = f"metadata-retrieval-{content_hash(identity)[:24]}"
+    payload = {"retrieval_id": retrieval_id, **identity}
+    return MetadataRetrievalRecord(
+        **payload, content_hash=content_hash(payload)
+    )
+
+
+def _make_request(
+    original_input: str,
+    input_kind: AcquisitionInputKind,
+    domain: str,
+) -> LiteratureAcquisitionRequest:
+    identity = {
+        "original_input": original_input.strip(),
+        "input_kind": input_kind,
+        "requested_domain": domain,
+    }
+    request_id = f"literature-acquisition-request-{content_hash(identity)[:24]}"
+    payload = {"request_id": request_id, **identity}
+    return LiteratureAcquisitionRequest(**payload, content_hash=content_hash(payload))
+
+
+def _reprioritize_candidates(
+    candidates: tuple[FullTextCandidate, ...],
+) -> tuple[FullTextCandidate, ...]:
+    records: list[FullTextCandidate] = []
+    seen: set[tuple[str | None, str | None, str]] = set()
+    for candidate in candidates:
+        key = (candidate.url, candidate.local_path_ref, candidate.media_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        identity = candidate.model_dump(
+            mode="python",
+            exclude={"candidate_id", "content_hash", "priority"},
+            exclude_none=True,
+        )
+        records.append(_make_candidate(**identity, priority=len(records)))
+    return tuple(records)
+
+
+def _pdf_metadata(content: bytes) -> dict[str, object]:
     try:
         reader = PdfReader(BytesIO(content), strict=True)
     except PdfReadError as error:
         raise AcquisitionError("PDF metadata could not be read") from error
     metadata = reader.metadata or {}
-    title = str(metadata.get("/Title") or "").strip() or Path(filename).stem
+    title = str(metadata.get("/Title") or "").strip() or None
     author = str(metadata.get("/Author") or "").strip()
     authors = (author,) if author else ()
     creation_date = str(metadata.get("/CreationDate") or "")
@@ -326,12 +514,13 @@ class LocalPDFResolver:
                 fulltext_candidates=(),
                 resolution_status=AcquisitionStatus.UNSUPPORTED_MEDIA,
             )
-        metadata = _pdf_metadata(content, filename=path.name)
+        metadata = _pdf_metadata(content)
         candidate = _make_candidate(
             local_path_ref=str(path),
             media_type="application/pdf",
             access_status=FullTextAccessStatus.ACCESSIBLE,
             source_kind=FullTextSourceKind.LOCAL_FILE,
+            discovered_by=self.resolver_id,
             priority=0,
             content_sha256=hashlib.sha256(content).hexdigest(),
         )
@@ -350,6 +539,7 @@ class DOIResolver:
 
     def __init__(self, fetcher: SafeHTTPFetcher) -> None:
         self.fetcher = fetcher
+        self.metadata_retrievals: tuple[MetadataRetrievalRecord, ...] = ()
 
     def resolve(self, request: LiteratureAcquisitionRequest) -> ResolvedLiteratureResource:
         doi = normalize_doi(request.original_input)
@@ -357,6 +547,12 @@ class DOIResolver:
             f"https://api.crossref.org/works/{quote(doi, safe='')}",
             allowed_content_types=frozenset({"application/json"}),
         )
+        crossref_retrieval = _make_metadata_retrieval(
+            response,
+            resolver_id=self.resolver_id,
+            resolver_version=self.resolver_version,
+        )
+        self.metadata_retrievals = (crossref_retrieval,)
         try:
             payload = json.loads(response.body.decode("utf-8"))
             message = payload["message"]
@@ -391,22 +587,52 @@ class DOIResolver:
                     media_type=media_type,
                     access_status=FullTextAccessStatus.DISCOVERED,
                     source_kind=FullTextSourceKind.METADATA_LINK,
+                    discovered_by=self.resolver_id,
+                    discovery_source_url=response.url,
                     priority=priority,
                 )
             )
+        fallback: ResolvedLiteratureResource | None = None
+        if not candidates and landing_url:
+            fallback_resolver = ArticleURLResolver(self.fetcher)
+            fallback_request = _make_request(
+                landing_url, AcquisitionInputKind.URL, request.requested_domain
+            )
+            try:
+                fallback = fallback_resolver.resolve(fallback_request)
+            except AcquisitionError:
+                fallback = None
+            self.metadata_retrievals = (
+                crossref_retrieval,
+                *fallback_resolver.metadata_retrievals,
+            )
+        merged_candidates = _reprioritize_candidates(
+            (
+                *tuple(candidates),
+                *(fallback.fulltext_candidates if fallback is not None else ()),
+            )
+        )
         return _make_resource(
             canonical_identifier=doi,
             doi=doi,
-            title=title,
-            authors=authors,
-            year=year,
-            journal=journal,
+            title=title or (fallback.title if fallback is not None else None),
+            authors=authors or (fallback.authors if fallback is not None else ()),
+            year=year or (fallback.year if fallback is not None else None),
+            journal=journal or (fallback.journal if fallback is not None else None),
             landing_url=landing_url,
-            metadata_source="crossref",
-            fulltext_candidates=tuple(candidates),
+            metadata_source=(
+                "crossref+article-url" if fallback is not None else "crossref"
+            ),
+            metadata_retrieval_refs=tuple(
+                item.retrieval_id for item in self.metadata_retrievals
+            ),
+            metadata_retrieval_hashes=tuple(
+                item.content_hash for item in self.metadata_retrievals
+            ),
+            fulltext_candidates=merged_candidates,
             resolution_status=(
                 AcquisitionStatus.FULLTEXT_FOUND
-                if candidates
+                if merged_candidates
                 else AcquisitionStatus.FULLTEXT_UNAVAILABLE
             ),
         )
@@ -461,20 +687,29 @@ class ArticleURLResolver:
 
     def __init__(self, fetcher: SafeHTTPFetcher) -> None:
         self.fetcher = fetcher
+        self.metadata_retrievals: tuple[MetadataRetrievalRecord, ...] = ()
 
     def resolve(self, request: LiteratureAcquisitionRequest) -> ResolvedLiteratureResource:
         response = self.fetcher.fetch(
             request.original_input,
             allowed_content_types=SUPPORTED_PDF_TYPES | SUPPORTED_HTML_TYPES,
         )
+        retrieval = _make_metadata_retrieval(
+            response,
+            resolver_id=self.resolver_id,
+            resolver_version=self.resolver_version,
+        )
+        self.metadata_retrievals = (retrieval,)
         media_type = response.headers.get("content-type", "").split(";", 1)[0].casefold()
         if media_type == "application/pdf":
-            metadata = _pdf_metadata(response.body, filename=Path(urlparse(response.url).path).name)
+            metadata = _pdf_metadata(response.body)
             candidate = _make_candidate(
                 url=response.url,
                 media_type=media_type,
                 access_status=FullTextAccessStatus.ACCESSIBLE,
                 source_kind=FullTextSourceKind.DIRECT_PDF,
+                discovered_by=self.resolver_id,
+                discovery_source_url=response.url,
                 priority=0,
                 content_sha256=hashlib.sha256(response.body).hexdigest(),
             )
@@ -483,6 +718,8 @@ class ArticleURLResolver:
                 **metadata,
                 landing_url=response.url,
                 metadata_source="direct-pdf-metadata",
+                metadata_retrieval_refs=(retrieval.retrieval_id,),
+                metadata_retrieval_hashes=(retrieval.content_hash,),
                 fulltext_candidates=(candidate,),
                 resolution_status=AcquisitionStatus.FULLTEXT_FOUND,
             )
@@ -515,6 +752,8 @@ class ArticleURLResolver:
                         media_type="application/pdf",
                         access_status=FullTextAccessStatus.DISCOVERED,
                         source_kind=FullTextSourceKind.LANDING_PAGE_PDF,
+                        discovered_by=self.resolver_id,
+                        discovery_source_url=response.url,
                         priority=priority,
                     )
                 )
@@ -525,6 +764,8 @@ class ArticleURLResolver:
                     media_type="text/html",
                     access_status=FullTextAccessStatus.ACCESSIBLE,
                     source_kind=FullTextSourceKind.HTML_ARTICLE,
+                    discovered_by=self.resolver_id,
+                    discovery_source_url=response.url,
                     priority=len(candidates),
                     content_sha256=hashlib.sha256(response.body).hexdigest(),
                 )
@@ -538,6 +779,8 @@ class ArticleURLResolver:
             journal=journal_values[0].strip() if journal_values else None,
             landing_url=response.url,
             metadata_source="article-html-metadata",
+            metadata_retrieval_refs=(retrieval.retrieval_id,),
+            metadata_retrieval_hashes=(retrieval.content_hash,),
             fulltext_candidates=tuple(candidates),
             resolution_status=(
                 AcquisitionStatus.FULLTEXT_FOUND
@@ -597,6 +840,14 @@ class _CanonicalHTMLParser(HTMLParser):
 class HTMLLiteratureTextExtractor:
     extractor_id = "html-canonical-text"
     extractor_version = "1.0.0"
+    extractor_config_hash = content_hash(
+        {
+            "block_tags": tuple(sorted(_CanonicalHTMLParser.BLOCK_TAGS)),
+            "ignored_tags": ("noscript", "script", "style"),
+            "encoding": "utf-8",
+            "block_separator": "two_lf",
+        }
+    )
 
     def extract(self, source_url: str, html_bytes: bytes) -> HTMLTextExtraction:
         try:
@@ -637,6 +888,195 @@ class HTMLLiteratureTextExtractor:
         )
 
 
+METADATA_FIELDS = (
+    "authors",
+    "citation_refs",
+    "doi",
+    "journal",
+    "keywords",
+    "title",
+    "topics",
+    "url",
+    "year",
+)
+
+
+def _normalized_metadata_value(field_name: str, value: object) -> object | None:
+    if value is None:
+        return None
+    if field_name in {"authors", "citation_refs", "keywords", "topics"}:
+        if isinstance(value, str):
+            values = (value.strip(),) if value.strip() else ()
+        elif isinstance(value, (list, tuple)):
+            values = tuple(str(item).strip() for item in value if str(item).strip())
+        else:
+            raise AcquisitionError(f"metadata field {field_name} must be a list")
+        return values or None
+    if field_name == "year":
+        try:
+            year = int(value)
+        except (TypeError, ValueError) as error:
+            raise AcquisitionError("metadata year must be an integer") from error
+        if year < 1000 or year > 9999:
+            raise AcquisitionError("metadata year is out of range")
+        return year
+    text = str(value).strip()
+    return text or None
+
+
+def _metadata_from_resource(resource: ResolvedLiteratureResource) -> dict[str, object]:
+    return {
+        "title": resource.title,
+        "authors": resource.authors,
+        "year": resource.year,
+        "journal": resource.journal,
+        "doi": resource.doi,
+        "url": resource.landing_url,
+    }
+
+
+def _merge_metadata(
+    explicit: Mapping[str, object] | None,
+    resolved: Mapping[str, object],
+    embedded: Mapping[str, object],
+    *,
+    domain: str,
+) -> tuple[LiteratureMetadata | None, MetadataMergeManifest]:
+    explicit_values = dict(explicit or {})
+    unknown = set(explicit_values) - set(METADATA_FIELDS)
+    if unknown:
+        raise AcquisitionError(
+            f"unsupported explicit metadata fields: {', '.join(sorted(unknown))}"
+        )
+    sources = (
+        (MetadataValueOrigin.EXPLICIT, explicit_values),
+        (MetadataValueOrigin.RESOLVED, resolved),
+        (MetadataValueOrigin.EMBEDDED, embedded),
+    )
+    selected: dict[str, object] = {}
+    decisions: list[MetadataFieldDecision] = []
+    for field_name in METADATA_FIELDS:
+        values: list[tuple[MetadataValueOrigin, object]] = []
+        for origin, source in sources:
+            value = _normalized_metadata_value(field_name, source.get(field_name))
+            if value is not None:
+                values.append((origin, value))
+        if not values:
+            decisions.append(
+                MetadataFieldDecision(
+                    field_name=field_name,
+                    selected_origin=MetadataValueOrigin.UNRESOLVED,
+                )
+            )
+            continue
+        selected_origin, selected_value = values[0]
+        selected[field_name] = selected_value
+        alternatives = tuple(
+            MetadataAlternative(origin=origin, value=value)
+            for origin, value in values[1:]
+            if value != selected_value
+        )
+        decisions.append(
+            MetadataFieldDecision(
+                field_name=field_name,
+                selected_origin=selected_origin,
+                selected_value=selected_value,
+                alternatives=alternatives,
+            )
+        )
+    identity = {"decisions": tuple(decisions)}
+    manifest_id = f"metadata-merge-{content_hash(identity)[:24]}"
+    payload = {"manifest_id": manifest_id, **identity}
+    manifest = MetadataMergeManifest(
+        **payload, content_hash=content_hash(payload)
+    )
+    if not all(selected.get(field) for field in ("title", "authors", "year")):
+        return None, manifest
+    return (
+        LiteratureMetadata.model_validate({**selected, "domain": domain}),
+        manifest,
+    )
+
+
+@dataclass(frozen=True)
+class _CandidateResult:
+    status: AcquisitionStatus
+    failure_code: str | None
+    http_status: int | None
+    manifest: MetadataMergeManifest
+    warnings: tuple[str, ...] = ()
+    literature_id: str | None = None
+    raw_artifact_id: str | None = None
+    raw_artifact_hash: str | None = None
+    canonical_text_id: str | None = None
+    canonical_text_hash: str | None = None
+    ingestion_id: str | None = None
+    ingestion_hash: str | None = None
+    representation: LiteratureRepresentationReference | None = None
+
+
+def validate_literature_representation(
+    representation: LiteratureRepresentationReference,
+    repositories: KnowledgeRepositories,
+    evidence_store: SourceEvidenceStore,
+) -> LiteratureRepresentationReference:
+    stored = repositories.literature_representation_refs.get(
+        representation.representation_id
+    )
+    if stored != representation:
+        raise ValueError("literature representation differs from repository record")
+    if representation.representation_kind == LiteratureRepresentationKind.PDF:
+        ingestion = repositories.literature_ingestions.get(
+            representation.ingestion_id
+        )
+        chain = validate_literature_ingestion_chain(
+            ingestion, repositories, evidence_store
+        )
+        if (
+            representation.ingestion_hash != ingestion.content_hash
+            or representation.raw_artifact_id != chain.raw_artifact.artifact_id
+            or representation.raw_artifact_hash != chain.raw_artifact.content_hash
+            or representation.canonical_text_id
+            != chain.canonical_text.canonical_text_id
+            or representation.canonical_text_hash
+            != chain.canonical_text.content_hash
+            or representation.source_id != chain.source.source_id
+            or representation.source_version != chain.source.version
+        ):
+            raise ValueError("PDF representation binding is invalid")
+        return representation
+    ingestion = repositories.html_literature_ingestions.get(
+        representation.ingestion_id
+    )
+    raw = repositories.raw_html_literature_artifacts.get(
+        representation.raw_artifact_id
+    )
+    canonical = repositories.canonical_html_text_artifacts.get(
+        representation.canonical_text_id or ""
+    )
+    source = evidence_store.source_records.get(
+        f"{representation.source_id}--{representation.source_version}"
+    )
+    evidence_store.verify_source_integrity(source)
+    if (
+        representation.ingestion_hash != ingestion.content_hash
+        or representation.literature_id != ingestion.literature_id
+        or representation.raw_artifact_hash != raw.content_hash
+        or representation.canonical_text_hash != canonical.content_hash
+        or ingestion.raw_artifact_id != raw.artifact_id
+        or ingestion.raw_artifact_hash != raw.content_hash
+        or ingestion.canonical_text_id != canonical.canonical_text_id
+        or ingestion.canonical_text_hash != canonical.content_hash
+        or canonical.raw_artifact_id != raw.artifact_id
+        or canonical.raw_artifact_hash != raw.content_hash
+        or ingestion.source_id != source.source_id
+        or ingestion.source_version != source.version
+        or source.content_sha256 != canonical.text_sha256
+    ):
+        raise ValueError("HTML representation binding is invalid")
+    return representation
+
+
 class LiteratureAcquisitionService:
     def __init__(
         self,
@@ -653,9 +1093,10 @@ class LiteratureAcquisitionService:
         domain: str,
         repositories: KnowledgeRepositories,
         evidence_store: SourceEvidenceStore,
+        explicit_metadata: Mapping[str, object] | None = None,
     ) -> LiteratureAcquisitionOutcome:
         input_kind = detect_acquisition_input(original_input)
-        request = self._request(original_input, input_kind, domain)
+        request = _make_request(original_input, input_kind, domain)
         repositories.acquisition_requests.put(request.request_id, request)
         resolver: ResourceResolver
         if input_kind == AcquisitionInputKind.LOCAL_FILE:
@@ -673,10 +1114,23 @@ class LiteratureAcquisitionService:
                     status = AcquisitionStatus.REQUIRES_AUTHENTICATION
                 elif error.code == "UNSUPPORTED_CONTENT_TYPE":
                     status = AcquisitionStatus.UNSUPPORTED_MEDIA
+            failure_retrievals = tuple(
+                getattr(resolver, "metadata_retrievals", ())
+            )
+            for retrieval in failure_retrievals:
+                repositories.metadata_retrievals.put(
+                    retrieval.retrieval_id, retrieval
+                )
             resource = _make_resource(
                 canonical_identifier=request.original_input,
                 authors=(),
                 metadata_source=f"{resolver.resolver_id}:failed",
+                metadata_retrieval_refs=tuple(
+                    item.retrieval_id for item in failure_retrievals
+                ),
+                metadata_retrieval_hashes=tuple(
+                    item.content_hash for item in failure_retrievals
+                ),
                 fulltext_candidates=(),
                 resolution_status=status,
             )
@@ -690,6 +1144,18 @@ class LiteratureAcquisitionService:
                 repositories,
                 status=status,
                 warnings=(str(error),),
+            )
+        retrievals = tuple(getattr(resolver, "metadata_retrievals", ()))
+        expected_retrieval_ids = tuple(item.retrieval_id for item in retrievals)
+        expected_retrieval_hashes = tuple(item.content_hash for item in retrievals)
+        if (
+            resource.metadata_retrieval_refs != expected_retrieval_ids
+            or resource.metadata_retrieval_hashes != expected_retrieval_hashes
+        ):
+            raise AcquisitionError("resolved metadata provenance binding is incomplete")
+        for retrieval in retrievals:
+            repositories.metadata_retrievals.put(
+                retrieval.retrieval_id, retrieval
             )
         repositories.resolved_literature_resources.put(resource.resource_id, resource)
         candidates = tuple(
@@ -714,138 +1180,208 @@ class LiteratureAcquisitionService:
             return self._finish(
                 request, resolver, resource, repositories, status=status
             )
-        candidate = candidates[0]
-        if candidate.media_type == "application/pdf":
-            return self._ingest_pdf_candidate(
-                request,
-                resolver,
-                resource,
+        attempts: list[AcquisitionAttemptRecord] = []
+        results: list[_CandidateResult] = []
+        for attempt_index, candidate in enumerate(candidates):
+            result = self._attempt_candidate(
                 candidate,
+                resource,
+                request,
                 repositories,
                 evidence_store,
+                explicit_metadata,
             )
-        if candidate.media_type in SUPPORTED_HTML_TYPES:
-            try:
-                response = self.fetcher.fetch(
-                    candidate.url or "", allowed_content_types=SUPPORTED_HTML_TYPES
-                )
-                extraction = self.html_extractor.extract(response.url, response.body)
-                if (
-                    candidate.content_sha256 is not None
-                    and candidate.content_sha256 != extraction.artifact_sha256
-                ):
-                    raise AcquisitionError("HTML artifact changed after resolution")
-            except (AcquisitionError, SafeHTTPError) as error:
+            repositories.metadata_merge_manifests.put(
+                result.manifest.manifest_id, result.manifest
+            )
+            attempt = self._make_attempt(
+                request, candidate, attempt_index, result
+            )
+            repositories.acquisition_attempts.put(attempt.attempt_id, attempt)
+            attempts.append(attempt)
+            results.append(result)
+            if result.status == AcquisitionStatus.INGESTED:
                 return self._finish(
                     request,
                     resolver,
                     resource,
                     repositories,
-                    status=AcquisitionStatus.FAILED,
+                    status=AcquisitionStatus.INGESTED,
                     candidate=candidate,
-                    warnings=(str(error),),
+                    manifest=result.manifest,
+                    attempts=tuple(attempts),
+                    literature_id=result.literature_id,
+                    ingestion_id=result.ingestion_id,
+                    canonical_text_id=result.canonical_text_id,
+                    representation=result.representation,
+                    warnings=result.warnings,
                 )
-            return self._finish(
-                request,
-                resolver,
-                resource,
-                repositories,
-                status=AcquisitionStatus.FULLTEXT_FOUND,
-                candidate=candidate,
-                warnings=(
-                    "HTML full text canonicalized without K1B PDF ingestion; "
-                    f"artifact_sha256={extraction.artifact_sha256}; "
-                    f"text_sha256={extraction.text_sha256}; blocks={len(extraction.blocks)}",
-                ),
+        final_status = (
+            AcquisitionStatus.METADATA_ONLY
+            if any(item.status == AcquisitionStatus.METADATA_ONLY for item in results)
+            else AcquisitionStatus.FULLTEXT_UNAVAILABLE
+        )
+        warnings = tuple(
+            dict.fromkeys(
+                warning
+                for result in results
+                for warning in (
+                    *result.warnings,
+                    *((result.failure_code,) if result.failure_code else ()),
+                )
             )
+        )
         return self._finish(
             request,
             resolver,
             resource,
             repositories,
+            status=final_status,
+            attempts=tuple(attempts),
+            warnings=warnings,
+        )
+
+    def _attempt_candidate(
+        self,
+        candidate: FullTextCandidate,
+        resource: ResolvedLiteratureResource,
+        request: LiteratureAcquisitionRequest,
+        repositories: KnowledgeRepositories,
+        evidence_store: SourceEvidenceStore,
+        explicit_metadata: Mapping[str, object] | None,
+    ) -> _CandidateResult:
+        if candidate.media_type == "application/pdf":
+            return self._attempt_pdf(
+                candidate,
+                resource,
+                request,
+                repositories,
+                evidence_store,
+                explicit_metadata,
+            )
+        if candidate.media_type in SUPPORTED_HTML_TYPES:
+            return self._attempt_html(
+                candidate,
+                resource,
+                request,
+                repositories,
+                evidence_store,
+                explicit_metadata,
+            )
+        _, manifest = _merge_metadata(
+            explicit_metadata,
+            _metadata_from_resource(resource),
+            {},
+            domain=request.requested_domain,
+        )
+        return _CandidateResult(
             status=AcquisitionStatus.UNSUPPORTED_MEDIA,
-            candidate=candidate,
+            failure_code="UNSUPPORTED_MEDIA",
+            http_status=None,
+            manifest=manifest,
             warnings=("Selected full text uses unsupported media.",),
         )
 
-    def _ingest_pdf_candidate(
+    def _attempt_pdf(
         self,
-        request: LiteratureAcquisitionRequest,
-        resolver: ResourceResolver,
-        resource: ResolvedLiteratureResource,
         candidate: FullTextCandidate,
+        resource: ResolvedLiteratureResource,
+        request: LiteratureAcquisitionRequest,
         repositories: KnowledgeRepositories,
         evidence_store: SourceEvidenceStore,
-    ) -> LiteratureAcquisitionOutcome:
-        missing = tuple(
-            name
-            for name, value in (
-                ("title", resource.title),
-                ("authors", resource.authors),
-                ("year", resource.year),
-            )
-            if not value
-        )
-        if missing:
-            return self._finish(
-                request,
-                resolver,
-                resource,
-                repositories,
-                status=AcquisitionStatus.METADATA_ONLY,
-                candidate=candidate,
-                warnings=(f"K1B ingestion requires metadata fields: {', '.join(missing)}",),
-            )
+        explicit_metadata: Mapping[str, object] | None,
+    ) -> _CandidateResult:
+        http_status: int | None = None
         if candidate.local_path_ref is not None:
             pdf_path = Path(candidate.local_path_ref)
-            return self._run_k1b(
-                pdf_path,
-                request,
-                resolver,
-                resource,
-                candidate,
-                repositories,
-                evidence_store,
+            if pdf_path.is_symlink() or not pdf_path.is_file():
+                _, manifest = _merge_metadata(
+                    explicit_metadata,
+                    _metadata_from_resource(resource),
+                    {},
+                    domain=request.requested_domain,
+                )
+                return _CandidateResult(
+                    status=AcquisitionStatus.FULLTEXT_UNAVAILABLE,
+                    failure_code="LOCAL_FILE_UNAVAILABLE",
+                    http_status=None,
+                    manifest=manifest,
+                )
+            pdf_bytes = pdf_path.read_bytes()
+        else:
+            try:
+                response = self.fetcher.fetch(
+                    candidate.url or "", allowed_content_types=SUPPORTED_PDF_TYPES
+                )
+                pdf_bytes = response.body
+                http_status = response.status
+            except SafeHTTPError as error:
+                _, manifest = _merge_metadata(
+                    explicit_metadata,
+                    _metadata_from_resource(resource),
+                    {},
+                    domain=request.requested_domain,
+                )
+                return _CandidateResult(
+                    status=AcquisitionStatus.FULLTEXT_UNAVAILABLE,
+                    failure_code=error.code,
+                    http_status=error.status,
+                    manifest=manifest,
+                    warnings=(str(error),),
+                )
+        if not pdf_bytes.startswith(b"%PDF-"):
+            _, manifest = _merge_metadata(
+                explicit_metadata,
+                _metadata_from_resource(resource),
+                {},
+                domain=request.requested_domain,
+            )
+            return _CandidateResult(
+                status=AcquisitionStatus.UNSUPPORTED_MEDIA,
+                failure_code="INVALID_PDF_SIGNATURE",
+                http_status=http_status,
+                manifest=manifest,
+            )
+        digest = hashlib.sha256(pdf_bytes).hexdigest()
+        if candidate.content_sha256 is not None and candidate.content_sha256 != digest:
+            _, manifest = _merge_metadata(
+                explicit_metadata,
+                _metadata_from_resource(resource),
+                {},
+                domain=request.requested_domain,
+            )
+            return _CandidateResult(
+                status=AcquisitionStatus.FAILED,
+                failure_code="CONTENT_HASH_CHANGED",
+                http_status=http_status,
+                manifest=manifest,
             )
         try:
-            response = self.fetcher.fetch(
-                candidate.url or "", allowed_content_types=SUPPORTED_PDF_TYPES
+            embedded = _pdf_metadata(pdf_bytes)
+        except AcquisitionError:
+            embedded = {}
+        metadata, manifest = _merge_metadata(
+            explicit_metadata,
+            _metadata_from_resource(resource),
+            embedded,
+            domain=request.requested_domain,
+        )
+        if metadata is None:
+            return _CandidateResult(
+                status=AcquisitionStatus.METADATA_ONLY,
+                failure_code="INCOMPLETE_METADATA",
+                http_status=http_status,
+                manifest=manifest,
             )
-        except SafeHTTPError as error:
-            status = (
-                AcquisitionStatus.REQUIRES_AUTHENTICATION
-                if error.code == "REQUIRES_AUTHENTICATION"
-                else AcquisitionStatus.FULLTEXT_UNAVAILABLE
-            )
-            return self._finish(
-                request,
-                resolver,
-                resource,
+        if candidate.local_path_ref is not None:
+            return self._run_k1b(
+                pdf_path,
+                pdf_bytes,
+                metadata,
+                manifest,
                 repositories,
-                status=status,
-                candidate=candidate,
-                warnings=(str(error),),
-            )
-        if not response.body.startswith(b"%PDF-"):
-            return self._finish(
-                request,
-                resolver,
-                resource,
-                repositories,
-                status=AcquisitionStatus.UNSUPPORTED_MEDIA,
-                candidate=candidate,
-                warnings=("Remote resource declared PDF but has no PDF signature.",),
-            )
-        digest = hashlib.sha256(response.body).hexdigest()
-        if candidate.content_sha256 is not None and candidate.content_sha256 != digest:
-            return self._finish(
-                request,
-                resolver,
-                resource,
-                repositories,
-                status=AcquisitionStatus.FAILED,
-                candidate=candidate,
-                warnings=("Remote PDF changed after resolution.",),
+                evidence_store,
+                http_status,
             )
         staging_root = repositories.root / ".acquisition_staging"
         if staging_root.exists() and staging_root.is_symlink():
@@ -854,17 +1390,17 @@ class LiteratureAcquisitionService:
         staging = Path(tempfile.mkdtemp(prefix="download-", dir=staging_root))
         try:
             pdf_path = staging / "resource.pdf"
-            pdf_path.write_bytes(response.body)
+            pdf_path.write_bytes(pdf_bytes)
             if hashlib.sha256(pdf_path.read_bytes()).hexdigest() != digest:
                 raise AcquisitionError("staged PDF integrity check failed")
             return self._run_k1b(
                 pdf_path,
-                request,
-                resolver,
-                resource,
-                candidate,
+                pdf_bytes,
+                metadata,
+                manifest,
                 repositories,
                 evidence_store,
+                http_status,
             )
         finally:
             if staging.exists():
@@ -875,36 +1411,322 @@ class LiteratureAcquisitionService:
     def _run_k1b(
         self,
         pdf_path: Path,
-        request: LiteratureAcquisitionRequest,
-        resolver: ResourceResolver,
-        resource: ResolvedLiteratureResource,
-        candidate: FullTextCandidate,
+        pdf_bytes: bytes,
+        metadata: LiteratureMetadata,
+        manifest: MetadataMergeManifest,
         repositories: KnowledgeRepositories,
         evidence_store: SourceEvidenceStore,
-    ) -> LiteratureAcquisitionOutcome:
-        metadata = LiteratureMetadata(
-            title=resource.title or "",
-            authors=resource.authors,
-            year=resource.year or 0,
-            journal=resource.journal,
-            doi=resource.doi,
-            url=resource.landing_url,
-            domain=request.requested_domain,
-        )
+        http_status: int | None,
+    ) -> _CandidateResult:
+        if hashlib.sha256(pdf_path.read_bytes()).hexdigest() != hashlib.sha256(
+            pdf_bytes
+        ).hexdigest():
+            raise AcquisitionError("staged PDF integrity check failed")
         outcome = LiteratureIngestionService().ingest(
             pdf_path, metadata, repositories, evidence_store
         )
-        return self._finish(
-            request,
-            resolver,
-            resource,
-            repositories,
-            status=AcquisitionStatus.INGESTED,
-            candidate=candidate,
+        ingestion = repositories.literature_ingestions.get(outcome.ingestion_id)
+        raw = repositories.raw_literature_artifacts.get(outcome.artifact_id)
+        if outcome.canonical_text_id is None:
+            return _CandidateResult(
+                status=AcquisitionStatus.FAILED,
+                failure_code=(
+                    "REQUIRES_OCR" if outcome.requires_ocr else "PDF_INGESTION_FAILED"
+                ),
+                http_status=http_status,
+                manifest=manifest,
+                warnings=outcome.warnings,
+                literature_id=outcome.literature_id,
+                raw_artifact_id=raw.artifact_id,
+                raw_artifact_hash=raw.content_hash,
+                ingestion_id=ingestion.ingestion_id,
+                ingestion_hash=ingestion.content_hash,
+            )
+        canonical = repositories.canonical_text_artifacts.get(
+            outcome.canonical_text_id
+        )
+        representation = self._representation(
+            kind=LiteratureRepresentationKind.PDF,
             literature_id=outcome.literature_id,
-            ingestion_id=outcome.ingestion_id,
-            canonical_text_id=outcome.canonical_text_id,
+            raw_artifact_id=raw.artifact_id,
+            raw_artifact_hash=raw.content_hash,
+            canonical_text_id=canonical.canonical_text_id,
+            canonical_text_hash=canonical.content_hash,
+            ingestion_id=ingestion.ingestion_id,
+            ingestion_hash=ingestion.content_hash,
+            source_id=outcome.source_id,
+            source_version=outcome.source_version,
+        )
+        repositories.literature_representation_refs.put(
+            representation.representation_id, representation
+        )
+        validate_literature_representation(
+            representation, repositories, evidence_store
+        )
+        return _CandidateResult(
+            status=AcquisitionStatus.INGESTED,
+            failure_code=None,
+            http_status=http_status,
+            manifest=manifest,
             warnings=outcome.warnings,
+            literature_id=outcome.literature_id,
+            raw_artifact_id=raw.artifact_id,
+            raw_artifact_hash=raw.content_hash,
+            canonical_text_id=canonical.canonical_text_id,
+            canonical_text_hash=canonical.content_hash,
+            ingestion_id=ingestion.ingestion_id,
+            ingestion_hash=ingestion.content_hash,
+            representation=representation,
+        )
+
+    def _attempt_html(
+        self,
+        candidate: FullTextCandidate,
+        resource: ResolvedLiteratureResource,
+        request: LiteratureAcquisitionRequest,
+        repositories: KnowledgeRepositories,
+        evidence_store: SourceEvidenceStore,
+        explicit_metadata: Mapping[str, object] | None,
+    ) -> _CandidateResult:
+        _, base_manifest = _merge_metadata(
+            explicit_metadata,
+            _metadata_from_resource(resource),
+            {},
+            domain=request.requested_domain,
+        )
+        try:
+            response = self.fetcher.fetch(
+                candidate.url or "", allowed_content_types=SUPPORTED_HTML_TYPES
+            )
+            extraction = self.html_extractor.extract(response.url, response.body)
+        except (AcquisitionError, SafeHTTPError) as error:
+            return _CandidateResult(
+                status=AcquisitionStatus.FULLTEXT_UNAVAILABLE,
+                failure_code=(error.code if isinstance(error, SafeHTTPError) else "HTML_EXTRACTION_FAILED"),
+                http_status=(error.status if isinstance(error, SafeHTTPError) else None),
+                manifest=base_manifest,
+                warnings=(str(error),),
+            )
+        if (
+            candidate.content_sha256 is not None
+            and candidate.content_sha256 != extraction.artifact_sha256
+        ):
+            return _CandidateResult(
+                status=AcquisitionStatus.FAILED,
+                failure_code="CONTENT_HASH_CHANGED",
+                http_status=response.status,
+                manifest=base_manifest,
+            )
+        metadata, manifest = _merge_metadata(
+            explicit_metadata,
+            _metadata_from_resource(resource),
+            {},
+            domain=request.requested_domain,
+        )
+        if metadata is None:
+            return _CandidateResult(
+                status=AcquisitionStatus.METADATA_ONLY,
+                failure_code="INCOMPLETE_METADATA",
+                http_status=response.status,
+                manifest=manifest,
+            )
+        literature_id = literature_identity_id(
+            title=metadata.title,
+            authors=metadata.authors,
+            year=metadata.year,
+            doi=metadata.doi,
+        )
+        media_type = response.headers.get("content-type", "").split(";", 1)[0]
+        raw = repositories.raw_html_literature_artifacts.put(
+            response.body,
+            source_url=response.url,
+            literature_id=literature_id,
+            media_type=media_type,
+        )
+        canonical = repositories.canonical_html_text_artifacts.put(
+            extraction.canonical_text,
+            raw_artifact=raw,
+            extractor_id=self.html_extractor.extractor_id,
+            extractor_version=self.html_extractor.extractor_version,
+            extractor_config_hash=self.html_extractor.extractor_config_hash,
+            blocks=extraction.blocks,
+        )
+        canonical_path = repositories.root.joinpath(
+            *Path(canonical.stored_path).parts
+        )
+        source = evidence_store.ingest(
+            canonical_path,
+            f"source-{literature_id}",
+            f"html-{canonical.canonical_text_id.removeprefix('canonical-html-text-')}",
+            metadata.title,
+            source_role="literature_author",
+            source_type="literature_article",
+        )
+        ingestion = self._html_ingestion(raw, canonical, source)
+        repositories.html_literature_ingestions.put(
+            ingestion.ingestion_id, ingestion
+        )
+        self._finalize_html_document(
+            metadata, raw, canonical, source, repositories
+        )
+        representation = self._representation(
+            kind=LiteratureRepresentationKind.HTML,
+            literature_id=literature_id,
+            raw_artifact_id=raw.artifact_id,
+            raw_artifact_hash=raw.content_hash,
+            canonical_text_id=canonical.canonical_text_id,
+            canonical_text_hash=canonical.content_hash,
+            ingestion_id=ingestion.ingestion_id,
+            ingestion_hash=ingestion.content_hash,
+            source_id=source.source_id,
+            source_version=source.version,
+        )
+        repositories.literature_representation_refs.put(
+            representation.representation_id, representation
+        )
+        validate_literature_representation(
+            representation, repositories, evidence_store
+        )
+        return _CandidateResult(
+            status=AcquisitionStatus.INGESTED,
+            failure_code=None,
+            http_status=response.status,
+            manifest=manifest,
+            literature_id=literature_id,
+            raw_artifact_id=raw.artifact_id,
+            raw_artifact_hash=raw.content_hash,
+            canonical_text_id=canonical.canonical_text_id,
+            canonical_text_hash=canonical.content_hash,
+            ingestion_id=ingestion.ingestion_id,
+            ingestion_hash=ingestion.content_hash,
+            representation=representation,
+        )
+
+    def _html_ingestion(
+        self,
+        raw: RawHTMLLiteratureArtifact,
+        canonical: CanonicalHTMLTextArtifact,
+        source: SourceDocument,
+    ) -> HTMLLiteratureIngestionRecord:
+        identity = {
+            "literature_id": raw.literature_id,
+            "raw_artifact_id": raw.artifact_id,
+            "raw_artifact_hash": raw.content_hash,
+            "canonical_text_id": canonical.canonical_text_id,
+            "canonical_text_hash": canonical.content_hash,
+            "source_id": source.source_id,
+            "source_version": source.version,
+            "extractor_id": canonical.extractor_id,
+            "extractor_version": canonical.extractor_version,
+            "extractor_config_hash": canonical.extractor_config_hash,
+            "ingestion_status": LiteratureIngestionStatus.ACCEPTED,
+        }
+        ingestion_id = f"html-literature-ingestion-{content_hash(identity)[:24]}"
+        payload = {"ingestion_id": ingestion_id, **identity}
+        return HTMLLiteratureIngestionRecord(
+            **payload, content_hash=content_hash(payload)
+        )
+
+    @staticmethod
+    def _finalize_html_document(
+        metadata: LiteratureMetadata,
+        raw: RawHTMLLiteratureArtifact,
+        canonical: CanonicalHTMLTextArtifact,
+        source: SourceDocument,
+        repositories: KnowledgeRepositories,
+    ) -> LiteratureDocument:
+        try:
+            return repositories.literature_documents.get(raw.literature_id)
+        except FileNotFoundError:
+            pass
+        identity = {
+            **metadata.model_dump(mode="json", exclude_none=True),
+            "literature_id": raw.literature_id,
+            "raw_artifact_ref": raw.stored_path,
+            "canonical_text_ref": canonical.stored_path,
+            "source_id": source.source_id,
+            "source_version": source.version,
+        }
+        document = LiteratureDocument(
+            **identity, content_hash=content_hash(identity)
+        )
+        repositories.literature_documents.put(document.literature_id, document)
+        return document
+
+    @staticmethod
+    def _representation(
+        *,
+        kind: LiteratureRepresentationKind,
+        literature_id: str,
+        raw_artifact_id: str,
+        raw_artifact_hash: str,
+        canonical_text_id: str | None,
+        canonical_text_hash: str | None,
+        ingestion_id: str,
+        ingestion_hash: str,
+        source_id: str | None,
+        source_version: str | None,
+    ) -> LiteratureRepresentationReference:
+        identity = {
+            "representation_kind": kind,
+            "literature_id": literature_id,
+            "raw_artifact_id": raw_artifact_id,
+            "raw_artifact_hash": raw_artifact_hash,
+            "canonical_text_id": canonical_text_id,
+            "canonical_text_hash": canonical_text_hash,
+            "ingestion_id": ingestion_id,
+            "ingestion_hash": ingestion_hash,
+            "source_id": source_id,
+            "source_version": source_version,
+        }
+        identity = {key: value for key, value in identity.items() if value is not None}
+        representation_id = f"literature-representation-{content_hash(identity)[:24]}"
+        payload = {"representation_id": representation_id, **identity}
+        return LiteratureRepresentationReference(
+            **payload, content_hash=content_hash(payload)
+        )
+
+    @staticmethod
+    def _make_attempt(
+        request: LiteratureAcquisitionRequest,
+        candidate: FullTextCandidate,
+        attempt_index: int,
+        result: _CandidateResult,
+    ) -> AcquisitionAttemptRecord:
+        identity = {
+            "request_id": request.request_id,
+            "request_hash": request.content_hash,
+            "candidate_id": candidate.candidate_id,
+            "candidate_hash": candidate.content_hash,
+            "attempt_index": attempt_index,
+            "status": result.status,
+            "http_status": result.http_status,
+            "media_type": candidate.media_type,
+            "failure_code": result.failure_code,
+            "raw_artifact_id": result.raw_artifact_id,
+            "raw_artifact_hash": result.raw_artifact_hash,
+            "canonical_text_id": result.canonical_text_id,
+            "canonical_text_hash": result.canonical_text_hash,
+            "ingestion_id": result.ingestion_id,
+            "ingestion_hash": result.ingestion_hash,
+            "representation_id": (
+                result.representation.representation_id
+                if result.representation is not None
+                else None
+            ),
+            "representation_hash": (
+                result.representation.content_hash
+                if result.representation is not None
+                else None
+            ),
+            "metadata_merge_manifest_id": result.manifest.manifest_id,
+            "metadata_merge_manifest_hash": result.manifest.content_hash,
+        }
+        identity = {key: value for key, value in identity.items() if value is not None}
+        attempt_id = f"acquisition-attempt-{content_hash(identity)[:24]}"
+        payload = {"attempt_id": attempt_id, **identity}
+        return AcquisitionAttemptRecord(
+            **payload, content_hash=content_hash(payload)
         )
 
     @staticmethod
@@ -913,16 +1735,7 @@ class LiteratureAcquisitionService:
         input_kind: AcquisitionInputKind,
         domain: str,
     ) -> LiteratureAcquisitionRequest:
-        identity = {
-            "original_input": original_input.strip(),
-            "input_kind": input_kind,
-            "requested_domain": domain,
-        }
-        request_id = f"literature-acquisition-request-{content_hash(identity)[:24]}"
-        payload = {"request_id": request_id, **identity}
-        return LiteratureAcquisitionRequest(
-            **payload, content_hash=content_hash(payload)
-        )
+        return _make_request(original_input, input_kind, domain)
 
     @staticmethod
     def _finish(
@@ -933,9 +1746,12 @@ class LiteratureAcquisitionService:
         *,
         status: AcquisitionStatus,
         candidate: FullTextCandidate | None = None,
+        manifest: MetadataMergeManifest | None = None,
+        attempts: tuple[AcquisitionAttemptRecord, ...] = (),
         literature_id: str | None = None,
         ingestion_id: str | None = None,
         canonical_text_id: str | None = None,
+        representation: LiteratureRepresentationReference | None = None,
         warnings: tuple[str, ...] = (),
     ) -> LiteratureAcquisitionOutcome:
         identity = {
@@ -947,9 +1763,19 @@ class LiteratureAcquisitionService:
             "resolved_resource_hash": resource.content_hash,
             "selected_candidate_id": candidate.candidate_id if candidate else None,
             "selected_candidate_hash": candidate.content_hash if candidate else None,
+            "metadata_merge_manifest_id": manifest.manifest_id if manifest else None,
+            "metadata_merge_manifest_hash": manifest.content_hash if manifest else None,
+            "attempt_refs": tuple(item.attempt_id for item in attempts),
+            "attempt_hashes": tuple(item.content_hash for item in attempts),
             "resulting_literature_id": literature_id,
             "resulting_ingestion_id": ingestion_id,
             "resulting_canonical_text_id": canonical_text_id,
+            "resulting_representation_id": (
+                representation.representation_id if representation else None
+            ),
+            "resulting_representation_hash": (
+                representation.content_hash if representation else None
+            ),
             "status": status,
             "warnings": warnings,
         }
@@ -976,6 +1802,10 @@ class LiteratureAcquisitionService:
             literature_id=literature_id,
             ingestion_id=ingestion_id,
             canonical_text_id=canonical_text_id,
+            representation_id=(
+                representation.representation_id if representation else None
+            ),
             acquisition_id=record.acquisition_id,
+            attempt_ids=tuple(item.attempt_id for item in attempts),
             warnings=warnings,
         )

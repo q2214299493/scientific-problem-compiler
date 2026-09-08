@@ -11,8 +11,10 @@ from typing import Generic, Iterable, TypeVar
 from pydantic import BaseModel
 
 from .models import (
+    AcquisitionAttemptRecord,
     CanonicalTextArtifact,
     CanonicalTextBlock,
+    CanonicalHTMLTextArtifact,
     DomainProfile,
     EvidenceSpan,
     ExpertAttributionRecord,
@@ -20,6 +22,7 @@ from .models import (
     ExpertOpinion,
     ExpertProfile,
     HistoricalLiteratureEvidenceAuthorization,
+    HTMLLiteratureIngestionRecord,
     KnowledgeSnapshot,
     KnowledgeCurationRecord,
     KnowledgeRelation,
@@ -28,10 +31,14 @@ from .models import (
     LiteratureDocument,
     LiteratureIngestionRecord,
     LiteratureRepresentationSelection,
+    LiteratureRepresentationReference,
     LiteratureWorkflowPattern,
     MethodFact,
+    MetadataMergeManifest,
+    MetadataRetrievalRecord,
     ModelFact,
     RawLiteratureArtifact,
+    RawHTMLLiteratureArtifact,
     ReportedResult,
     ResolvedLiteratureResource,
     ScientificCapability,
@@ -652,6 +659,193 @@ class CanonicalTextArtifactRepository(RawLiteratureArtifactRepository):
                 )
 
 
+class RawHTMLLiteratureArtifactRepository(RawLiteratureArtifactRepository):
+    def __init__(self, knowledge_root: Path) -> None:
+        self.knowledge_root = knowledge_root
+        self.root = knowledge_root / "html_literature_artifacts"
+
+    def put(
+        self,
+        content: bytes,
+        *,
+        source_url: str,
+        literature_id: str,
+        media_type: str,
+    ) -> RawHTMLLiteratureArtifact:
+        require_safe_path_component(literature_id, field="literature_id")
+        if media_type not in {"text/html", "application/xhtml+xml"}:
+            raise ValueError("HTML artifact requires an HTML media type")
+        digest = hashlib.sha256(content).hexdigest()
+        identity = {
+            "source_url": source_url,
+            "literature_id": literature_id,
+            "sha256": digest,
+        }
+        artifact_id = f"html-artifact-{content_hash(identity)[:24]}"
+        payload = {
+            "artifact_id": artifact_id,
+            **identity,
+            "media_type": media_type,
+            "byte_size": len(content),
+            "stored_path": (
+                f"html_literature_artifacts/{artifact_id}/artifact.html"
+            ),
+        }
+        record = RawHTMLLiteratureArtifact(
+            **payload, content_hash=content_hash(payload)
+        )
+        destination = self.root / artifact_id
+        if destination.exists():
+            existing = self.get(artifact_id)
+            if existing != record:
+                raise FileExistsError(
+                    f"refusing to overwrite different HTML artifact: {artifact_id}"
+                )
+            return existing
+        self._write_directory(destination, "artifact.html", content, record)
+        return self.get(artifact_id)
+
+    def get(self, artifact_id: str) -> RawHTMLLiteratureArtifact:
+        require_safe_path_component(artifact_id, field="artifact_id")
+        directory = self.root / artifact_id
+        content_path = directory / "artifact.html"
+        metadata_path = directory / "metadata.json"
+        self._validate_paths(directory, content_path, metadata_path)
+        record = load_model(metadata_path, RawHTMLLiteratureArtifact)
+        if record.artifact_id != artifact_id:
+            raise ValueError("HTML artifact metadata ID does not match its directory")
+        content = content_path.read_bytes()
+        if len(content) != record.byte_size:
+            raise ValueError("raw HTML artifact byte size changed")
+        if hashlib.sha256(content).hexdigest() != record.sha256:
+            raise ValueError("raw HTML artifact hash changed")
+        return record
+
+    def list(self) -> tuple[RawHTMLLiteratureArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(
+            self.get(path.name)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir() or path.is_symlink()
+        )
+
+    def list_metadata(self) -> tuple[RawHTMLLiteratureArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(
+            load_model(path / "metadata.json", RawHTMLLiteratureArtifact)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir() or path.is_symlink()
+        )
+
+
+class CanonicalHTMLTextArtifactRepository(RawLiteratureArtifactRepository):
+    def __init__(self, knowledge_root: Path) -> None:
+        self.knowledge_root = knowledge_root
+        self.root = knowledge_root / "canonical_html_text"
+
+    def put(
+        self,
+        text: str,
+        *,
+        raw_artifact: RawHTMLLiteratureArtifact,
+        extractor_id: str,
+        extractor_version: str,
+        extractor_config_hash: str,
+        blocks: tuple[CanonicalTextBlock, ...],
+    ) -> CanonicalHTMLTextArtifact:
+        encoded = text.encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        identity = {
+            "literature_id": raw_artifact.literature_id,
+            "raw_artifact_id": raw_artifact.artifact_id,
+            "raw_artifact_hash": raw_artifact.content_hash,
+            "source_url": raw_artifact.source_url,
+            "extractor_id": extractor_id,
+            "extractor_version": extractor_version,
+            "extractor_config_hash": extractor_config_hash,
+            "text_sha256": digest,
+            "character_count": len(text),
+            "blocks": blocks,
+        }
+        canonical_text_id = f"canonical-html-text-{content_hash(identity)[:24]}"
+        payload = {
+            "canonical_text_id": canonical_text_id,
+            **identity,
+            "stored_path": (
+                f"canonical_html_text/{canonical_text_id}/content.txt"
+            ),
+        }
+        record = CanonicalHTMLTextArtifact(
+            **payload, content_hash=content_hash(payload)
+        )
+        self._verify_blocks(record, text)
+        destination = self.root / canonical_text_id
+        if destination.exists():
+            existing = self.get(canonical_text_id)
+            if existing != record:
+                raise FileExistsError(
+                    f"refusing to overwrite different HTML text: {canonical_text_id}"
+                )
+            return existing
+        self._write_directory(destination, "content.txt", encoded, record)
+        return self.get(canonical_text_id)
+
+    def get(self, canonical_text_id: str) -> CanonicalHTMLTextArtifact:
+        require_safe_path_component(canonical_text_id, field="canonical_text_id")
+        directory = self.root / canonical_text_id
+        content_path = directory / "content.txt"
+        metadata_path = directory / "metadata.json"
+        self._validate_paths(directory, content_path, metadata_path)
+        record = load_model(metadata_path, CanonicalHTMLTextArtifact)
+        if record.canonical_text_id != canonical_text_id:
+            raise ValueError("HTML canonical metadata ID does not match directory")
+        try:
+            text = content_path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("HTML canonical text is not valid UTF-8") from error
+        if len(text) != record.character_count:
+            raise ValueError("HTML canonical text character count changed")
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != record.text_sha256:
+            raise ValueError("HTML canonical text hash changed")
+        self._verify_blocks(record, text)
+        return record
+
+    def read_text(self, canonical_text_id: str) -> str:
+        record = self.get(canonical_text_id)
+        return self.knowledge_root.joinpath(
+            *PurePosixPath(record.stored_path).parts
+        ).read_text(encoding="utf-8")
+
+    def list(self) -> tuple[CanonicalHTMLTextArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(
+            self.get(path.name)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir() or path.is_symlink()
+        )
+
+    def list_metadata(self) -> tuple[CanonicalHTMLTextArtifact, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(
+            load_model(path / "metadata.json", CanonicalHTMLTextArtifact)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir() or path.is_symlink()
+        )
+
+    @staticmethod
+    def _verify_blocks(record: CanonicalHTMLTextArtifact, text: str) -> None:
+        for block in record.blocks:
+            recovered = text[block.start_offset : block.end_offset]
+            if hashlib.sha256(recovered.encode("utf-8")).hexdigest() != block.text_hash:
+                raise ValueError(
+                    f"HTML block does not recover exact text: {block.block_id}"
+                )
+
+
 class LiteratureArtifactStore:
     def __init__(self, knowledge_root: Path) -> None:
         self.raw_artifacts = RawLiteratureArtifactRepository(knowledge_root)
@@ -777,6 +971,61 @@ class LiteratureAcquisitionRepository(
         )
 
 
+class AcquisitionAttemptRepository(
+    IdentityBoundRepository[AcquisitionAttemptRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "acquisition_attempts",
+            AcquisitionAttemptRecord,
+            "attempt_id",
+        )
+
+
+class MetadataRetrievalRepository(
+    IdentityBoundRepository[MetadataRetrievalRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "metadata_retrievals",
+            MetadataRetrievalRecord,
+            "retrieval_id",
+        )
+
+
+class MetadataMergeManifestRepository(
+    IdentityBoundRepository[MetadataMergeManifest]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "metadata_merge_manifests",
+            MetadataMergeManifest,
+            "manifest_id",
+        )
+
+
+class HTMLLiteratureIngestionRepository(
+    IdentityBoundRepository[HTMLLiteratureIngestionRecord]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "html_literature_ingestions",
+            HTMLLiteratureIngestionRecord,
+            "ingestion_id",
+        )
+
+
+class LiteratureRepresentationReferenceRepository(
+    IdentityBoundRepository[LiteratureRepresentationReference]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "literature_representation_refs",
+            LiteratureRepresentationReference,
+            "representation_id",
+        )
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -787,7 +1036,14 @@ class KnowledgeRepositories:
         self.literature_artifacts = LiteratureArtifactStore(root)
         self.raw_literature_artifacts = self.literature_artifacts.raw_artifacts
         self.canonical_text_artifacts = self.literature_artifacts.canonical_texts
+        self.raw_html_literature_artifacts = (
+            RawHTMLLiteratureArtifactRepository(root)
+        )
+        self.canonical_html_text_artifacts = (
+            CanonicalHTMLTextArtifactRepository(root)
+        )
         self.literature_ingestions = LiteratureIngestionRepository(root)
+        self.html_literature_ingestions = HTMLLiteratureIngestionRepository(root)
         self.literature_representation_selections = (
             LiteratureRepresentationSelectionRepository(root)
         )
@@ -799,6 +1055,12 @@ class KnowledgeRepositories:
             ResolvedLiteratureResourceRepository(root)
         )
         self.literature_acquisitions = LiteratureAcquisitionRepository(root)
+        self.acquisition_attempts = AcquisitionAttemptRepository(root)
+        self.metadata_retrievals = MetadataRetrievalRepository(root)
+        self.metadata_merge_manifests = MetadataMergeManifestRepository(root)
+        self.literature_representation_refs = (
+            LiteratureRepresentationReferenceRepository(root)
+        )
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.expert_attributions = ExpertAttributionRepository(root)

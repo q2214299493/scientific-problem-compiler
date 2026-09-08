@@ -1,6 +1,7 @@
 """Scientific Problem Compiler public API."""
 
 from .models import (
+    AcquisitionAttemptRecord,
     AcquisitionInputKind,
     AcquisitionStatus,
     ApprovalLLMResponse,
@@ -9,6 +10,7 @@ from .models import (
     ApprovalVerdict,
     CanonicalTextArtifact,
     CanonicalTextBlock,
+    CanonicalHTMLTextArtifact,
     CurationStatus,
     ExecutionProposal,
     ExpertAttributionRecord,
@@ -18,6 +20,7 @@ from .models import (
     FullTextCandidate,
     FullTextSourceKind,
     HistoricalLiteratureEvidenceAuthorization,
+    HTMLLiteratureIngestionRecord,
     IndependentApprovalReceipt,
     KnowledgeCurationRecord,
     KnowledgeGraph,
@@ -33,6 +36,9 @@ from .models import (
     LiteratureIngestionStatus,
     LiteratureRepresentationSelection,
     LiteratureRepresentationSelectionOutcome,
+    LiteratureRepresentationReference,
+    MetadataMergeManifest,
+    MetadataRetrievalRecord,
     ResolvedLiteratureResource,
     PlanCompilationReceipt,
     PlanValidationRecord,
@@ -40,6 +46,7 @@ from .models import (
     PlanningProposalSet,
     ProjectTrustPolicy,
     RawLiteratureArtifact,
+    RawHTMLLiteratureArtifact,
     ScientificPlanningInput,
     ScientificQuestionPlan,
     ScientificTaskExecutionContext,
@@ -47,6 +54,7 @@ from .models import (
 )
 
 __all__ = [
+    "AcquisitionAttemptRecord",
     "AcquisitionInputKind",
     "AcquisitionStatus",
     "ApprovalLLMResponse",
@@ -55,6 +63,7 @@ __all__ = [
     "ApprovalVerdict",
     "CanonicalTextArtifact",
     "CanonicalTextBlock",
+    "CanonicalHTMLTextArtifact",
     "CurationStatus",
     "ExecutionProposal",
     "ExpertAttributionRecord",
@@ -64,6 +73,7 @@ __all__ = [
     "FullTextCandidate",
     "FullTextSourceKind",
     "HistoricalLiteratureEvidenceAuthorization",
+    "HTMLLiteratureIngestionRecord",
     "IndependentApprovalReceipt",
     "KnowledgeCurationRecord",
     "KnowledgeGraph",
@@ -79,6 +89,9 @@ __all__ = [
     "LiteratureIngestionStatus",
     "LiteratureRepresentationSelection",
     "LiteratureRepresentationSelectionOutcome",
+    "LiteratureRepresentationReference",
+    "MetadataMergeManifest",
+    "MetadataRetrievalRecord",
     "ResolvedLiteratureResource",
     "PlanCompilationReceipt",
     "PlanValidationRecord",
@@ -86,6 +99,7 @@ __all__ = [
     "PlanningProposalSet",
     "ProjectTrustPolicy",
     "RawLiteratureArtifact",
+    "RawHTMLLiteratureArtifact",
     "ScientificPlanningInput",
     "ScientificQuestionPlan",
     "ScientificTaskExecutionContext",
