@@ -535,7 +535,7 @@ class LocalPDFResolver:
 
 class DOIResolver:
     resolver_id = "crossref-doi-resolver"
-    resolver_version = "1.0.0"
+    resolver_version = "1.1.0"
 
     def __init__(self, fetcher: SafeHTTPFetcher) -> None:
         self.fetcher = fetcher
@@ -592,37 +592,16 @@ class DOIResolver:
                     priority=priority,
                 )
             )
-        fallback: ResolvedLiteratureResource | None = None
-        if not candidates and landing_url:
-            fallback_resolver = ArticleURLResolver(self.fetcher)
-            fallback_request = _make_request(
-                landing_url, AcquisitionInputKind.URL, request.requested_domain
-            )
-            try:
-                fallback = fallback_resolver.resolve(fallback_request)
-            except AcquisitionError:
-                fallback = None
-            self.metadata_retrievals = (
-                crossref_retrieval,
-                *fallback_resolver.metadata_retrievals,
-            )
-        merged_candidates = _reprioritize_candidates(
-            (
-                *tuple(candidates),
-                *(fallback.fulltext_candidates if fallback is not None else ()),
-            )
-        )
+        merged_candidates = _reprioritize_candidates(tuple(candidates))
         return _make_resource(
             canonical_identifier=doi,
             doi=doi,
-            title=title or (fallback.title if fallback is not None else None),
-            authors=authors or (fallback.authors if fallback is not None else ()),
-            year=year or (fallback.year if fallback is not None else None),
-            journal=journal or (fallback.journal if fallback is not None else None),
+            title=title,
+            authors=authors,
+            year=year,
+            journal=journal,
             landing_url=landing_url,
-            metadata_source=(
-                "crossref+article-url" if fallback is not None else "crossref"
-            ),
+            metadata_source="crossref",
             metadata_retrieval_refs=tuple(
                 item.retrieval_id for item in self.metadata_retrievals
             ),
@@ -1158,88 +1137,194 @@ class LiteratureAcquisitionService:
                 retrieval.retrieval_id, retrieval
             )
         repositories.resolved_literature_resources.put(resource.resource_id, resource)
-        candidates = tuple(
-            item
-            for item in resource.fulltext_candidates
-            if item.access_status
-            in {
-                FullTextAccessStatus.DISCOVERED,
-                FullTextAccessStatus.ACCESSIBLE,
-            }
-        )
-        if not candidates:
-            status = (
-                AcquisitionStatus.FULLTEXT_UNAVAILABLE
-                if resource.resolution_status
-                in {
-                    AcquisitionStatus.FULLTEXT_UNAVAILABLE,
-                    AcquisitionStatus.METADATA_RESOLVED,
-                }
-                else resource.resolution_status
-            )
-            return self._finish(
-                request, resolver, resource, repositories, status=status
-            )
         attempts: list[AcquisitionAttemptRecord] = []
         results: list[_CandidateResult] = []
-        for attempt_index, candidate in enumerate(candidates):
-            result = self._attempt_candidate(
-                candidate,
-                resource,
-                request,
-                repositories,
-                evidence_store,
-                explicit_metadata,
-            )
-            repositories.metadata_merge_manifests.put(
-                result.manifest.manifest_id, result.manifest
-            )
-            attempt = self._make_attempt(
-                request, candidate, attempt_index, result
-            )
-            repositories.acquisition_attempts.put(attempt.attempt_id, attempt)
-            attempts.append(attempt)
-            results.append(result)
-            if result.status == AcquisitionStatus.INGESTED:
-                return self._finish(
-                    request,
-                    resolver,
-                    resource,
-                    repositories,
-                    status=AcquisitionStatus.INGESTED,
-                    candidate=candidate,
-                    manifest=result.manifest,
-                    attempts=tuple(attempts),
-                    literature_id=result.literature_id,
-                    ingestion_id=result.ingestion_id,
-                    canonical_text_id=result.canonical_text_id,
-                    representation=result.representation,
-                    warnings=result.warnings,
+        attempted_keys: set[tuple[str | None, str | None, str]] = set()
+        discovery_failure_codes: list[str] = []
+        active_resource = resource
+        stages = 2 if input_kind == AcquisitionInputKind.DOI else 1
+        for stage_index in range(stages):
+            if stage_index == 1:
+                active_resource, discovery_code = self._discover_doi_landing(
+                    request, active_resource, repositories
                 )
-        final_status = (
-            AcquisitionStatus.METADATA_ONLY
-            if any(item.status == AcquisitionStatus.METADATA_ONLY for item in results)
-            else AcquisitionStatus.FULLTEXT_UNAVAILABLE
+                if discovery_code is not None:
+                    discovery_failure_codes.append(discovery_code)
+            candidates = tuple(
+                item
+                for item in active_resource.fulltext_candidates
+                if item.access_status
+                in {
+                    FullTextAccessStatus.DISCOVERED,
+                    FullTextAccessStatus.ACCESSIBLE,
+                }
+                and self._candidate_key(item) not in attempted_keys
+            )
+            for candidate in candidates:
+                attempted_keys.add(self._candidate_key(candidate))
+                result = self._attempt_candidate(
+                    candidate,
+                    active_resource,
+                    request,
+                    repositories,
+                    evidence_store,
+                    explicit_metadata,
+                )
+                repositories.metadata_merge_manifests.put(
+                    result.manifest.manifest_id, result.manifest
+                )
+                attempt = self._make_attempt(
+                    request, candidate, len(attempts), result
+                )
+                repositories.acquisition_attempts.put(attempt.attempt_id, attempt)
+                attempts.append(attempt)
+                results.append(result)
+                if result.status == AcquisitionStatus.INGESTED:
+                    return self._finish(
+                        request,
+                        resolver,
+                        active_resource,
+                        repositories,
+                        status=AcquisitionStatus.INGESTED,
+                        candidate=candidate,
+                        manifest=result.manifest,
+                        attempts=tuple(attempts),
+                        literature_id=result.literature_id,
+                        ingestion_id=result.ingestion_id,
+                        canonical_text_id=result.canonical_text_id,
+                        representation=result.representation,
+                        warnings=result.warnings,
+                    )
+        final_status = self._final_failure_status(
+            results, discovery_failure_codes, active_resource
         )
         warnings = tuple(
             dict.fromkeys(
-                warning
-                for result in results
-                for warning in (
-                    *result.warnings,
-                    *((result.failure_code,) if result.failure_code else ()),
+                (
+                    *(
+                        warning
+                        for result in results
+                        for warning in (
+                            *result.warnings,
+                            *((result.failure_code,) if result.failure_code else ()),
+                        )
+                    ),
+                    *discovery_failure_codes,
                 )
             )
         )
         return self._finish(
             request,
             resolver,
-            resource,
+            active_resource,
             repositories,
             status=final_status,
             attempts=tuple(attempts),
             warnings=warnings,
         )
+
+    @staticmethod
+    def _candidate_key(
+        candidate: FullTextCandidate,
+    ) -> tuple[str | None, str | None, str]:
+        return (candidate.url, candidate.local_path_ref, candidate.media_type)
+
+    def _discover_doi_landing(
+        self,
+        request: LiteratureAcquisitionRequest,
+        resource: ResolvedLiteratureResource,
+        repositories: KnowledgeRepositories,
+    ) -> tuple[ResolvedLiteratureResource, str | None]:
+        if not resource.landing_url:
+            return resource, None
+        resolver = ArticleURLResolver(self.fetcher)
+        fallback_request = _make_request(
+            resource.landing_url,
+            AcquisitionInputKind.URL,
+            request.requested_domain,
+        )
+        try:
+            fallback = resolver.resolve(fallback_request)
+        except SafeHTTPError as error:
+            return resource, error.code
+        except AcquisitionError:
+            return resource, "LANDING_DISCOVERY_FAILED"
+        for retrieval in resolver.metadata_retrievals:
+            repositories.metadata_retrievals.put(
+                retrieval.retrieval_id, retrieval
+            )
+        retrieval_pairs = tuple(
+            dict.fromkeys(
+                (
+                    *zip(
+                        resource.metadata_retrieval_refs,
+                        resource.metadata_retrieval_hashes,
+                    ),
+                    *(
+                        (item.retrieval_id, item.content_hash)
+                        for item in resolver.metadata_retrievals
+                    ),
+                )
+            )
+        )
+        candidates = _reprioritize_candidates(
+            (*resource.fulltext_candidates, *fallback.fulltext_candidates)
+        )
+        enriched = _make_resource(
+            canonical_identifier=resource.canonical_identifier,
+            doi=resource.doi or fallback.doi,
+            title=resource.title or fallback.title,
+            authors=resource.authors or fallback.authors,
+            year=resource.year or fallback.year,
+            journal=resource.journal or fallback.journal,
+            landing_url=resource.landing_url,
+            metadata_source=f"{resource.metadata_source}+article-url",
+            metadata_retrieval_refs=tuple(item[0] for item in retrieval_pairs),
+            metadata_retrieval_hashes=tuple(item[1] for item in retrieval_pairs),
+            fulltext_candidates=candidates,
+            resolution_status=(
+                AcquisitionStatus.FULLTEXT_FOUND
+                if candidates
+                else AcquisitionStatus.FULLTEXT_UNAVAILABLE
+            ),
+        )
+        repositories.resolved_literature_resources.put(
+            enriched.resource_id, enriched
+        )
+        return enriched, None
+
+    @staticmethod
+    def _final_failure_status(
+        results: list[_CandidateResult],
+        discovery_failure_codes: list[str],
+        resource: ResolvedLiteratureResource,
+    ) -> AcquisitionStatus:
+        if any(item.status == AcquisitionStatus.METADATA_ONLY for item in results):
+            return AcquisitionStatus.METADATA_ONLY
+        failure_codes = [
+            item.failure_code for item in results if item.failure_code is not None
+        ] + discovery_failure_codes
+        if failure_codes and all(
+            code == "REQUIRES_AUTHENTICATION" for code in failure_codes
+        ):
+            return AcquisitionStatus.REQUIRES_AUTHENTICATION
+        if results and all(
+            item.status == AcquisitionStatus.UNSUPPORTED_MEDIA for item in results
+        ):
+            return AcquisitionStatus.UNSUPPORTED_MEDIA
+        hard_failures = {
+            "CONTENT_HASH_CHANGED",
+            "HTML_EXTRACTION_FAILED",
+            "LANDING_DISCOVERY_FAILED",
+            "NETWORK_ERROR",
+            "PDF_INGESTION_FAILED",
+            "REQUIRES_OCR",
+        }
+        if any(code in hard_failures for code in failure_codes):
+            return AcquisitionStatus.FAILED
+        if resource.resolution_status == AcquisitionStatus.UNSUPPORTED_MEDIA:
+            return AcquisitionStatus.UNSUPPORTED_MEDIA
+        return AcquisitionStatus.FULLTEXT_UNAVAILABLE
 
     def _attempt_candidate(
         self,

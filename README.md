@@ -240,3 +240,18 @@ before connection, while preserving the original Host header and TLS SNI, and
 repeats DNS validation after every redirect. Acquisition still creates no
 curation decision or scientific claim, fact, result, relation, or expert
 opinion.
+
+K1C.2 makes `LiteratureRepresentationReference` the common PDF/HTML trust
+contract. The generic selector binds only the chosen representation ID and
+hash; its accepted curation then controls the current raw/canonical/ingestion/
+source chain in trusted snapshots. Older PDF ingestion-based selections and
+historical authorizations are resolved through an explicit compatibility path.
+Unselected representations remain audit history, and evidence from either a
+historical PDF or HTML source requires the same immutable authorization record.
+
+DOI acquisition now attempts Crossref candidates first and inspects the DOI
+landing page exactly once only when none succeeds. Newly discovered candidates
+are deduplicated against prior attempts and continue the same deterministic
+attempt index sequence. Final status distinguishes authentication-only,
+unsupported-media, metadata-only, unavailable-full-text, and hard integrity or
+parser failures.

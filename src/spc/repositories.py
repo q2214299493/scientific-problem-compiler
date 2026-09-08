@@ -1175,6 +1175,10 @@ class KnowledgeRepositories:
             for item in self.literature_ingestions.list()
             if item.source_id is not None and item.source_version is not None
         }
+        literature_source_keys.update(
+            (item.source_id, item.source_version)
+            for item in self.html_literature_ingestions.list()
+        )
         trusted_evidence_ids = {
             record_id
             for (record_type, record_id) in trusted.trusted_records
@@ -1233,6 +1237,11 @@ class KnowledgeRepositories:
                 for (record_type, record_id), record in trusted.trusted_records.items()
                 if record_type == "literature_representation_selection"
             },
+            "literature_representation_hashes": {
+                record_id: record.content_hash
+                for (record_type, record_id), record in trusted.trusted_records.items()
+                if record_type == "literature_representation_ref"
+            },
             "historical_evidence_authorization_hashes": {
                 record_id: record.content_hash
                 for (record_type, record_id), record in trusted.trusted_records.items()
@@ -1275,6 +1284,7 @@ class KnowledgeRepositories:
                 "canonical_text_artifact_hashes",
                 "literature_ingestion_hashes",
                 "literature_representation_selection_hashes",
+                "literature_representation_hashes",
                 "historical_evidence_authorization_hashes",
                 "expert_profile_hashes",
                 "expert_opinion_hashes",

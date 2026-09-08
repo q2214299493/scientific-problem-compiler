@@ -1378,28 +1378,18 @@ class LiteratureRepresentationReference(StrictModel):
     literature_id: NonBlankStr
     raw_artifact_id: NonBlankStr
     raw_artifact_hash: Sha256Str
-    canonical_text_id: NonBlankStr | None = None
-    canonical_text_hash: Sha256Str | None = None
+    canonical_text_id: NonBlankStr
+    canonical_text_hash: Sha256Str
     ingestion_id: NonBlankStr
     ingestion_hash: Sha256Str
-    source_id: NonBlankStr | None = None
-    source_version: NonBlankStr | None = None
+    source_id: NonBlankStr
+    source_version: NonBlankStr
     content_hash: Sha256Str
 
     @model_validator(mode="after")
     def validate_identity(self) -> LiteratureRepresentationReference:
         from .serialization import content_hash
 
-        canonical_binding = (self.canonical_text_id, self.canonical_text_hash)
-        source_binding = (self.source_id, self.source_version)
-        for name, binding in (
-            ("canonical text", canonical_binding),
-            ("source", source_binding),
-        ):
-            if any(value is None for value in binding) and any(
-                value is not None for value in binding
-            ):
-                raise ValueError(f"representation {name} binding must be complete")
         identity = self.model_dump(
             mode="json", exclude={"representation_id", "content_hash"}, exclude_none=True
         )
@@ -1480,12 +1470,14 @@ class LiteratureIngestionRecord(StrictModel):
 class LiteratureRepresentationSelection(StrictModel):
     selection_id: NonBlankStr
     literature_id: NonBlankStr
-    ingestion_id: NonBlankStr
-    ingestion_hash: Sha256Str
-    canonical_text_id: NonBlankStr
-    canonical_text_hash: Sha256Str
-    source_id: NonBlankStr
-    source_version: NonBlankStr
+    representation_id: NonBlankStr | None = None
+    representation_hash: Sha256Str | None = None
+    ingestion_id: NonBlankStr | None = None
+    ingestion_hash: Sha256Str | None = None
+    canonical_text_id: NonBlankStr | None = None
+    canonical_text_hash: Sha256Str | None = None
+    source_id: NonBlankStr | None = None
+    source_version: NonBlankStr | None = None
     selected_by: NonBlankStr
     rationale: NonBlankStr
     supersedes_selection_id: NonBlankStr | None = None
@@ -1495,6 +1487,24 @@ class LiteratureRepresentationSelection(StrictModel):
     def validate_identity(self) -> LiteratureRepresentationSelection:
         from .serialization import content_hash
 
+        representation_binding = (self.representation_id, self.representation_hash)
+        legacy_binding = (
+            self.ingestion_id,
+            self.ingestion_hash,
+            self.canonical_text_id,
+            self.canonical_text_hash,
+            self.source_id,
+            self.source_version,
+        )
+        has_representation = all(value is not None for value in representation_binding)
+        has_legacy = all(value is not None for value in legacy_binding)
+        if has_representation == has_legacy or (
+            any(value is not None for value in representation_binding)
+            and not has_representation
+        ) or (any(value is not None for value in legacy_binding) and not has_legacy):
+            raise ValueError(
+                "selection requires exactly one complete representation or legacy binding"
+            )
         identity = self.model_dump(
             mode="json",
             exclude={"selection_id", "content_hash"},
@@ -1516,18 +1526,22 @@ class LiteratureRepresentationSelection(StrictModel):
 class LiteratureRepresentationSelectionOutcome(StrictModel):
     selection: LiteratureRepresentationSelection
     ingestion_status: LiteratureIngestionStatus
-    total_pages: int = Field(ge=0)
-    pages_with_text: int = Field(ge=0)
-    pages_without_text: int = Field(ge=0)
-    text_coverage_ratio: float = Field(ge=0, le=1, allow_inf_nan=False)
+    total_pages: int | None = Field(default=None, ge=0)
+    pages_with_text: int | None = Field(default=None, ge=0)
+    pages_without_text: int | None = Field(default=None, ge=0)
+    text_coverage_ratio: float | None = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False
+    )
     warnings: tuple[NonBlankStr, ...] = ()
 
 
 class HistoricalLiteratureEvidenceAuthorization(StrictModel):
     authorization_id: NonBlankStr
     literature_id: NonBlankStr
-    ingestion_id: NonBlankStr
-    ingestion_hash: Sha256Str
+    representation_id: NonBlankStr | None = None
+    representation_hash: Sha256Str | None = None
+    ingestion_id: NonBlankStr | None = None
+    ingestion_hash: Sha256Str | None = None
     source_id: NonBlankStr
     source_version: NonBlankStr
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
@@ -1539,6 +1553,17 @@ class HistoricalLiteratureEvidenceAuthorization(StrictModel):
     def validate_identity(self) -> HistoricalLiteratureEvidenceAuthorization:
         from .serialization import content_hash
 
+        representation_binding = (self.representation_id, self.representation_hash)
+        legacy_binding = (self.ingestion_id, self.ingestion_hash)
+        has_representation = all(value is not None for value in representation_binding)
+        has_legacy = all(value is not None for value in legacy_binding)
+        if has_representation == has_legacy or (
+            any(value is not None for value in representation_binding)
+            and not has_representation
+        ) or (any(value is not None for value in legacy_binding) and not has_legacy):
+            raise ValueError(
+                "historical authorization requires one representation or legacy ingestion binding"
+            )
         if len(set(self.evidence_refs)) != len(self.evidence_refs):
             raise ValueError(
                 "HistoricalLiteratureEvidenceAuthorization evidence_refs must be unique"
@@ -1546,6 +1571,7 @@ class HistoricalLiteratureEvidenceAuthorization(StrictModel):
         identity = self.model_dump(
             mode="json",
             exclude={"authorization_id", "content_hash"},
+            exclude_none=True,
         )
         expected_id = f"historical-evidence-authorization-{content_hash(identity)[:24]}"
         if self.authorization_id != expected_id:
@@ -1902,6 +1928,9 @@ class KnowledgeSnapshot(StrictModel):
         default_factory=dict, exclude_if=lambda value: not value
     )
     literature_representation_selection_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    literature_representation_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
     historical_evidence_authorization_hashes: dict[NonBlankStr, Sha256Str] = Field(

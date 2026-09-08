@@ -18,6 +18,8 @@ from ..models import (
     LiteratureIngestionOutcome,
     LiteratureIngestionRecord,
     LiteratureIngestionStatus,
+    LiteratureRepresentationKind,
+    LiteratureRepresentationReference,
     LiteratureRepresentationSelection,
     LiteratureRepresentationSelectionOutcome,
     NonBlankStr,
@@ -448,21 +450,111 @@ def validate_literature_ingestion_chain(
 
 
 class LiteratureRepresentationSelector:
+    @staticmethod
+    def _pdf_representation(
+        ingestion: LiteratureIngestionRecord,
+        repositories: KnowledgeRepositories,
+        evidence_store: SourceEvidenceStore,
+    ) -> LiteratureRepresentationReference:
+        chain = validate_literature_ingestion_chain(
+            ingestion, repositories, evidence_store
+        )
+        identity = {
+            "representation_kind": LiteratureRepresentationKind.PDF,
+            "literature_id": ingestion.literature_id,
+            "raw_artifact_id": chain.raw_artifact.artifact_id,
+            "raw_artifact_hash": chain.raw_artifact.content_hash,
+            "canonical_text_id": chain.canonical_text.canonical_text_id,
+            "canonical_text_hash": chain.canonical_text.content_hash,
+            "ingestion_id": ingestion.ingestion_id,
+            "ingestion_hash": ingestion.content_hash,
+            "source_id": chain.source.source_id,
+            "source_version": chain.source.version,
+        }
+        representation_id = (
+            f"literature-representation-{content_hash(identity)[:24]}"
+        )
+        payload = {"representation_id": representation_id, **identity}
+        representation = LiteratureRepresentationReference(
+            **payload, content_hash=content_hash(payload)
+        )
+        repositories.literature_representation_refs.put(
+            representation.representation_id, representation
+        )
+        return representation
+
+    @classmethod
+    def resolve_reference(
+        cls,
+        representation_or_ingestion_id: str,
+        repositories: KnowledgeRepositories,
+        evidence_store: SourceEvidenceStore,
+    ) -> LiteratureRepresentationReference:
+        try:
+            representation = repositories.literature_representation_refs.get(
+                representation_or_ingestion_id
+            )
+        except FileNotFoundError:
+            ingestion = repositories.literature_ingestions.get(
+                representation_or_ingestion_id
+            )
+            representation = cls._pdf_representation(
+                ingestion, repositories, evidence_store
+            )
+        from .acquisition import validate_literature_representation
+
+        return validate_literature_representation(
+            representation, repositories, evidence_store
+        )
+
+    @classmethod
+    def resolve_selection(
+        cls,
+        selection: LiteratureRepresentationSelection,
+        repositories: KnowledgeRepositories,
+        evidence_store: SourceEvidenceStore,
+    ) -> LiteratureRepresentationReference:
+        if selection.representation_id is not None:
+            representation = cls.resolve_reference(
+                selection.representation_id, repositories, evidence_store
+            )
+            if (
+                selection.representation_hash != representation.content_hash
+                or selection.literature_id != representation.literature_id
+            ):
+                raise ValueError("selection representation binding is invalid")
+            return representation
+        ingestion = repositories.literature_ingestions.get(
+            selection.ingestion_id or ""
+        )
+        chain = validate_literature_ingestion_chain(
+            ingestion, repositories, evidence_store
+        )
+        if (
+            selection.literature_id != ingestion.literature_id
+            or selection.ingestion_hash != ingestion.content_hash
+            or selection.canonical_text_id != chain.canonical_text.canonical_text_id
+            or selection.canonical_text_hash != chain.canonical_text.content_hash
+            or selection.source_id != chain.source.source_id
+            or selection.source_version != chain.source.version
+        ):
+            raise ValueError("selection binding is invalid")
+        return cls._pdf_representation(ingestion, repositories, evidence_store)
+
     def select(
         self,
         literature_id: str,
-        ingestion_id: str,
+        representation_id: str,
         selected_by: str,
         rationale: str,
         repositories: KnowledgeRepositories,
         evidence_store: SourceEvidenceStore,
     ) -> LiteratureRepresentationSelectionOutcome:
-        ingestion = repositories.literature_ingestions.get(ingestion_id)
-        if ingestion.literature_id != literature_id:
-            raise ValueError("ingestion belongs to another literature work")
-        chain = validate_literature_ingestion_chain(
-            ingestion, repositories, evidence_store
+        representation = self.resolve_reference(
+            representation_id, repositories, evidence_store
         )
+        if representation.literature_id != literature_id:
+            raise ValueError("representation belongs to another literature work")
         repository = repositories.literature_representation_selections
         try:
             current = repository.resolve_current(literature_id)
@@ -470,12 +562,8 @@ class LiteratureRepresentationSelector:
             current = None
         identity = {
             "literature_id": literature_id,
-            "ingestion_id": ingestion.ingestion_id,
-            "ingestion_hash": ingestion.content_hash,
-            "canonical_text_id": chain.canonical_text.canonical_text_id,
-            "canonical_text_hash": chain.canonical_text.content_hash,
-            "source_id": chain.source.source_id,
-            "source_version": chain.source.version,
+            "representation_id": representation.representation_id,
+            "representation_hash": representation.content_hash,
             "selected_by": selected_by,
             "rationale": rationale,
             "supersedes_selection_id": (
@@ -490,14 +578,32 @@ class LiteratureRepresentationSelector:
             content_hash=content_hash(payload),
         )
         repository.put(selection.selection_id, selection)
+        if representation.representation_kind == LiteratureRepresentationKind.PDF:
+            ingestion = repositories.literature_ingestions.get(
+                representation.ingestion_id
+            )
+            total_pages = ingestion.total_pages
+            pages_with_text = ingestion.pages_with_text
+            pages_without_text = ingestion.pages_without_text
+            text_coverage_ratio = ingestion.text_coverage_ratio
+            warnings = ingestion.warnings
+        else:
+            ingestion = repositories.html_literature_ingestions.get(
+                representation.ingestion_id
+            )
+            total_pages = None
+            pages_with_text = None
+            pages_without_text = None
+            text_coverage_ratio = None
+            warnings = ()
         return LiteratureRepresentationSelectionOutcome(
             selection=selection,
             ingestion_status=ingestion.ingestion_status,
-            total_pages=ingestion.total_pages,
-            pages_with_text=ingestion.pages_with_text,
-            pages_without_text=ingestion.pages_without_text,
-            text_coverage_ratio=ingestion.text_coverage_ratio,
-            warnings=ingestion.warnings,
+            total_pages=total_pages,
+            pages_with_text=pages_with_text,
+            pages_without_text=pages_without_text,
+            text_coverage_ratio=text_coverage_ratio,
+            warnings=warnings,
         )
 
 
@@ -511,38 +617,48 @@ def create_evidence_span_from_canonical_text(
     locator: str | None = None,
     historical_ingestion: bool = False,
 ) -> EvidenceSpan:
-    canonical = repositories.canonical_text_artifacts.get(canonical_text_id)
-    text = repositories.canonical_text_artifacts.read_text(canonical_text_id)
+    pdf_canonical_path = repositories.canonical_text_artifacts.root / canonical_text_id
+    if pdf_canonical_path.exists() or pdf_canonical_path.is_symlink():
+        canonical = repositories.canonical_text_artifacts.get(canonical_text_id)
+        text = repositories.canonical_text_artifacts.read_text(canonical_text_id)
+        representation_kind = LiteratureRepresentationKind.PDF
+    else:
+        canonical = repositories.canonical_html_text_artifacts.get(
+            canonical_text_id
+        )
+        text = repositories.canonical_html_text_artifacts.read_text(
+            canonical_text_id
+        )
+        representation_kind = LiteratureRepresentationKind.HTML
     if start_offset < 0 or end_offset <= start_offset or end_offset > len(text):
         raise ValueError("EvidenceSpan offsets are outside canonical text")
     matching = tuple(
-        ingestion
-        for ingestion in repositories.literature_ingestions.list()
-        if ingestion.ingestion_status == LiteratureIngestionStatus.ACCEPTED
-        and ingestion.canonical_text_id == canonical_text_id
+        representation
+        for representation in repositories.literature_representation_refs.list()
+        if representation.representation_kind == representation_kind
+        and representation.canonical_text_id == canonical_text_id
     )
     if len(matching) != 1:
-        raise ValueError("canonical text must have exactly one accepted ingestion binding")
-    ingestion = matching[0]
+        raise ValueError("canonical text must have exactly one representation binding")
+    representation = matching[0]
     if not historical_ingestion:
         selection = repositories.literature_representation_selections.resolve_current(
             canonical.literature_id
         )
-        if selection.ingestion_id != ingestion.ingestion_id:
+        selected_representation = LiteratureRepresentationSelector.resolve_selection(
+            selection, repositories, evidence_store
+        )
+        if selected_representation.representation_id != representation.representation_id:
             raise ValueError("canonical text is not the current selected representation")
-        if (
-            selection.literature_id != ingestion.literature_id
-            or selection.ingestion_hash != ingestion.content_hash
-            or selection.canonical_text_id != canonical.canonical_text_id
-            or selection.canonical_text_hash != canonical.content_hash
-            or selection.source_id != ingestion.source_id
-            or selection.source_version != ingestion.source_version
-        ):
-            raise ValueError("current representation selection binding is invalid")
-    chain = validate_literature_ingestion_chain(
-        ingestion, repositories, evidence_store
+    from .acquisition import validate_literature_representation
+
+    validate_literature_representation(
+        representation, repositories, evidence_store
     )
-    source = chain.source
+    source = evidence_store.source_records.get(
+        f"{representation.source_id}--{representation.source_version}"
+    )
+    evidence_store.verify_source_integrity(source)
     recovered = text[start_offset:end_offset]
     evidence_identity = {
         "canonical_text_id": canonical_text_id,

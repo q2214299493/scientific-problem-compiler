@@ -12,6 +12,7 @@ from ..interpretation.validators import (
     source_quote_record_issues,
 )
 from ..models import (
+    CanonicalHTMLTextArtifact,
     CanonicalTextArtifact,
     CurationStatus,
     EvidenceSpan,
@@ -20,16 +21,20 @@ from ..models import (
     ExpertOpinion,
     ExpertProfile,
     HistoricalLiteratureEvidenceAuthorization,
+    HTMLLiteratureIngestionRecord,
     KnowledgeCurationRecord,
     KnowledgeRelation,
     LiteratureDocument,
     LiteratureIngestionRecord,
     LiteratureIngestionStatus,
+    LiteratureRepresentationKind,
+    LiteratureRepresentationReference,
     LiteratureRepresentationSelection,
     LiteratureWorkflowPattern,
     MethodFact,
     ModelFact,
     ReportedResult,
+    RawHTMLLiteratureArtifact,
     RawLiteratureArtifact,
     ScientificCapability,
     SourceClaim,
@@ -49,6 +54,26 @@ REPOSITORY_NODE_SPECS = (
     ("raw_literature_artifact", "raw_literature_artifacts", "artifact_id"),
     ("canonical_text_artifact", "canonical_text_artifacts", "canonical_text_id"),
     ("literature_ingestion", "literature_ingestions", "ingestion_id"),
+    (
+        "raw_html_literature_artifact",
+        "raw_html_literature_artifacts",
+        "artifact_id",
+    ),
+    (
+        "canonical_html_text_artifact",
+        "canonical_html_text_artifacts",
+        "canonical_text_id",
+    ),
+    (
+        "html_literature_ingestion",
+        "html_literature_ingestions",
+        "ingestion_id",
+    ),
+    (
+        "literature_representation_ref",
+        "literature_representation_refs",
+        "representation_id",
+    ),
     (
         "literature_representation_selection",
         "literature_representation_selections",
@@ -79,6 +104,17 @@ CURATION_REQUIRED_TYPES = frozenset(
         "literature_representation_selection",
         "expert_opinion",
         "knowledge_relation",
+    }
+)
+
+REPRESENTATION_COMPONENT_TYPES = frozenset(
+    {
+        "raw_literature_artifact",
+        "canonical_text_artifact",
+        "literature_ingestion",
+        "raw_html_literature_artifact",
+        "canonical_html_text_artifact",
+        "html_literature_ingestion",
     }
 )
 
@@ -124,7 +160,12 @@ class TrustedKnowledgeValidator:
             listing = (
                 repository.list_metadata()
                 if repository_name
-                in {"raw_literature_artifacts", "canonical_text_artifacts"}
+                in {
+                    "raw_literature_artifacts",
+                    "canonical_text_artifacts",
+                    "raw_html_literature_artifacts",
+                    "canonical_html_text_artifacts",
+                }
                 else repository.list()
             )
             for record in listing:
@@ -213,6 +254,11 @@ class TrustedKnowledgeValidator:
             (item.source_id or "", item.source_version or "")
             for item in accepted_ingestions
         }
+        self._all_literature_ingestion_sources.update(
+            (item.source_id, item.source_version)
+            for item in self.repositories.html_literature_ingestions.list()
+            if item.ingestion_status == LiteratureIngestionStatus.ACCEPTED
+        )
         selection_literature_ids = {
             item.literature_id
             for item in self.repositories.literature_representation_selections.list()
@@ -233,8 +279,22 @@ class TrustedKnowledgeValidator:
                 ("literature_representation_selection", selection.selection_id)
             )
             if curation is not None and curation.status == CurationStatus.ACCEPTED:
+                from .ingestion import LiteratureRepresentationSelector
+
+                try:
+                    representation = LiteratureRepresentationSelector.resolve_selection(
+                        selection, self.repositories, self.evidence_store
+                    )
+                except (FileNotFoundError, ValueError) as error:
+                    raise TrustedKnowledgeError(
+                        "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                        str(error),
+                    ) from error
                 self._trusted_current_literature_sources.add(
-                    (selection.source_id, selection.source_version)
+                    (
+                        representation.source_id or "",
+                        representation.source_version or "",
+                    )
                 )
         active_accepted = {
             key: curation
@@ -304,6 +364,16 @@ class TrustedKnowledgeValidator:
                 self._validate_canonical_text(record, current, visiting)
             elif isinstance(record, LiteratureIngestionRecord):
                 self._validate_ingestion(record, current, visiting)
+            elif isinstance(record, RawHTMLLiteratureArtifact):
+                self.repositories.raw_html_literature_artifacts.get(
+                    record.artifact_id
+                )
+            elif isinstance(record, CanonicalHTMLTextArtifact):
+                self._validate_html_canonical(record, current, visiting)
+            elif isinstance(record, HTMLLiteratureIngestionRecord):
+                self._validate_html_ingestion(record, current, visiting)
+            elif isinstance(record, LiteratureRepresentationReference):
+                self._validate_representation(record, current, visiting)
             elif isinstance(record, LiteratureRepresentationSelection):
                 self._validate_representation_selection(record, current, visiting)
             elif isinstance(record, HistoricalLiteratureEvidenceAuthorization):
@@ -349,7 +419,12 @@ class TrustedKnowledgeValidator:
             for ingestion in self.repositories.literature_ingestions.list()
             if ingestion.literature_id == document.literature_id
         )
-        if ingestions:
+        html_ingestions = tuple(
+            ingestion
+            for ingestion in self.repositories.html_literature_ingestions.list()
+            if ingestion.literature_id == document.literature_id
+        )
+        if ingestions or html_ingestions:
             try:
                 selection = (
                     self.repositories.literature_representation_selections.resolve_current(
@@ -413,27 +488,25 @@ class TrustedKnowledgeValidator:
                 "UNTRUSTED_LITERATURE_REPRESENTATION_SELECTION",
                 f"selection is not explicitly accepted: {selection.selection_id}",
             )
-        ingestion = self._validate_record(
-            ("literature_ingestion", selection.ingestion_id), current, visiting
+        from .ingestion import LiteratureRepresentationSelector
+
+        try:
+            representation = LiteratureRepresentationSelector.resolve_selection(
+                selection, self.repositories, self.evidence_store
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                str(error),
+            ) from error
+        self.records[
+            ("literature_representation_ref", representation.representation_id)
+        ] = representation
+        self._validate_record(
+            ("literature_representation_ref", representation.representation_id),
+            current,
+            visiting,
         )
-        if not isinstance(ingestion, LiteratureIngestionRecord):
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_REPRESENTATION_SELECTION",
-                f"selection has no ingestion: {selection.selection_id}",
-            )
-        if (
-            ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED
-            or selection.literature_id != ingestion.literature_id
-            or selection.ingestion_hash != ingestion.content_hash
-            or selection.canonical_text_id != ingestion.canonical_text_id
-            or selection.canonical_text_hash != ingestion.canonical_text_hash
-            or selection.source_id != ingestion.source_id
-            or selection.source_version != ingestion.source_version
-        ):
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_REPRESENTATION_SELECTION",
-                f"selection binding is invalid: {selection.selection_id}",
-            )
 
     def _validate_canonical_text(
         self,
@@ -454,6 +527,133 @@ class TrustedKnowledgeValidator:
                 "CANONICAL_RAW_ARTIFACT_MISMATCH",
                 f"canonical text does not bind its raw artifact: {canonical.canonical_text_id}",
             )
+
+    def _validate_html_canonical(
+        self,
+        canonical: CanonicalHTMLTextArtifact,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        self.repositories.canonical_html_text_artifacts.get(
+            canonical.canonical_text_id
+        )
+        raw = self._validate_record(
+            ("raw_html_literature_artifact", canonical.raw_artifact_id),
+            current,
+            visiting,
+        )
+        if (
+            not isinstance(raw, RawHTMLLiteratureArtifact)
+            or canonical.raw_artifact_hash != raw.content_hash
+            or canonical.literature_id != raw.literature_id
+            or canonical.source_url != raw.source_url
+        ):
+            raise TrustedKnowledgeError(
+                "HTML_CANONICAL_RAW_ARTIFACT_MISMATCH",
+                f"HTML canonical text does not bind its raw artifact: {canonical.canonical_text_id}",
+            )
+
+    def _validate_representation(
+        self,
+        representation: LiteratureRepresentationReference,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        from .acquisition import validate_literature_representation
+        from .ingestion import LiteratureRepresentationSelector
+
+        try:
+            selection = (
+                self.repositories.literature_representation_selections.resolve_current(
+                    representation.literature_id
+                )
+            )
+            selection_curation = current.get(
+                ("literature_representation_selection", selection.selection_id)
+            )
+            selected = LiteratureRepresentationSelector.resolve_selection(
+                selection, self.repositories, self.evidence_store
+            )
+            if (
+                selection_curation is None
+                or selection_curation.status != CurationStatus.ACCEPTED
+                or selected.representation_id != representation.representation_id
+            ):
+                raise ValueError("representation is not the accepted current selection")
+            validate_literature_representation(
+                representation, self.repositories, self.evidence_store
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_REPRESENTATION", str(error)
+            ) from error
+        ingestion_type = (
+            "literature_ingestion"
+            if representation.representation_kind == LiteratureRepresentationKind.PDF
+            else "html_literature_ingestion"
+        )
+        ingestion = self._validate_record(
+            (ingestion_type, representation.ingestion_id), current, visiting
+        )
+        if (
+            representation.literature_id != getattr(ingestion, "literature_id", None)
+            or representation.ingestion_hash
+            != getattr(ingestion, "content_hash", None)
+        ):
+            raise TrustedKnowledgeError(
+                "INVALID_LITERATURE_REPRESENTATION",
+                f"representation ingestion binding is invalid: {representation.representation_id}",
+            )
+
+    def _validate_html_ingestion(
+        self,
+        ingestion: HTMLLiteratureIngestionRecord,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        if ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED:
+            raise TrustedKnowledgeError(
+                "UNTRUSTED_HTML_LITERATURE_INGESTION",
+                f"only accepted HTML ingestion records are trusted: {ingestion.ingestion_id}",
+            )
+        document = self._require_record("literature_document", ingestion.literature_id)
+        if not isinstance(document, LiteratureDocument):
+            raise TrustedKnowledgeError(
+                "INVALID_HTML_LITERATURE_INGESTION_BINDING",
+                f"HTML ingestion has no LiteratureDocument: {ingestion.ingestion_id}",
+            )
+        raw = self._validate_record(
+            ("raw_html_literature_artifact", ingestion.raw_artifact_id),
+            current,
+            visiting,
+        )
+        canonical = self._validate_record(
+            ("canonical_html_text_artifact", ingestion.canonical_text_id),
+            current,
+            visiting,
+        )
+        source = self._verify_source(ingestion.source_id, ingestion.source_version)
+        if (
+            not isinstance(raw, RawHTMLLiteratureArtifact)
+            or not isinstance(canonical, CanonicalHTMLTextArtifact)
+            or ingestion.raw_artifact_hash != raw.content_hash
+            or ingestion.canonical_text_hash != canonical.content_hash
+            or ingestion.literature_id != raw.literature_id
+            or ingestion.literature_id != canonical.literature_id
+            or ingestion.extractor_id != canonical.extractor_id
+            or ingestion.extractor_version != canonical.extractor_version
+            or ingestion.extractor_config_hash != canonical.extractor_config_hash
+            or source.content_sha256 != canonical.text_sha256
+            or source.source_role != SourceRole.LITERATURE_AUTHOR
+            or source.source_type != SourceType.LITERATURE_ARTICLE
+        ):
+            raise TrustedKnowledgeError(
+                "HTML_LITERATURE_INGESTION_HASH_MISMATCH",
+                f"HTML ingestion binding is invalid: {ingestion.ingestion_id}",
+            )
+        self._reachable[
+            ("source_document", f"{source.source_id}@{source.version}")
+        ] = source
 
     def _validate_ingestion(
         self,
@@ -576,6 +776,12 @@ class TrustedKnowledgeValidator:
             (relation.subject_type, relation.subject_id),
             (relation.object_type, relation.object_id),
         ):
+            if key[0] in REPRESENTATION_COMPONENT_TYPES:
+                raise TrustedKnowledgeError(
+                    "UNTRUSTED_RELATION_ENDPOINT",
+                    "relations must reference the common literature representation, "
+                    f"not an internal component: {key[0]}:{key[1]}",
+                )
             self._require_record(*key)
             curation = current.get(key)
             if (key[0] in CURATION_REQUIRED_TYPES or curation is not None) and (
@@ -714,20 +920,33 @@ class TrustedKnowledgeValidator:
                 "EVIDENCE_STORE_REQUIRED",
                 "historical evidence authorization requires a SourceEvidenceStore",
             )
-        from .ingestion import validate_literature_ingestion_chain
+        from .acquisition import validate_literature_representation
+        from .ingestion import LiteratureRepresentationSelector
 
         try:
-            ingestion = self.repositories.literature_ingestions.get(
-                authorization.ingestion_id
-            )
-            chain = validate_literature_ingestion_chain(
-                ingestion, self.repositories, self.evidence_store
+            if authorization.representation_id is not None:
+                representation = LiteratureRepresentationSelector.resolve_reference(
+                    authorization.representation_id,
+                    self.repositories,
+                    self.evidence_store,
+                )
+                if authorization.representation_hash != representation.content_hash:
+                    raise ValueError("historical representation hash mismatch")
+            else:
+                representation = LiteratureRepresentationSelector.resolve_reference(
+                    authorization.ingestion_id or "",
+                    self.repositories,
+                    self.evidence_store,
+                )
+                if authorization.ingestion_hash != representation.ingestion_hash:
+                    raise ValueError("historical ingestion hash mismatch")
+            validate_literature_representation(
+                representation, self.repositories, self.evidence_store
             )
             if (
-                authorization.literature_id != ingestion.literature_id
-                or authorization.ingestion_hash != ingestion.content_hash
-                or authorization.source_id != chain.source.source_id
-                or authorization.source_version != chain.source.version
+                authorization.literature_id != representation.literature_id
+                or authorization.source_id != representation.source_id
+                or authorization.source_version != representation.source_version
             ):
                 raise ValueError("historical authorization binding mismatch")
             for evidence_id in authorization.evidence_refs:
@@ -749,16 +968,51 @@ class TrustedKnowledgeValidator:
         self._reachable[
             ("historical_evidence_authorization", authorization.authorization_id)
         ] = authorization
-        self._reachable[("literature_ingestion", ingestion.ingestion_id)] = ingestion
         self._reachable[
-            ("canonical_text_artifact", chain.canonical_text.canonical_text_id)
-        ] = chain.canonical_text
+            ("literature_representation_ref", representation.representation_id)
+        ] = representation
+        if representation.representation_kind == LiteratureRepresentationKind.PDF:
+            ingestion = self.repositories.literature_ingestions.get(
+                representation.ingestion_id
+            )
+            canonical = self.repositories.canonical_text_artifacts.get(
+                representation.canonical_text_id or ""
+            )
+            raw = self.repositories.raw_literature_artifacts.get(
+                representation.raw_artifact_id
+            )
+            record_types = (
+                ("literature_ingestion", ingestion.ingestion_id, ingestion),
+                ("canonical_text_artifact", canonical.canonical_text_id, canonical),
+                ("raw_literature_artifact", raw.artifact_id, raw),
+            )
+        else:
+            ingestion = self.repositories.html_literature_ingestions.get(
+                representation.ingestion_id
+            )
+            canonical = self.repositories.canonical_html_text_artifacts.get(
+                representation.canonical_text_id or ""
+            )
+            raw = self.repositories.raw_html_literature_artifacts.get(
+                representation.raw_artifact_id
+            )
+            record_types = (
+                ("html_literature_ingestion", ingestion.ingestion_id, ingestion),
+                (
+                    "canonical_html_text_artifact",
+                    canonical.canonical_text_id,
+                    canonical,
+                ),
+                ("raw_html_literature_artifact", raw.artifact_id, raw),
+            )
+        for record_type, record_id, record in record_types:
+            self._reachable[(record_type, record_id)] = record
+        source = self._verify_source(
+            representation.source_id or "", representation.source_version or ""
+        )
         self._reachable[
-            ("raw_literature_artifact", chain.raw_artifact.artifact_id)
-        ] = chain.raw_artifact
-        self._reachable[
-            ("source_document", f"{chain.source.source_id}@{chain.source.version}")
-        ] = chain.source
+            ("source_document", f"{source.source_id}@{source.version}")
+        ] = source
 
     def _verify_source(self, source_id: str, source_version: str) -> SourceDocument:
         if self.evidence_store is None:

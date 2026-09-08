@@ -230,18 +230,31 @@ def add_literature(
 @app.command("select-literature-representation")
 def select_literature_representation(
     literature_id: Annotated[str, typer.Option("--literature-id")],
-    ingestion_id: Annotated[str, typer.Option("--ingestion-id")],
     selected_by: Annotated[str, typer.Option("--selected-by")],
     rationale: Annotated[str, typer.Option("--rationale")],
+    representation_id: Annotated[
+        str | None, typer.Option("--representation-id")
+    ] = None,
+    ingestion_id: Annotated[
+        str | None,
+        typer.Option(
+            "--ingestion-id",
+            help="Compatibility-only PDF ingestion selector.",
+        ),
+    ] = None,
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
         "knowledge"
     ),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
 ) -> None:
-    """Promote one validated ingestion without extracting scientific claims."""
+    """Select one validated PDF/HTML representation without curating it."""
+    if (representation_id is None) == (ingestion_id is None):
+        raise typer.BadParameter(
+            "provide exactly one of --representation-id or compatibility --ingestion-id"
+        )
     outcome = LiteratureRepresentationSelector().select(
         literature_id,
-        ingestion_id,
+        representation_id or ingestion_id or "",
         selected_by,
         rationale,
         KnowledgeRepositories(knowledge_dir),
