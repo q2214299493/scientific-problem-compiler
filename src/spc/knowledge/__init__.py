@@ -45,6 +45,21 @@ from .evidence_migration import (
     migrate_knowledge_evidence,
 )
 from .trust import TrustedKnowledgeError, TrustedKnowledgeValidator
+from .structure import (
+    DocumentStructureExtractionResult,
+    DocumentStructureExtractor,
+    DocumentStructureInput,
+    DocumentStructureService,
+    HTMLDocumentStructureExtractor,
+    PDFDocumentStructureExtractor,
+    create_evidence_from_block,
+    create_evidence_from_figure_caption,
+    create_evidence_from_table_cell,
+    format_structured_evidence_locator,
+    inspect_document_structure,
+    validate_document_structure,
+    verify_structured_evidence_locator,
+)
 
 __all__ = [
     "AcquisitionError",
@@ -62,6 +77,12 @@ __all__ = [
     "KnowledgeEvidenceMigrationResult",
     "TrustedKnowledgeError",
     "TrustedKnowledgeValidator",
+    "DocumentStructureExtractionResult",
+    "DocumentStructureExtractor",
+    "DocumentStructureInput",
+    "DocumentStructureService",
+    "HTMLDocumentStructureExtractor",
+    "PDFDocumentStructureExtractor",
     "LiteratureIngestionService",
     "LiteratureAcquisitionService",
     "LiteratureExtractionError",
@@ -75,6 +96,9 @@ __all__ = [
     "SafeHTTPError",
     "SafeHTTPFetcher",
     "create_evidence_span_from_canonical_text",
+    "create_evidence_from_block",
+    "create_evidence_from_figure_caption",
+    "create_evidence_from_table_cell",
     "validate_literature_ingestion_chain",
     "detect_acquisition_input",
     "knowledge_graph_to_mermaid",
@@ -86,4 +110,8 @@ __all__ = [
     "make_collection_definition",
     "make_collection_scope_policy",
     "path_matches_prefix",
+    "format_structured_evidence_locator",
+    "inspect_document_structure",
+    "validate_document_structure",
+    "verify_structured_evidence_locator",
 ]

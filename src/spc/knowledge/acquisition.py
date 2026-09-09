@@ -779,7 +779,23 @@ class HTMLTextExtraction:
 
 
 class _CanonicalHTMLParser(HTMLParser):
-    BLOCK_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote"})
+    BLOCK_TAGS = frozenset(
+        {
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "p",
+            "li",
+            "blockquote",
+            "caption",
+            "th",
+            "td",
+            "figcaption",
+        }
+    )
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -818,7 +834,7 @@ class _CanonicalHTMLParser(HTMLParser):
 
 class HTMLLiteratureTextExtractor:
     extractor_id = "html-canonical-text"
-    extractor_version = "1.0.0"
+    extractor_version = "2.0.0"
     extractor_config_hash = content_hash(
         {
             "block_tags": tuple(sorted(_CanonicalHTMLParser.BLOCK_TAGS)),

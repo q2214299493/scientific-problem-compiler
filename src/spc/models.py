@@ -200,6 +200,24 @@ class LiteratureRepresentationKind(StrEnum):
     HTML = "html"
 
 
+class DocumentBlockType(StrEnum):
+    PAGE = "page"
+    HEADING = "heading"
+    PARAGRAPH = "paragraph"
+    LIST_ITEM = "list_item"
+    TABLE_CAPTION = "table_caption"
+    TABLE_CELL = "table_cell"
+    FIGURE_CAPTION = "figure_caption"
+    OTHER_TEXT = "other_text"
+
+
+class StructureExtractionStatus(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNSUPPORTED = "unsupported"
+    UNRESOLVED = "unresolved"
+
+
 class MetadataValueOrigin(StrEnum):
     EXPLICIT = "explicit"
     RESOLVED = "resolved"
@@ -2127,6 +2145,244 @@ class LiteratureRepresentationReference(StrictModel):
         return self
 
 
+class DocumentStructureBlock(StrictModel):
+    block_id: NonBlankStr
+    structure_id: NonBlankStr
+    block_type: DocumentBlockType
+    ordinal: int = Field(ge=0)
+    parent_block_id: NonBlankStr | None = None
+    page_number: int | None = Field(default=None, ge=1)
+    heading_level: int | None = Field(default=None, ge=1, le=6)
+    section_path: tuple[NonBlankStr, ...] = ()
+    label: NonBlankStr | None = None
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    text_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DocumentStructureBlock:
+        from .serialization import content_hash
+
+        if self.end_offset <= self.start_offset:
+            raise ValueError("document structure block range is invalid")
+        if self.block_type == DocumentBlockType.HEADING:
+            if self.heading_level is None or not self.section_path:
+                raise ValueError("heading block requires level and section path")
+        elif self.heading_level is not None:
+            raise ValueError("only heading blocks may set heading_level")
+        if self.block_type == DocumentBlockType.PAGE and self.page_number is None:
+            raise ValueError("page block requires page_number")
+        identity = self.model_dump(
+            mode="json", exclude={"block_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"document-block-{content_hash(identity)[:24]}"
+        if self.block_id != expected_id:
+            raise ValueError("DocumentStructureBlock block_id is not content-bound")
+        payload = {"block_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("DocumentStructureBlock content_hash is invalid")
+        return self
+
+
+class TableCellStructure(StrictModel):
+    cell_id: NonBlankStr
+    table_id: NonBlankStr
+    row_index: int = Field(ge=0)
+    column_index: int = Field(ge=0)
+    row_span: int = Field(default=1, ge=1)
+    column_span: int = Field(default=1, ge=1)
+    is_header: bool = False
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    text_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> TableCellStructure:
+        from .serialization import content_hash
+
+        if self.end_offset <= self.start_offset:
+            raise ValueError("table cell range is invalid")
+        identity = self.model_dump(
+            mode="json", exclude={"cell_id", "content_hash"}
+        )
+        expected_id = f"table-cell-{content_hash(identity)[:24]}"
+        if self.cell_id != expected_id:
+            raise ValueError("TableCellStructure cell_id is not content-bound")
+        payload = {"cell_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("TableCellStructure content_hash is invalid")
+        return self
+
+
+class TableStructure(StrictModel):
+    table_id: NonBlankStr
+    structure_id: NonBlankStr
+    ordinal: int = Field(ge=0)
+    label: NonBlankStr | None = None
+    caption_block_ref: NonBlankStr | None = None
+    page_number: int | None = Field(default=None, ge=1)
+    section_path: tuple[NonBlankStr, ...] = ()
+    cell_refs: tuple[NonBlankStr, ...] = ()
+    extraction_status: StructureExtractionStatus
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> TableStructure:
+        from .serialization import content_hash
+
+        if len(set(self.cell_refs)) != len(self.cell_refs):
+            raise ValueError("TableStructure cell_refs must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"table_id", "cell_refs", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"table-structure-{content_hash(identity)[:24]}"
+        if self.table_id != expected_id:
+            raise ValueError("TableStructure table_id is not content-bound")
+        payload = {
+            "table_id": expected_id,
+            **identity,
+            "cell_refs": self.cell_refs,
+        }
+        if self.content_hash != content_hash(payload):
+            raise ValueError("TableStructure content_hash is invalid")
+        return self
+
+
+class FigureStructure(StrictModel):
+    figure_id: NonBlankStr
+    structure_id: NonBlankStr
+    ordinal: int = Field(ge=0)
+    label: NonBlankStr | None = None
+    page_number: int | None = Field(default=None, ge=1)
+    section_path: tuple[NonBlankStr, ...] = ()
+    caption_block_ref: NonBlankStr
+    extraction_status: StructureExtractionStatus
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> FigureStructure:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"figure_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"figure-structure-{content_hash(identity)[:24]}"
+        if self.figure_id != expected_id:
+            raise ValueError("FigureStructure figure_id is not content-bound")
+        payload = {"figure_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("FigureStructure content_hash is invalid")
+        return self
+
+
+class DocumentStructureArtifact(StrictModel):
+    structure_id: NonBlankStr
+    literature_id: NonBlankStr
+    representation_id: NonBlankStr
+    representation_hash: Sha256Str
+    representation_kind: LiteratureRepresentationKind
+    canonical_text_id: NonBlankStr
+    canonical_text_hash: Sha256Str
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    extractor_id: NonBlankStr
+    extractor_version: NonBlankStr
+    extractor_config_hash: Sha256Str
+    block_hashes: dict[NonBlankStr, Sha256Str] = Field(min_length=1)
+    table_hashes: dict[NonBlankStr, Sha256Str]
+    figure_hashes: dict[NonBlankStr, Sha256Str]
+    page_count: int | None = Field(default=None, ge=1)
+    extraction_status: StructureExtractionStatus
+    warnings: tuple[NonBlankStr, ...] = ()
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DocumentStructureArtifact:
+        from .serialization import content_hash
+
+        if len(set(self.warnings)) != len(self.warnings):
+            raise ValueError("DocumentStructureArtifact warnings must be unique")
+        identity = self.model_dump(
+            mode="json",
+            include={
+                "literature_id",
+                "representation_id",
+                "representation_hash",
+                "representation_kind",
+                "canonical_text_id",
+                "canonical_text_hash",
+                "source_id",
+                "source_version",
+                "extractor_id",
+                "extractor_version",
+                "extractor_config_hash",
+            },
+        )
+        expected_id = f"document-structure-{content_hash(identity)[:24]}"
+        if self.structure_id != expected_id:
+            raise ValueError("DocumentStructureArtifact structure_id is not content-bound")
+        payload = self.model_dump(
+            mode="json", exclude={"content_hash"}, exclude_none=True
+        )
+        if self.content_hash != content_hash(payload):
+            raise ValueError("DocumentStructureArtifact content_hash is invalid")
+        return self
+
+
+class StructuredEvidenceLocator(StrictModel):
+    locator_id: NonBlankStr
+    evidence_id: NonBlankStr
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    literature_id: NonBlankStr
+    representation_id: NonBlankStr
+    structure_id: NonBlankStr
+    block_id: NonBlankStr
+    page_number: int | None = Field(default=None, ge=1)
+    section_path: tuple[NonBlankStr, ...] = ()
+    table_id: NonBlankStr | None = None
+    table_cell_id: NonBlankStr | None = None
+    row_index: int | None = Field(default=None, ge=0)
+    column_index: int | None = Field(default=None, ge=0)
+    figure_id: NonBlankStr | None = None
+    canonical_start_offset: int = Field(ge=0)
+    canonical_end_offset: int = Field(gt=0)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> StructuredEvidenceLocator:
+        from .serialization import content_hash
+
+        if self.canonical_end_offset <= self.canonical_start_offset:
+            raise ValueError("structured evidence locator range is invalid")
+        cell_values = (
+            self.table_id,
+            self.table_cell_id,
+            self.row_index,
+            self.column_index,
+        )
+        if any(value is not None for value in cell_values) and not all(
+            value is not None for value in cell_values
+        ):
+            raise ValueError("table-cell locator fields must be complete")
+        if self.figure_id is not None and self.table_id is not None:
+            raise ValueError("locator cannot target both a table cell and figure")
+        identity = self.model_dump(
+            mode="json", exclude={"locator_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"structured-locator-{content_hash(identity)[:24]}"
+        if self.locator_id != expected_id:
+            raise ValueError("StructuredEvidenceLocator locator_id is not content-bound")
+        payload = {"locator_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("StructuredEvidenceLocator content_hash is invalid")
+        return self
+
+
 class LiteratureIngestionRecord(StrictModel):
     ingestion_id: NonBlankStr
     literature_id: NonBlankStr
@@ -2677,6 +2933,12 @@ class KnowledgeSnapshot(StrictModel):
         default_factory=dict, exclude_if=lambda value: not value
     )
     trusted_record_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    document_structure_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    structured_evidence_locator_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
 

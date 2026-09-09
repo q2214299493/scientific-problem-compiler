@@ -339,3 +339,31 @@ spc migrate-knowledge-evidence `
 Migration follows existing literature ingestion/representation references,
 verifies source bytes and EvidenceSpans before and after copying, rejects
 conflicts, and is idempotent.
+
+## Knowledge Layer K1E
+
+K1E adds immutable, representation-bound document structure without changing
+the evidence authority chain. PDF and HTML extractors map pages, headings,
+paragraphs, list items, table captions/cells, and figure captions back to exact
+canonical UTF-8 offsets. Ambiguous PDF table cells are never reconstructed;
+the table remains explicitly partial instead.
+
+```powershell
+spc structure-literature `
+  --literature-id literature-... `
+  --representation-id literature-representation-... `
+  --knowledge-dir knowledge
+
+spc inspect-literature-structure `
+  --structure-id document-structure-... `
+  --knowledge-dir knowledge `
+  --section Results `
+  --section "CO dissociation"
+```
+
+`StructuredEvidenceLocator` adds page, section, table-cell, and figure-caption
+navigation to an exact `EvidenceSpan`; it never replaces the span or creates a
+scientific claim. Structure and locator repositories live only under the
+shared knowledge root. Trusted snapshots include structures for the current
+accepted representation and locators for evidence that independently passes
+the existing curation and historical-evidence rules.

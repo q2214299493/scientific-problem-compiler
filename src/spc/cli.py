@@ -58,6 +58,8 @@ from .models import (
     CollectionScopePolicy,
     CollectionSnapshot,
     DiscoveredCollectionResource,
+    DocumentStructureArtifact,
+    DocumentStructureBlock,
     CandidatePlanDraft,
     CandidateTaskDraft,
     ComparisonBaselineDraft,
@@ -77,6 +79,7 @@ from .models import (
     FixResolution,
     GateVerdict,
     FullTextCandidate,
+    FigureStructure,
     HistoricalLiteratureEvidenceAuthorization,
     HTMLLiteratureIngestionRecord,
     HumanDecisionResolution,
@@ -130,7 +133,10 @@ from .models import (
     SourceClaim,
     SourceQuote,
     SourceDocument,
+    StructuredEvidenceLocator,
     SystemFingerprint,
+    TableCellStructure,
+    TableStructure,
 )
 from .planning import (
     HTTPJSONLLMTransport,
@@ -152,6 +158,10 @@ from .knowledge.collection import (
     make_collection_scope_policy,
 )
 from .knowledge.evidence_migration import migrate_knowledge_evidence
+from .knowledge.structure import (
+    DocumentStructureService,
+    inspect_document_structure,
+)
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import (
@@ -364,6 +374,79 @@ def migrate_knowledge_evidence_command(
         KnowledgeEvidenceStore(knowledge_dir),
     )
     typer.echo(json.dumps(asdict(result), indent=2, ensure_ascii=False))
+
+
+@app.command("structure-literature")
+def structure_literature(
+    literature_id: Annotated[str, typer.Option("--literature-id")],
+    representation_id: Annotated[str, typer.Option("--representation-id")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    extractor: Annotated[str, typer.Option("--extractor")] = "auto",
+) -> None:
+    """Create an exact-offset document structure for one representation."""
+    if extractor != "auto":
+        raise typer.BadParameter("only the deterministic auto extractor is available")
+    result = DocumentStructureService().extract(
+        literature_id,
+        representation_id,
+        KnowledgeRepositories(knowledge_dir),
+        KnowledgeEvidenceStore(knowledge_dir),
+    )
+    report = {
+        "structure_id": result.artifact.structure_id,
+        "representation_id": result.artifact.representation_id,
+        "pages": sum(
+            block.block_type.value == "page" for block in result.blocks
+        ),
+        "headings": sum(
+            block.block_type.value == "heading" for block in result.blocks
+        ),
+        "paragraphs": sum(
+            block.block_type.value == "paragraph" for block in result.blocks
+        ),
+        "tables": len(result.tables),
+        "table_cells": len(result.table_cells),
+        "figures": len(result.figures),
+        "warnings": result.artifact.warnings,
+    }
+    typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+@app.command("inspect-literature-structure")
+def inspect_literature_structure(
+    structure_id: Annotated[str, typer.Option("--structure-id")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    page: Annotated[int | None, typer.Option("--page", min=1)] = None,
+    section: Annotated[
+        list[str] | None,
+        typer.Option("--section", help="Repeat for an exact section path."),
+    ] = None,
+    table_label: Annotated[str | None, typer.Option("--table-label")] = None,
+    figure_label: Annotated[str | None, typer.Option("--figure-label")] = None,
+) -> None:
+    """Inspect a stored structure with deterministic exact-field filters."""
+    result = inspect_document_structure(
+        structure_id,
+        KnowledgeRepositories(knowledge_dir),
+        page=page,
+        section_path=tuple(section) if section else None,
+        table_label=table_label,
+        figure_label=figure_label,
+    )
+    report = {
+        "artifact": result["artifact"].model_dump(mode="json"),
+        "blocks": [item.model_dump(mode="json") for item in result["blocks"]],
+        "tables": [item.model_dump(mode="json") for item in result["tables"]],
+        "table_cells": [
+            item.model_dump(mode="json") for item in result["table_cells"]
+        ],
+        "figures": [item.model_dump(mode="json") for item in result["figures"]],
+    }
+    typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 @app.command()
@@ -907,6 +990,12 @@ def schema_command(
         CanonicalHTMLTextArtifact,
         HTMLLiteratureIngestionRecord,
         LiteratureRepresentationReference,
+        DocumentStructureArtifact,
+        DocumentStructureBlock,
+        TableStructure,
+        TableCellStructure,
+        FigureStructure,
+        StructuredEvidenceLocator,
         CollectionScopePolicy,
         CollectionDefinition,
         CollectionPageArtifact,

@@ -26,6 +26,8 @@ from .models import (
     CollectionResourceOccurrence,
     CollectionSnapshot,
     DiscoveredCollectionResource,
+    DocumentStructureArtifact,
+    DocumentStructureBlock,
     DomainProfile,
     EvidenceSpan,
     ExpertAttributionRecord,
@@ -56,6 +58,10 @@ from .models import (
     SourceClaim,
     SourceDocument,
     SourceQuote,
+    StructuredEvidenceLocator,
+    TableCellStructure,
+    TableStructure,
+    FigureStructure,
 )
 from .serialization import (
     content_hash,
@@ -1360,6 +1366,64 @@ class LiteratureRepresentationReferenceRepository(
         )
 
 
+class DocumentStructureArtifactRepository(
+    IdentityBoundRepository[DocumentStructureArtifact]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "document_structure_artifacts",
+            DocumentStructureArtifact,
+            "structure_id",
+        )
+
+
+class DocumentStructureBlockRepository(
+    IdentityBoundRepository[DocumentStructureBlock]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "document_structure_blocks",
+            DocumentStructureBlock,
+            "block_id",
+        )
+
+
+class TableStructureRepository(IdentityBoundRepository[TableStructure]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "table_structures", TableStructure, "table_id"
+        )
+
+
+class TableCellStructureRepository(
+    IdentityBoundRepository[TableCellStructure]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "table_cell_structures",
+            TableCellStructure,
+            "cell_id",
+        )
+
+
+class FigureStructureRepository(IdentityBoundRepository[FigureStructure]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "figure_structures", FigureStructure, "figure_id"
+        )
+
+
+class StructuredEvidenceLocatorRepository(
+    IdentityBoundRepository[StructuredEvidenceLocator]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "structured_evidence_locators",
+            StructuredEvidenceLocator,
+            "locator_id",
+        )
+
+
 class CollectionDefinitionRepository(IdentityBoundRepository[CollectionDefinition]):
     def __init__(self, knowledge_root: Path) -> None:
         super().__init__(
@@ -1626,6 +1690,16 @@ class KnowledgeRepositories:
         self.literature_representation_refs = (
             LiteratureRepresentationReferenceRepository(root)
         )
+        self.document_structure_artifacts = DocumentStructureArtifactRepository(
+            root
+        )
+        self.document_structure_blocks = DocumentStructureBlockRepository(root)
+        self.table_structures = TableStructureRepository(root)
+        self.table_cell_structures = TableCellStructureRepository(root)
+        self.figure_structures = FigureStructureRepository(root)
+        self.structured_evidence_locators = StructuredEvidenceLocatorRepository(
+            root
+        )
         self.collection_definitions = CollectionDefinitionRepository(root)
         self.collection_pages = CollectionPageRepository(root)
         self.collection_page_artifacts = CollectionPageArtifactRepository(root)
@@ -1781,6 +1855,30 @@ class KnowledgeRepositories:
             if record_type == "source_document"
             and isinstance(record, SourceDocument)
         }
+        from .knowledge.structure import (
+            validate_document_structure,
+            verify_structured_evidence_locator,
+        )
+
+        trusted_representation_ids = {
+            record_id
+            for (record_type, record_id) in trusted.trusted_records
+            if record_type == "literature_representation_ref"
+        }
+        trusted_structures = tuple(
+            validate_document_structure(item, self, snapshot_evidence)
+            for item in self.document_structure_artifacts.list()
+            if item.representation_id in trusted_representation_ids
+        )
+        trusted_structure_ids = {
+            item.structure_id for item in trusted_structures
+        }
+        trusted_locators = tuple(
+            verify_structured_evidence_locator(item, self, snapshot_evidence)
+            for item in self.structured_evidence_locators.list()
+            if item.structure_id in trusted_structure_ids
+            and item.evidence_id in trusted_evidence_ids
+        )
         payload = {
             "domain_profile_hash": content_hash(domain_profile),
             "expert_case_hashes": {
@@ -1857,11 +1955,25 @@ class KnowledgeRepositories:
             "curation_record_hashes": {
                 item.curation_id: item.content_hash for item in trusted.curations
             },
+            "document_structure_hashes": {
+                item.structure_id: item.content_hash for item in trusted_structures
+            },
+            "structured_evidence_locator_hashes": {
+                item.locator_id: item.content_hash for item in trusted_locators
+            },
             "trusted_record_hashes": {
                 f"{record_type}:{record_id}": (
                     getattr(record, "content_hash", None) or content_hash(record)
                 )
                 for (record_type, record_id), record in trusted.trusted_records.items()
+            }
+            | {
+                f"document_structure:{item.structure_id}": item.content_hash
+                for item in trusted_structures
+            }
+            | {
+                f"structured_evidence_locator:{item.locator_id}": item.content_hash
+                for item in trusted_locators
             },
         }
         snapshot_identity = {
@@ -1882,6 +1994,8 @@ class KnowledgeRepositories:
                 "expert_attribution_hashes",
                 "knowledge_relation_hashes",
                 "curation_record_hashes",
+                "document_structure_hashes",
+                "structured_evidence_locator_hashes",
                 "trusted_record_hashes",
             }
         }
