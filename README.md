@@ -255,3 +255,31 @@ are deduplicated against prior attempts and continue the same deterministic
 attempt index sequence. Final status distinguishes authentication-only,
 unsupported-media, metadata-only, unavailable-full-text, and hard integrity or
 parser failures.
+
+## Knowledge Layer K1D
+
+K1D adds bounded project/collection discovery without turning SPC into a
+general crawler. An immutable scope policy fixes allowed origins and path
+prefixes, page/depth/resource limits, pagination rules, and accepted media
+types. The generic connector follows only explicit static-HTML pagination,
+recognizes DOI, article, citation-metadata, and direct-PDF resources, and uses
+the K1C safe HTTP fetcher for every request. Authentication walls, unresolved
+pagination, traversal limits, cycles, and JavaScript-only continuation remain
+explicit incomplete states rather than being reported as complete.
+
+```powershell
+spc import-literature-collection https://example.org/project/publications `
+  --domain base `
+  --knowledge-dir knowledge `
+  --state-dir .spc `
+  --max-pages 100 `
+  --max-resources 1000
+```
+
+Page records, logical discovered resources, every discovery occurrence,
+content-bound snapshots, K1C acquisition links, batch import records, and
+snapshot diffs remain immutable audit inventory. Repeated DOI/URL occurrences
+are deduplicated without losing page provenance. Each unique resource is handed
+to K1C independently, so one unavailable paper does not abort the batch. K1D
+does not select or curate representations, generate scientific records, or add
+crawl internals to the scientific knowledge graph.

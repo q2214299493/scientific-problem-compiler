@@ -15,6 +15,14 @@ from .models import (
     CanonicalTextArtifact,
     CanonicalTextBlock,
     CanonicalHTMLTextArtifact,
+    CollectionAcquisitionLink,
+    CollectionDefinition,
+    CollectionDiff,
+    CollectionImportRecord,
+    CollectionPageRecord,
+    CollectionResourceOccurrence,
+    CollectionSnapshot,
+    DiscoveredCollectionResource,
     DomainProfile,
     EvidenceSpan,
     ExpertAttributionRecord,
@@ -1026,6 +1034,84 @@ class LiteratureRepresentationReferenceRepository(
         )
 
 
+class CollectionDefinitionRepository(IdentityBoundRepository[CollectionDefinition]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_definitions",
+            CollectionDefinition,
+            "collection_id",
+        )
+
+
+class CollectionPageRepository(IdentityBoundRepository[CollectionPageRecord]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_pages",
+            CollectionPageRecord,
+            "page_id",
+        )
+
+
+class DiscoveredCollectionResourceRepository(
+    IdentityBoundRepository[DiscoveredCollectionResource]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_resources",
+            DiscoveredCollectionResource,
+            "discovered_resource_id",
+        )
+
+
+class CollectionResourceOccurrenceRepository(
+    IdentityBoundRepository[CollectionResourceOccurrence]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_occurrences",
+            CollectionResourceOccurrence,
+            "occurrence_id",
+        )
+
+
+class CollectionSnapshotRepository(IdentityBoundRepository[CollectionSnapshot]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_snapshots",
+            CollectionSnapshot,
+            "snapshot_id",
+        )
+
+
+class CollectionAcquisitionLinkRepository(
+    IdentityBoundRepository[CollectionAcquisitionLink]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_acquisition_links",
+            CollectionAcquisitionLink,
+            "link_id",
+        )
+
+
+class CollectionImportRepository(IdentityBoundRepository[CollectionImportRecord]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_imports",
+            CollectionImportRecord,
+            "import_id",
+        )
+
+
+class CollectionDiffRepository(IdentityBoundRepository[CollectionDiff]):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "collection_diffs",
+            CollectionDiff,
+            "diff_id",
+        )
+
+
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -1061,6 +1147,14 @@ class KnowledgeRepositories:
         self.literature_representation_refs = (
             LiteratureRepresentationReferenceRepository(root)
         )
+        self.collection_definitions = CollectionDefinitionRepository(root)
+        self.collection_pages = CollectionPageRepository(root)
+        self.collection_resources = DiscoveredCollectionResourceRepository(root)
+        self.collection_occurrences = CollectionResourceOccurrenceRepository(root)
+        self.collection_snapshots = CollectionSnapshotRepository(root)
+        self.collection_acquisition_links = CollectionAcquisitionLinkRepository(root)
+        self.collection_imports = CollectionImportRepository(root)
+        self.collection_diffs = CollectionDiffRepository(root)
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.expert_attributions = ExpertAttributionRepository(root)

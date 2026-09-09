@@ -43,6 +43,17 @@ from .models import (
     CanonicalTextArtifact,
     CanonicalTextBlock,
     CanonicalHTMLTextArtifact,
+    CollectionAcquisitionLink,
+    CollectionDefinition,
+    CollectionDiff,
+    CollectionDiscoveryResult,
+    CollectionImportOutcome,
+    CollectionImportRecord,
+    CollectionPageRecord,
+    CollectionResourceOccurrence,
+    CollectionScopePolicy,
+    CollectionSnapshot,
+    DiscoveredCollectionResource,
     CandidatePlanDraft,
     CandidateTaskDraft,
     ComparisonBaselineDraft,
@@ -131,6 +142,11 @@ from .knowledge.ingestion import (
     LiteratureRepresentationSelector,
 )
 from .knowledge.acquisition import LiteratureAcquisitionService
+from .knowledge.collection import (
+    CollectionImportService,
+    make_collection_definition,
+    make_collection_scope_policy,
+)
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
@@ -223,6 +239,39 @@ def add_literature(
         KnowledgeRepositories(knowledge_dir),
         SourceEvidenceStore(state_dir),
         explicit_metadata=metadata_payload,
+    )
+    typer.echo(outcome.model_dump_json(indent=2))
+
+
+@app.command("import-literature-collection")
+def import_literature_collection(
+    project_url: Annotated[str, typer.Argument()],
+    domain: Annotated[str, typer.Option("--domain")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    connector: Annotated[str, typer.Option("--connector")] = "generic-html",
+    max_pages: Annotated[int, typer.Option("--max-pages", min=1)] = 100,
+    max_resources: Annotated[int, typer.Option("--max-resources", min=1)] = 1000,
+) -> None:
+    """Discover a bounded static collection and acquire each unique resource."""
+    if connector != "generic-html":
+        raise typer.BadParameter("only the generic-html connector is available")
+    policy = make_collection_scope_policy(
+        project_url,
+        max_pages=max_pages,
+        max_resources=max_resources,
+    )
+    definition = make_collection_definition(
+        project_url,
+        domain,
+        scope_policy=policy,
+    )
+    outcome = CollectionImportService().run(
+        definition,
+        KnowledgeRepositories(knowledge_dir),
+        SourceEvidenceStore(state_dir),
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -795,6 +844,17 @@ def schema_command(
         CanonicalHTMLTextArtifact,
         HTMLLiteratureIngestionRecord,
         LiteratureRepresentationReference,
+        CollectionScopePolicy,
+        CollectionDefinition,
+        CollectionPageRecord,
+        DiscoveredCollectionResource,
+        CollectionResourceOccurrence,
+        CollectionSnapshot,
+        CollectionAcquisitionLink,
+        CollectionImportRecord,
+        CollectionDiff,
+        CollectionDiscoveryResult,
+        CollectionImportOutcome,
         SourceDocument,
         EvidenceSpan,
         EvidenceReference,

@@ -18,6 +18,16 @@ from .acquisition import (
     validate_literature_representation,
 )
 from .graph import KnowledgeGraphBuilder, KnowledgeGraphError
+from .collection import (
+    CollectionConnector,
+    CollectionError,
+    CollectionImportService,
+    GenericHTMLCollectionConnector,
+    canonicalize_url,
+    diff_collection_snapshots,
+    make_collection_definition,
+    make_collection_scope_policy,
+)
 from .ingestion import (
     LiteratureIngestionService,
     LiteratureExtractionError,
@@ -38,6 +48,10 @@ __all__ = [
     "HTMLLiteratureTextExtractor",
     "HTMLTextExtraction",
     "HTTPResponse",
+    "CollectionConnector",
+    "CollectionError",
+    "CollectionImportService",
+    "GenericHTMLCollectionConnector",
     "KnowledgeGraphBuilder",
     "KnowledgeGraphError",
     "TrustedKnowledgeError",
@@ -60,4 +74,8 @@ __all__ = [
     "knowledge_graph_to_mermaid",
     "normalize_doi",
     "validate_literature_representation",
+    "canonicalize_url",
+    "diff_collection_snapshots",
+    "make_collection_definition",
+    "make_collection_scope_policy",
 ]
