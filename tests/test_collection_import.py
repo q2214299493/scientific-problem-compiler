@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from typer.testing import CliRunner
 
@@ -384,8 +385,9 @@ def test_import_isolates_failed_pdf_and_preserves_counts_and_trust_boundary(
 
 def test_cli_exposes_bounded_collection_import_options() -> None:
     result = CliRunner().invoke(app, ["import-literature-collection", "--help"])
+    plain_output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.output)
 
     assert result.exit_code == 0
-    assert "--max-pages" in result.output
-    assert "--max-resources" in result.output
-    assert "--connector" in result.output
+    assert "--max-pages" in plain_output
+    assert "--max-resources" in plain_output
+    assert "--connector" in plain_output
