@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1"]
+docling = ["docling"]
+paperqa = ["paper-qa"]
 
 [project.scripts]
 spc = "spc.cli:app"
@@ -31,6 +33,7 @@ spc = [
   "adapters/catalogs/*.yaml",
   "knowledge/fixtures/*.yaml",
   "knowledge/fixtures/*.txt",
+  "backends/*.yaml",
 ]
 
 [tool.pytest.ini_options]

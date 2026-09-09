@@ -1,0 +1,43 @@
+backends:
+  - project_name: Docling
+    upstream_repository: https://github.com/docling-project/docling
+    declared_license: MIT
+    integration_mode: python_library
+    vendored: false
+    redistributable_status_confirmed: false
+  - project_name: MinerU
+    upstream_repository: https://github.com/opendatalab/MinerU
+    declared_license: NOASSERTION
+    integration_mode: subprocess
+    vendored: false
+    redistributable_status_confirmed: false
+  - project_name: PaperQA2
+    upstream_repository: https://github.com/Future-House/paper-qa
+    declared_license: Apache-2.0
+    integration_mode: python_library
+    vendored: false
+    redistributable_status_confirmed: false
+  - project_name: GROBID
+    upstream_repository: https://github.com/grobidOrg/grobid
+    declared_license: Apache-2.0
+    integration_mode: http_service
+    vendored: false
+    redistributable_status_confirmed: false
+  - project_name: LightRAG
+    upstream_repository: https://github.com/HKUDS/LightRAG
+    declared_license: MIT
+    integration_mode: http_service
+    vendored: false
+    redistributable_status_confirmed: false
+  - project_name: KAG
+    upstream_repository: https://github.com/OpenSPG/KAG
+    declared_license: Apache-2.0
+    integration_mode: http_service
+    vendored: false
+    redistributable_status_confirmed: false
+  - project_name: RAGFlow
+    upstream_repository: https://github.com/infiniflow/ragflow
+    declared_license: Apache-2.0
+    integration_mode: http_service
+    vendored: false
+    redistributable_status_confirmed: false

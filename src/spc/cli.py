@@ -8,6 +8,27 @@ from typing import Annotated
 
 import typer
 
+from .backends import (
+    BackendCapability,
+    BackendRegistryError,
+    BackendRunRecord,
+    BackendRunRepository,
+    BackendRuntimeAvailability,
+    BackendUnavailableError,
+    ExternalBackendDescriptor,
+    ExternalDocumentElement,
+    ExternalDocumentParseInput,
+    ExternalDocumentParseProposal,
+    ExternalDocumentStructureService,
+    ExternalLiteratureRetrievalHit,
+    ExternalLiteratureRetrievalQuery,
+    ExternalLiteratureRetrievalResult,
+    ExternalRetrievalResolution,
+    ExternalStructureRebindingResult,
+    ReboundDocumentElement,
+    ScholarlyMetadataProposal,
+    default_backend_registry,
+)
 from .adapters.ft_agent import FTAgentAdapter
 from .approval import (
     ApprovalContextError,
@@ -385,23 +406,64 @@ def structure_literature(
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
         "knowledge"
     ),
-    extractor: Annotated[str, typer.Option("--extractor")] = "auto",
+    backend: Annotated[str, typer.Option("--backend")] = "builtin",
+    promote_external: Annotated[
+        bool,
+        typer.Option(
+            "--promote-external",
+            help="Apply the deterministic selection policy after exact rebinding.",
+        ),
+    ] = False,
 ) -> None:
     """Create an exact-offset document structure for one representation."""
-    if extractor != "auto":
-        raise typer.BadParameter("only the deterministic auto extractor is available")
-    result = DocumentStructureService().extract(
-        literature_id,
-        representation_id,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
-    )
+    repositories = KnowledgeRepositories(knowledge_dir)
+    evidence_store = KnowledgeEvidenceStore(knowledge_dir)
+    backend_run_id = None
+    external_proposal_id = None
+    if backend == "builtin":
+        result = DocumentStructureService().extract(
+            literature_id,
+            representation_id,
+            repositories,
+            evidence_store,
+        )
+        selection = result.selection
+    else:
+        registry = default_backend_registry()
+        try:
+            adapter = registry.resolve_capability(
+                BackendCapability.DOCUMENT_PARSING, backend_id=backend
+            )
+        except (BackendRegistryError, ValueError) as error:
+            raise typer.BadParameter(str(error)) from error
+        if not hasattr(adapter, "parse"):
+            raise typer.BadParameter(
+                f"backend {backend!r} has no configured document parser"
+            )
+        try:
+            external = ExternalDocumentStructureService().structure(
+                literature_id,
+                representation_id,
+                adapter,
+                repositories,
+                evidence_store,
+                promote=promote_external,
+            )
+        except BackendUnavailableError as error:
+            raise typer.BadParameter(str(error)) from error
+        result = external.structure
+        selection = external.selection
+        backend_run_id = external.run_record.run_id
+        external_proposal_id = external.proposal.proposal_id
     report = {
         "structure_id": result.artifact.structure_id,
         "structure_selection_id": (
-            result.selection.selection_id if result.selection is not None else None
+            selection.selection_id if selection is not None else None
         ),
-        "authoritative": result.selection is not None,
+        "authoritative": selection is not None,
+        "backend_id": backend,
+        "backend_run_id": backend_run_id,
+        "external_proposal_id": external_proposal_id,
         "representation_id": result.artifact.representation_id,
         "pages": sum(
             block.block_type.value == "page" for block in result.blocks
@@ -418,6 +480,66 @@ def structure_literature(
         "warnings": result.artifact.warnings,
     }
     typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+@app.command("backends")
+def list_backends() -> None:
+    """List registered backend adapters and current runtime availability."""
+    registry = default_backend_registry()
+    rows = []
+    for descriptor in registry.list_descriptors():
+        availability = registry.inspect_runtime(descriptor.backend_id)
+        rows.append(
+            {
+                "backend_id": descriptor.backend_id,
+                "capabilities": tuple(
+                    item.value for item in descriptor.capability_types
+                ),
+                "available": availability.available,
+                "backend_version": (
+                    availability.detected_version or descriptor.backend_version
+                ),
+                "adapter_version": descriptor.adapter_version,
+                "integration_mode": descriptor.integration_mode.value,
+                "license_status": descriptor.license_status.value,
+            }
+        )
+    typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+
+
+@app.command("backend-info")
+def backend_info(
+    backend_id: Annotated[str, typer.Argument()],
+) -> None:
+    """Inspect one backend descriptor without importing optional engines."""
+    registry = default_backend_registry()
+    try:
+        backend = registry.resolve(backend_id)
+    except BackendRegistryError as error:
+        raise typer.BadParameter(str(error)) from error
+    availability = registry.inspect_runtime(backend_id)
+    typer.echo(
+        json.dumps(
+            {
+                "descriptor": backend.descriptor.model_dump(mode="json"),
+                "runtime": availability.model_dump(mode="json"),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+@app.command("inspect-backend-run")
+def inspect_backend_run(
+    run_id: Annotated[str, typer.Argument()],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+) -> None:
+    """Inspect immutable backend invocation provenance."""
+    record = BackendRunRepository(knowledge_dir).get(run_id)
+    typer.echo(record.model_dump_json(indent=2))
 
 
 @app.command("select-document-structure")
@@ -1015,6 +1137,19 @@ def schema_command(
 ) -> None:
     """Export JSON Schemas for core contracts."""
     models = (
+        ExternalBackendDescriptor,
+        BackendRuntimeAvailability,
+        ExternalDocumentParseInput,
+        ExternalDocumentElement,
+        ExternalDocumentParseProposal,
+        ReboundDocumentElement,
+        ExternalStructureRebindingResult,
+        ExternalLiteratureRetrievalQuery,
+        ExternalLiteratureRetrievalHit,
+        ExternalLiteratureRetrievalResult,
+        ExternalRetrievalResolution,
+        ScholarlyMetadataProposal,
+        BackendRunRecord,
         AcquisitionAttemptRecord,
         LiteratureAcquisitionRequest,
         FullTextCandidate,

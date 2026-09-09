@@ -403,3 +403,51 @@ the main scientific section path, and locally negative regions override a broad
 article container. PDF regions remain `unknown` until a reliable layout-aware
 extractor exists. Integer-numbered PDF lines are treated conservatively as
 unresolved text rather than inferred headings or list items.
+
+## Knowledge Layer K1F0 backend adapters
+
+K1F0 adds a vendor-neutral optional adapter boundary for mature open-source
+engines while retaining all scientific authority inside SPC:
+
+```text
+SPC Core and trusted evidence contracts
+                 ^
+      exact rebinding + validation
+                 ^
+       Backend Adapter Layer
+                 |
+ Docling / PaperQA2 / GROBID / MinerU
+ LightRAG / KAG / RAGFlow-compatible services
+```
+
+External engines provide capabilities. SPC retains scientific authority.
+Their document, retrieval, or metadata output is always a content-bound
+`external_proposal`; it cannot directly create an `EvidenceSpan`, scientific
+claim, knowledge relation, or plan. Document text must be found unambiguously
+in the current SPC canonical text, and retrieval snippets must additionally
+resolve through the current accepted representation and selected structure.
+
+The base installation has no Docling, PaperQA2, MinerU, GROBID, graph service,
+or model dependency. Optional Python integrations are lazy-loaded through
+`spc[docling]` or `spc[paperqa]`; subprocess/service adapters require explicit
+local configuration. No upstream source is vendored. License declarations and
+redistribution-review state are recorded in `backend_licenses.yaml`.
+
+```powershell
+spc backends
+spc backend-info docling
+spc inspect-backend-run backend-run-... --knowledge-dir knowledge
+
+spc structure-literature `
+  --literature-id literature-... `
+  --representation-id literature-representation-... `
+  --backend builtin `
+  --knowledge-dir knowledge
+```
+
+`--backend docling` is available only when the optional package is installed.
+Its result is audit-only by default. `--promote-external` explicitly submits an
+exactly rebound result to the existing deterministic, anti-downgrade structure
+selection policy. Every supported external service invocation stores an
+immutable `BackendRunRecord` containing only IDs and hashes—never API keys or
+raw credentials.

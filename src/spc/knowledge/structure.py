@@ -182,6 +182,8 @@ def _make_cell(
         "text_hash": _text_hash(text) if text is not None else None,
     }
     identity = {key: value for key, value in identity.items() if value is not None}
+    if not canonical_block_refs and start_offset is not None:
+        identity.pop("canonical_block_refs", None)
     cell_id = f"table-cell-{content_hash(identity)[:24]}"
     payload = {"cell_id": cell_id, **identity}
     return TableCellStructure(**payload, content_hash=content_hash(payload))
