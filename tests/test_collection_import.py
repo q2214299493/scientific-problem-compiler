@@ -662,7 +662,7 @@ def test_collection_page_exact_bytes_are_hash_verifiable(tmp_path: Path) -> None
         / artifact.artifact_id
         / "content.bin"
     )
-    content_path.chmod(stat.S_IWRITE)
+    content_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     content_path.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="hash changed|byte size changed"):
         repos.collection_page_artifacts.verify_page_record(page)
