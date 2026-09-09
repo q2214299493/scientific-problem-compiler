@@ -8,12 +8,14 @@ from ..contracts import (
     BackendIntegrationMode,
     BackendLicenseStatus,
     BackendRuntimeAvailability,
+    BackendRuntimeIdentity,
     ExternalBackendDescriptor,
     ExternalLiteratureRetrievalHit,
     ExternalLiteratureRetrievalQuery,
     ExternalLiteratureRetrievalResult,
     ExternalProposalStatus,
 )
+from ..provenance import build_backend_runtime_identity
 from ...serialization import content_hash
 
 
@@ -28,7 +30,7 @@ def _descriptor() -> ExternalBackendDescriptor:
         "backend_id": "paperqa2",
         "backend_name": "PaperQA2",
         "backend_version": "runtime-resolved",
-        "adapter_version": "1.0.0",
+        "adapter_version": "1.1.0",
         "capability_types": (BackendCapability.LITERATURE_RETRIEVAL,),
         "integration_mode": BackendIntegrationMode.PYTHON_LIBRARY,
         "package_name": "paper-qa",
@@ -71,30 +73,47 @@ class PaperQALiteratureRetrievalBackend:
 
     descriptor = _descriptor()
 
-    def __init__(self, runner: PaperQARunner | None = None) -> None:
+    def __init__(
+        self,
+        runner: PaperQARunner | None = None,
+        *,
+        runner_id: str | None = None,
+        runner_version: str | None = None,
+    ) -> None:
+        if runner is not None and (not runner_id or not runner_version):
+            raise ValueError("configured PaperQA runner requires explicit ID and version")
         self._runner = runner
+        self._runner_id = runner_id
+        self._runner_version = runner_version
+
+    @staticmethod
+    def _installed_version() -> str | None:
+        try:
+            if util.find_spec("paperqa") is None:
+                return None
+            return metadata.version("paper-qa")
+        except (
+            ImportError,
+            metadata.PackageNotFoundError,
+            ModuleNotFoundError,
+            ValueError,
+        ):
+            return None
 
     def inspect_availability(self) -> BackendRuntimeAvailability:
         if self._runner is not None:
             return BackendRuntimeAvailability(
                 backend_id=self.descriptor.backend_id,
                 available=True,
-                detected_version="configured-runner",
+                detected_version=self._installed_version() or self._runner_version,
             )
-        try:
-            installed = util.find_spec("paperqa") is not None
-        except (ImportError, ModuleNotFoundError, ValueError):
-            installed = False
-        if not installed:
+        version = self._installed_version()
+        if version is None:
             return BackendRuntimeAvailability(
                 backend_id=self.descriptor.backend_id,
                 available=False,
                 reason="optional package 'paper-qa' is not installed",
             )
-        try:
-            version = metadata.version("paper-qa")
-        except metadata.PackageNotFoundError:
-            version = "installed-version-unresolved"
         return BackendRuntimeAvailability(
             backend_id=self.descriptor.backend_id,
             available=False,
@@ -102,13 +121,36 @@ class PaperQALiteratureRetrievalBackend:
             reason="PaperQA is installed but no explicit SPC runner is configured",
         )
 
+    def resolve_runtime_identity(self) -> BackendRuntimeIdentity:
+        availability = self.inspect_availability()
+        if (
+            not availability.available
+            or availability.detected_version is None
+            or self._runner_id is None
+            or self._runner_version is None
+        ):
+            raise RuntimeError(availability.reason or "PaperQA runner is unavailable")
+        return build_backend_runtime_identity(
+            self.descriptor,
+            resolved_backend_version=availability.detected_version,
+            runtime_provider=f"runner:{self._runner_id}@{self._runner_version}",
+            runtime_config_hash=content_hash(
+                {
+                    "runner_id": self._runner_id,
+                    "runner_version": self._runner_version,
+                }
+            ),
+        )
+
     def retrieve(self, query: ExternalLiteratureRetrievalQuery) -> ExternalLiteratureRetrievalResult:
         if self._runner is None:
             raise RuntimeError(self.inspect_availability().reason)
+        runtime = self.resolve_runtime_identity()
         hits = tuple(_hit(item) for item in self._runner(query))
         identity = {
             "backend_id": self.descriptor.backend_id,
             "backend_descriptor_hash": self.descriptor.content_hash,
+            "runtime_identity_hash": runtime.content_hash,
             "query_hash": content_hash(query.model_dump(mode="json")),
             "hits": hits,
             "status": ExternalProposalStatus.COMPLETE,

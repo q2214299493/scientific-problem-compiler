@@ -12,10 +12,18 @@ from ..contracts import (
     BackendInputBinding,
     BackendRunStatus,
     BackendRuntimeAvailability,
+    BackendRuntimeIdentity,
     ExternalBackendDescriptor,
     ScholarlyMetadataProposal,
 )
-from ..provenance import BackendRunRecord, BackendRunRepository, create_backend_run_record
+from ..provenance import (
+    BackendInvocationError,
+    BackendRunRecord,
+    BackendRunRepository,
+    build_backend_runtime_identity,
+    create_backend_run_record,
+    probe_backend_runtime,
+)
 from ...repositories import IdentityBoundRepository
 from ...serialization import content_hash
 
@@ -31,7 +39,7 @@ def _descriptor() -> ExternalBackendDescriptor:
         "backend_id": "grobid",
         "backend_name": "GROBID",
         "backend_version": "service-resolved",
-        "adapter_version": "1.0.0",
+        "adapter_version": "1.1.0",
         "capability_types": (BackendCapability.SCHOLARLY_METADATA,),
         "integration_mode": BackendIntegrationMode.HTTP_SERVICE,
         "source_project": "https://github.com/grobidOrg/grobid",
@@ -51,8 +59,20 @@ class GROBIDScholarlyMetadataBackend:
 
     descriptor = _descriptor()
 
-    def __init__(self, runner: GROBIDRunner | None = None) -> None:
+    def __init__(
+        self,
+        runner: GROBIDRunner | None = None,
+        *,
+        runner_id: str | None = None,
+        runner_version: str | None = None,
+        service_version: str | None = None,
+    ) -> None:
+        if runner is not None and (not runner_id or not runner_version or not service_version):
+            raise ValueError("configured GROBID runner requires runner ID/version and service version")
         self._runner = runner
+        self._runner_id = runner_id
+        self._runner_version = runner_version
+        self._service_version = service_version
 
     def inspect_availability(self) -> BackendRuntimeAvailability:
         if self._runner is None:
@@ -64,7 +84,28 @@ class GROBIDScholarlyMetadataBackend:
         return BackendRuntimeAvailability(
             backend_id=self.descriptor.backend_id,
             available=True,
-            detected_version="configured-service",
+            detected_version=self._service_version,
+        )
+
+    def resolve_runtime_identity(self) -> BackendRuntimeIdentity:
+        availability = self.inspect_availability()
+        if (
+            not availability.available
+            or availability.detected_version is None
+            or self._runner_id is None
+            or self._runner_version is None
+        ):
+            raise RuntimeError(availability.reason or "GROBID service is unavailable")
+        return build_backend_runtime_identity(
+            self.descriptor,
+            resolved_backend_version=availability.detected_version,
+            runtime_provider=f"runner:{self._runner_id}@{self._runner_version}",
+            runtime_config_hash=content_hash(
+                {
+                    "runner_id": self._runner_id,
+                    "runner_version": self._runner_version,
+                }
+            ),
         )
 
     def extract_metadata(
@@ -72,6 +113,7 @@ class GROBIDScholarlyMetadataBackend:
     ) -> ScholarlyMetadataProposal:
         if self._runner is None:
             raise RuntimeError(self.inspect_availability().reason)
+        runtime = self.resolve_runtime_identity()
         candidate = self._runner(source, media_type, config)
         allowed = {
             "title",
@@ -83,6 +125,8 @@ class GROBIDScholarlyMetadataBackend:
         }
         identity = {
             "backend_id": self.descriptor.backend_id,
+            "backend_descriptor_hash": self.descriptor.content_hash,
+            "runtime_identity_hash": runtime.content_hash,
             "authors": tuple(candidate.get("authors", ())),
             "references": tuple(candidate.get("references", ())),
             "section_hints": tuple(candidate.get("section_hints", ())),
@@ -133,28 +177,35 @@ class ScholarlyMetadataService:
                 input_hash=source_hash,
             ),
         )
-        availability = backend.inspect_availability()
-        if not availability.available:
+        runtime_probe = probe_backend_runtime(backend, knowledge_root)
+        runtime = runtime_probe.runtime_identity
+        if runtime_probe.failure_status is not None:
             run = create_backend_run_record(
                 descriptor=descriptor,
+                runtime_identity=runtime,
                 capability=BackendCapability.SCHOLARLY_METADATA,
                 input_bindings=inputs,
                 config_hash=config_hash,
                 output_hash=None,
-                status=BackendRunStatus.UNAVAILABLE,
-                warnings=(availability.reason or "backend is unavailable",),
+                status=runtime_probe.failure_status,
+                warnings=(runtime_probe.failure_category or "runtime_probe_failed",),
             )
             BackendRunRepository(knowledge_root).put(run.run_id, run)
-            raise RuntimeError(f"backend {descriptor.backend_id} is unavailable; run_id={run.run_id}")
+            raise BackendInvocationError(f"backend {descriptor.backend_id} runtime probe failed; run_id={run.run_id}")
         try:
             proposal = ScholarlyMetadataProposal.model_validate(
                 backend.extract_metadata(source, media_type=media_type, config=config)
             )
-            if proposal.backend_id != descriptor.backend_id:
+            if (
+                proposal.backend_id != descriptor.backend_id
+                or proposal.backend_descriptor_hash != descriptor.content_hash
+                or proposal.runtime_identity_hash != runtime.content_hash
+            ):
                 raise ValueError("scholarly metadata proposal backend binding is invalid")
-        except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+        except Exception as error:
             run = create_backend_run_record(
                 descriptor=descriptor,
+                runtime_identity=runtime,
                 capability=BackendCapability.SCHOLARLY_METADATA,
                 input_bindings=inputs,
                 config_hash=config_hash,
@@ -163,15 +214,17 @@ class ScholarlyMetadataService:
                 warnings=("backend invocation or output validation failed",),
             )
             BackendRunRepository(knowledge_root).put(run.run_id, run)
-            raise ValueError(f"scholarly metadata backend failed; run_id={run.run_id}") from error
+            raise BackendInvocationError(f"scholarly metadata backend failed; run_id={run.run_id}") from error
         ScholarlyMetadataProposalRepository(knowledge_root).put(proposal.proposal_id, proposal)
         run = create_backend_run_record(
             descriptor=descriptor,
+            runtime_identity=runtime,
             capability=BackendCapability.SCHOLARLY_METADATA,
             input_bindings=inputs,
             config_hash=config_hash,
             output_hash=proposal.content_hash,
             status=BackendRunStatus.SUCCEEDED,
+            output_count=1,
         )
         BackendRunRepository(knowledge_root).put(run.run_id, run)
         return ScholarlyMetadataOutcome(proposal=proposal, run_record=run)

@@ -10,10 +10,14 @@ import typer
 
 from .backends import (
     BackendCapability,
+    BackendDescriptorRepository,
+    BackendInvocationError,
     BackendRegistryError,
     BackendRunRecord,
     BackendRunRepository,
     BackendRuntimeAvailability,
+    BackendRuntimeIdentity,
+    BackendRuntimeIdentityRepository,
     BackendUnavailableError,
     ExternalBackendDescriptor,
     ExternalDocumentElement,
@@ -24,6 +28,8 @@ from .backends import (
     ExternalLiteratureRetrievalQuery,
     ExternalLiteratureRetrievalResult,
     ExternalRetrievalResolution,
+    ExternalRetrievalResolutionBatch,
+    ExternalStructurePromotionRecord,
     ExternalStructureRebindingResult,
     ReboundDocumentElement,
     ScholarlyMetadataProposal,
@@ -180,10 +186,7 @@ from .knowledge.collection import (
     make_collection_scope_policy,
 )
 from .knowledge.evidence_migration import migrate_knowledge_evidence
-from .knowledge.structure import (
-    DocumentStructureService,
-    inspect_document_structure,
-)
+from .knowledge.structure import inspect_document_structure
 from .knowledge.structure_selection import DocumentStructureSelector
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
@@ -272,9 +275,7 @@ def ingest_literature(
 def add_literature(
     source: Annotated[str, typer.Argument()],
     domain: Annotated[str, typer.Option("--domain")],
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
     metadata: Annotated[
         Path | None,
@@ -299,9 +300,7 @@ def add_literature(
 def import_literature_collection(
     project_url: Annotated[str, typer.Argument()],
     domain: Annotated[str, typer.Option("--domain")],
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
     connector: Annotated[str, typer.Option("--connector")] = "generic-html",
     max_pages: Annotated[int, typer.Option("--max-pages", min=1)] = 100,
@@ -329,9 +328,7 @@ def import_literature_collection(
         max_depth=max_depth,
         max_resources=max_resources,
         allowed_origins=(tuple(allowed_origin) if allowed_origin else None),
-        allowed_path_prefixes=(
-            tuple(allowed_path_prefix) if allowed_path_prefix else None
-        ),
+        allowed_path_prefixes=(tuple(allowed_path_prefix) if allowed_path_prefix else None),
         allow_external_literature_links=allow_external_literature_links,
     )
     definition = make_collection_definition(
@@ -352,9 +349,7 @@ def select_literature_representation(
     literature_id: Annotated[str, typer.Option("--literature-id")],
     selected_by: Annotated[str, typer.Option("--selected-by")],
     rationale: Annotated[str, typer.Option("--rationale")],
-    representation_id: Annotated[
-        str | None, typer.Option("--representation-id")
-    ] = None,
+    representation_id: Annotated[str | None, typer.Option("--representation-id")] = None,
     ingestion_id: Annotated[
         str | None,
         typer.Option(
@@ -362,16 +357,12 @@ def select_literature_representation(
             help="Compatibility-only PDF ingestion selector.",
         ),
     ] = None,
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
 ) -> None:
     """Select one validated PDF/HTML representation without curating it."""
     if (representation_id is None) == (ingestion_id is None):
-        raise typer.BadParameter(
-            "provide exactly one of --representation-id or compatibility --ingestion-id"
-        )
+        raise typer.BadParameter("provide exactly one of --representation-id or compatibility --ingestion-id")
     outcome = LiteratureRepresentationSelector().select(
         literature_id,
         representation_id or ingestion_id or "",
@@ -385,9 +376,7 @@ def select_literature_representation(
 
 @app.command("migrate-knowledge-evidence")
 def migrate_knowledge_evidence_command(
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
 ) -> None:
     """Copy legacy literature evidence into the shared knowledge evidence store."""
@@ -403,9 +392,7 @@ def migrate_knowledge_evidence_command(
 def structure_literature(
     literature_id: Annotated[str, typer.Option("--literature-id")],
     representation_id: Annotated[str, typer.Option("--representation-id")],
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     backend: Annotated[str, typer.Option("--backend")] = "builtin",
     promote_external: Annotated[
         bool,
@@ -414,14 +401,27 @@ def structure_literature(
             help="Apply the deterministic selection policy after exact rebinding.",
         ),
     ] = False,
+    docling_artifacts_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--docling-artifacts-path",
+            help="Explicit local Docling model artifacts directory; network downloads are disabled.",
+        ),
+    ] = None,
 ) -> None:
     """Create an exact-offset document structure for one representation."""
     repositories = KnowledgeRepositories(knowledge_dir)
     evidence_store = KnowledgeEvidenceStore(knowledge_dir)
     backend_run_id = None
     external_proposal_id = None
+    external_promotion_id = None
+    registry = default_backend_registry(docling_artifacts_path=docling_artifacts_path)
     if backend == "builtin":
-        result = DocumentStructureService().extract(
+        adapter = registry.resolve_capability(
+            BackendCapability.BUILTIN_STRUCTURE,
+            backend_id="builtin-document-parser",
+        )
+        result = adapter.structure(
             literature_id,
             representation_id,
             repositories,
@@ -429,17 +429,12 @@ def structure_literature(
         )
         selection = result.selection
     else:
-        registry = default_backend_registry()
         try:
-            adapter = registry.resolve_capability(
-                BackendCapability.DOCUMENT_PARSING, backend_id=backend
-            )
+            adapter = registry.resolve_capability(BackendCapability.DOCUMENT_PARSING, backend_id=backend)
         except (BackendRegistryError, ValueError) as error:
             raise typer.BadParameter(str(error)) from error
         if not hasattr(adapter, "parse"):
-            raise typer.BadParameter(
-                f"backend {backend!r} has no configured document parser"
-            )
+            raise typer.BadParameter(f"backend {backend!r} has no configured document parser")
         try:
             external = ExternalDocumentStructureService().structure(
                 literature_id,
@@ -449,31 +444,25 @@ def structure_literature(
                 evidence_store,
                 promote=promote_external,
             )
-        except BackendUnavailableError as error:
+        except (BackendInvocationError, BackendUnavailableError) as error:
             raise typer.BadParameter(str(error)) from error
         result = external.structure
         selection = external.selection
         backend_run_id = external.run_record.run_id
         external_proposal_id = external.proposal.proposal_id
+        external_promotion_id = external.promotion.promotion_id if external.promotion is not None else None
     report = {
         "structure_id": result.artifact.structure_id,
-        "structure_selection_id": (
-            selection.selection_id if selection is not None else None
-        ),
+        "structure_selection_id": (selection.selection_id if selection is not None else None),
         "authoritative": selection is not None,
         "backend_id": backend,
         "backend_run_id": backend_run_id,
         "external_proposal_id": external_proposal_id,
+        "external_promotion_id": external_promotion_id,
         "representation_id": result.artifact.representation_id,
-        "pages": sum(
-            block.block_type.value == "page" for block in result.blocks
-        ),
-        "headings": sum(
-            block.block_type.value == "heading" for block in result.blocks
-        ),
-        "paragraphs": sum(
-            block.block_type.value == "paragraph" for block in result.blocks
-        ),
+        "pages": sum(block.block_type.value == "page" for block in result.blocks),
+        "headings": sum(block.block_type.value == "heading" for block in result.blocks),
+        "paragraphs": sum(block.block_type.value == "paragraph" for block in result.blocks),
         "tables": len(result.tables),
         "table_cells": len(result.table_cells),
         "figures": len(result.figures),
@@ -492,13 +481,9 @@ def list_backends() -> None:
         rows.append(
             {
                 "backend_id": descriptor.backend_id,
-                "capabilities": tuple(
-                    item.value for item in descriptor.capability_types
-                ),
+                "capabilities": tuple(item.value for item in descriptor.capability_types),
                 "available": availability.available,
-                "backend_version": (
-                    availability.detected_version or descriptor.backend_version
-                ),
+                "backend_version": (availability.detected_version or descriptor.backend_version),
                 "adapter_version": descriptor.adapter_version,
                 "integration_mode": descriptor.integration_mode.value,
                 "license_status": descriptor.license_status.value,
@@ -533,13 +518,23 @@ def backend_info(
 @app.command("inspect-backend-run")
 def inspect_backend_run(
     run_id: Annotated[str, typer.Argument()],
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
 ) -> None:
     """Inspect immutable backend invocation provenance."""
     record = BackendRunRepository(knowledge_dir).get(run_id)
-    typer.echo(record.model_dump_json(indent=2))
+    descriptor = BackendDescriptorRepository(knowledge_dir).get(record.backend_descriptor_hash)
+    runtime = BackendRuntimeIdentityRepository(knowledge_dir).get(record.runtime_identity_id)
+    typer.echo(
+        json.dumps(
+            {
+                "run": record.model_dump(mode="json"),
+                "descriptor": descriptor.model_dump(mode="json"),
+                "runtime_identity": runtime.model_dump(mode="json"),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
 @app.command("select-document-structure")
@@ -547,9 +542,7 @@ def select_document_structure(
     representation_id: Annotated[str, typer.Option("--representation-id")],
     structure_id: Annotated[str, typer.Option("--structure-id")],
     rationale: Annotated[str, typer.Option("--rationale")],
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     allow_rollback: Annotated[
         bool,
         typer.Option(
@@ -576,9 +569,7 @@ def select_document_structure(
 @app.command("inspect-literature-structure")
 def inspect_literature_structure(
     structure_id: Annotated[str, typer.Option("--structure-id")],
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     page: Annotated[int | None, typer.Option("--page", min=1)] = None,
     section: Annotated[
         list[str] | None,
@@ -600,9 +591,7 @@ def inspect_literature_structure(
         "artifact": result["artifact"].model_dump(mode="json"),
         "blocks": [item.model_dump(mode="json") for item in result["blocks"]],
         "tables": [item.model_dump(mode="json") for item in result["tables"]],
-        "table_cells": [
-            item.model_dump(mode="json") for item in result["table_cells"]
-        ],
+        "table_cells": [item.model_dump(mode="json") for item in result["table_cells"]],
         "figures": [item.model_dump(mode="json") for item in result["figures"]],
     }
     typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
@@ -633,9 +622,7 @@ def interpret(
     output: Annotated[Path, typer.Option("--output")],
     provider: Annotated[str, typer.Option("--provider")] = "mock",
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
 ) -> None:
     """Build a validated ScientificEvidencePacket with an offline provider."""
     if provider != "mock":
@@ -656,9 +643,7 @@ def interpret(
 @app.command()
 def plan(
     context_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
-    evidence_packet_file: Annotated[
-        Path, typer.Argument(exists=True, dir_okay=False, readable=True)
-    ],
+    evidence_packet_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
     domain: Annotated[str, typer.Option("--domain")],
     output_dir: Annotated[Path, typer.Option("--output-dir")],
     provider: Annotated[str, typer.Option("--provider")] = "mock",
@@ -687,9 +672,7 @@ def plan(
             planning_provider = MockPlanningProvider()
         elif provider == "llm":
             if llm_endpoint is None or llm_model is None:
-                raise typer.BadParameter(
-                    "--provider llm requires --llm-endpoint and --llm-model"
-                )
+                raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
             planning_provider = StructuredLLMPlanningProvider(
                 HTTPJSONLLMTransport(
                     llm_endpoint,
@@ -715,13 +698,9 @@ def plan(
         approval_mode=ApprovalMode.INDEPENDENT_REQUIRED,
         policy_version="1.0.0",
     )
-    plan_paths = tuple(
-        output_dir / f"{candidate.plan_id}--{candidate.version}.yaml"
-        for candidate in result.candidates
-    )
+    plan_paths = tuple(output_dir / f"{candidate.plan_id}--{candidate.version}.yaml" for candidate in result.candidates)
     receipt_paths = tuple(
-        output_dir / f"{receipt.plan_id}--compilation-receipt.yaml"
-        for receipt in result.compilation_receipts
+        output_dir / f"{receipt.plan_id}--compilation-receipt.yaml" for receipt in result.compilation_receipts
     )
     output_paths = (
         output_dir / "planning-input.yaml",
@@ -733,27 +712,20 @@ def plan(
     )
     existing = tuple(path for path in output_paths if path.exists())
     if existing:
-        raise typer.BadParameter(
-            "refusing to overwrite planning outputs: "
-            + ", ".join(str(path) for path in existing)
-        )
+        raise typer.BadParameter("refusing to overwrite planning outputs: " + ", ".join(str(path) for path in existing))
     dump_yaml(output_paths[0], planning_input)
     dump_yaml(output_paths[1], result.proposal_set)
     dump_yaml(output_paths[3], trust_policy)
     for path, candidate in zip(plan_paths, result.candidates, strict=True):
         require_safe_path_component(candidate.plan_id, field="plan_id")
         dump_yaml(path, candidate)
-    for path, receipt in zip(
-        receipt_paths, result.compilation_receipts, strict=True
-    ):
+    for path, receipt in zip(receipt_paths, result.compilation_receipts, strict=True):
         dump_yaml(path, receipt)
     validation_payload = {
         "valid": all(report.valid for report in result.reports),
         "reports": [report.model_dump(mode="json") for report in result.reports],
         "candidate_plan_ids": [candidate.plan_id for candidate in result.candidates],
-        "compilation_receipt_ids": [
-            receipt.receipt_id for receipt in result.compilation_receipts
-        ],
+        "compilation_receipt_ids": [receipt.receipt_id for receipt in result.compilation_receipts],
         "trust_policy": trust_policy.model_dump(mode="json"),
         "approved": False,
     }
@@ -804,9 +776,7 @@ def validate(
     kind: Annotated[str, typer.Option("--kind", help="plan or export")] = "plan",
     domain: Annotated[str | None, typer.Option("--domain")] = None,
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     record_output: Annotated[Path | None, typer.Option("--record-output")] = None,
     validation_id: Annotated[str, typer.Option("--validation-id")] = "validation-1",
 ) -> None:
@@ -838,41 +808,21 @@ def validate(
 @app.command()
 def review(
     context_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-    evidence_packet_file: Annotated[
-        Path, typer.Argument(exists=True, dir_okay=False)
-    ],
-    planning_input_file: Annotated[
-        Path, typer.Argument(exists=True, dir_okay=False)
-    ],
-    candidate_plan_file: Annotated[
-        Path, typer.Argument(exists=True, dir_okay=False)
-    ],
-    validation_record_file: Annotated[
-        Path, typer.Argument(exists=True, dir_okay=False)
-    ],
+    evidence_packet_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    planning_input_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    candidate_plan_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    validation_record_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     output: Annotated[Path, typer.Option("--output")],
     provider: Annotated[str, typer.Option("--provider")] = "mock",
-    verdict_output: Annotated[
-        Path | None, typer.Option("--verdict-output")
-    ] = None,
-    review_input_output: Annotated[
-        Path | None, typer.Option("--review-input-output")
-    ] = None,
-    receipt_output: Annotated[
-        Path | None, typer.Option("--receipt-output")
-    ] = None,
-    approver_id: Annotated[
-        str, typer.Option("--approver-id")
-    ] = "independent-scientific-approver",
+    verdict_output: Annotated[Path | None, typer.Option("--verdict-output")] = None,
+    review_input_output: Annotated[Path | None, typer.Option("--review-input-output")] = None,
+    receipt_output: Annotated[Path | None, typer.Option("--receipt-output")] = None,
+    approver_id: Annotated[str, typer.Option("--approver-id")] = "independent-scientific-approver",
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
-    knowledge_dir: Annotated[
-        Path, typer.Option("--knowledge-dir")
-    ] = Path("knowledge"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
     llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
-    llm_api_key_env: Annotated[
-        str, typer.Option("--llm-api-key-env")
-    ] = "SPC_LLM_API_KEY",
+    llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
     temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
     max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
 ) -> None:
@@ -897,9 +847,7 @@ def review(
             approval_provider = MockApprovalProvider()
         elif provider == "llm":
             if llm_endpoint is None or llm_model is None:
-                raise typer.BadParameter(
-                    "--provider llm requires --llm-endpoint and --llm-model"
-                )
+                raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
             approval_provider = StructuredLLMApprovalProvider(
                 HTTPJSONLLMTransport(
                     llm_endpoint,
@@ -924,12 +872,8 @@ def review(
         raise typer.Exit(1) from error
 
     final_verdict_output = verdict_output or output.with_name("approval-verdict.yaml")
-    final_review_input_output = review_input_output or output.with_name(
-        "approval-review-input.yaml"
-    )
-    final_receipt_output = receipt_output or output.with_name(
-        "independent-approval-receipt.yaml"
-    )
+    final_review_input_output = review_input_output or output.with_name("approval-review-input.yaml")
+    final_receipt_output = receipt_output or output.with_name("independent-approval-receipt.yaml")
     existing = tuple(
         path
         for path in (
@@ -941,10 +885,7 @@ def review(
         if path.exists()
     )
     if existing:
-        raise typer.BadParameter(
-            "refusing to overwrite approval outputs: "
-            + ", ".join(str(path) for path in existing)
-        )
+        raise typer.BadParameter("refusing to overwrite approval outputs: " + ", ".join(str(path) for path in existing))
     dump_yaml(output, result.review)
     dump_yaml(final_verdict_output, result.verdict)
     dump_yaml(final_review_input_output, review_input)
@@ -977,12 +918,8 @@ def approve(
     verdict_id: Annotated[str, typer.Option("--verdict-id")],
     approver_id: Annotated[str, typer.Option("--approver-id")],
     score: Annotated[int, typer.Option("--score", min=0, max=5)] = 3,
-    required_fixes_file: Annotated[
-        Path | None, typer.Option("--required-fixes", exists=True, dir_okay=False)
-    ] = None,
-    fix_resolutions_file: Annotated[
-        Path | None, typer.Option("--fix-resolutions", exists=True, dir_okay=False)
-    ] = None,
+    required_fixes_file: Annotated[Path | None, typer.Option("--required-fixes", exists=True, dir_okay=False)] = None,
+    fix_resolutions_file: Annotated[Path | None, typer.Option("--fix-resolutions", exists=True, dir_okay=False)] = None,
     human_decisions_required_file: Annotated[
         Path | None, typer.Option("--human-decisions-required", exists=True, dir_okay=False)
     ] = None,
@@ -994,26 +931,17 @@ def approve(
     plan = load_model(plan_file, ScientificQuestionPlan)
     scores = ApprovalScores(**{name: score for name in ApprovalScores.model_fields})
     required_fixes = tuple(
-        RequiredFix.model_validate(item)
-        for item in (load_data(required_fixes_file) if required_fixes_file else [])
+        RequiredFix.model_validate(item) for item in (load_data(required_fixes_file) if required_fixes_file else [])
     )
     fix_resolutions = tuple(
-        FixResolution.model_validate(item)
-        for item in (load_data(fix_resolutions_file) if fix_resolutions_file else [])
+        FixResolution.model_validate(item) for item in (load_data(fix_resolutions_file) if fix_resolutions_file else [])
     )
     human_decisions_required = tuple(
-        str(item)
-        for item in (
-            load_data(human_decisions_required_file) if human_decisions_required_file else []
-        )
+        str(item) for item in (load_data(human_decisions_required_file) if human_decisions_required_file else [])
     )
     human_decision_resolutions = tuple(
         HumanDecisionResolution.model_validate(item)
-        for item in (
-            load_data(human_decision_resolutions_file)
-            if human_decision_resolutions_file
-            else []
-        )
+        for item in (load_data(human_decision_resolutions_file) if human_decision_resolutions_file else [])
     )
     verdict = ScientificPlanApprover(approver_id).bind_verdict(
         plan,
@@ -1047,14 +975,10 @@ def compare(
 def export(
     plan_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     verdict_file: Annotated[Path, typer.Option("--verdict", exists=True, dir_okay=False)],
-    validation_file: Annotated[
-        Path, typer.Option("--validation-record", exists=True, dir_okay=False)
-    ],
+    validation_file: Annotated[Path, typer.Option("--validation-record", exists=True, dir_okay=False)],
     gate_file: Annotated[Path, typer.Option("--gate", exists=True, dir_okay=False)],
     export_id: Annotated[str, typer.Option("--export-id")],
-    trust_policy_file: Annotated[
-        Path, typer.Option("--trust-policy", exists=True, dir_okay=False)
-    ],
+    trust_policy_file: Annotated[Path, typer.Option("--trust-policy", exists=True, dir_okay=False)],
     compilation_receipt_file: Annotated[
         Path | None,
         typer.Option("--compilation-receipt", exists=True, dir_okay=False),
@@ -1074,9 +998,7 @@ def export(
     target: Annotated[str, typer.Option("--target")] = "ft-agent",
     exports_dir: Annotated[Path, typer.Option("--exports-dir")] = Path("exports"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
-    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
-        "knowledge"
-    ),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     human_selected: Annotated[bool, typer.Option("--human-selected")] = False,
 ) -> None:
     """Create a planning-only immutable handoff package after both gates pass."""
@@ -1088,25 +1010,11 @@ def export(
     gate = load_model(gate_file, GateVerdict)
     trust_policy = load_model(trust_policy_file, ProjectTrustPolicy)
     compilation_receipt = (
-        load_model(compilation_receipt_file, PlanCompilationReceipt)
-        if compilation_receipt_file is not None
-        else None
+        load_model(compilation_receipt_file, PlanCompilationReceipt) if compilation_receipt_file is not None else None
     )
-    review_input = (
-        load_model(review_input_file, ApprovalReviewInput)
-        if review_input_file is not None
-        else None
-    )
-    review_record = (
-        load_model(review_record_file, ApprovalReviewRecord)
-        if review_record_file is not None
-        else None
-    )
-    receipt = (
-        load_model(receipt_file, IndependentApprovalReceipt)
-        if receipt_file is not None
-        else None
-    )
+    review_input = load_model(review_input_file, ApprovalReviewInput) if review_input_file is not None else None
+    review_record = load_model(review_record_file, ApprovalReviewRecord) if review_record_file is not None else None
+    receipt = load_model(receipt_file, IndependentApprovalReceipt) if receipt_file is not None else None
     try:
         path = GenericExportService(
             exports_dir,
@@ -1139,6 +1047,7 @@ def schema_command(
     models = (
         ExternalBackendDescriptor,
         BackendRuntimeAvailability,
+        BackendRuntimeIdentity,
         ExternalDocumentParseInput,
         ExternalDocumentElement,
         ExternalDocumentParseProposal,
@@ -1148,6 +1057,8 @@ def schema_command(
         ExternalLiteratureRetrievalHit,
         ExternalLiteratureRetrievalResult,
         ExternalRetrievalResolution,
+        ExternalRetrievalResolutionBatch,
+        ExternalStructurePromotionRecord,
         ScholarlyMetadataProposal,
         BackendRunRecord,
         AcquisitionAttemptRecord,

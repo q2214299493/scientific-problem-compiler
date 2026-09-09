@@ -11,7 +11,13 @@ from ..contracts import (
     ExternalLiteratureRetrievalResult,
     ScientificRetrievalBackend,
 )
-from ..provenance import BackendRunRecord, BackendRunRepository, create_backend_run_record
+from ..provenance import (
+    BackendInvocationError,
+    BackendRunRecord,
+    BackendRunRepository,
+    create_backend_run_record,
+    probe_backend_runtime,
+)
 from ...repositories import IdentityBoundRepository
 from ...serialization import content_hash
 
@@ -48,25 +54,6 @@ class ExternalLiteratureRetrievalService:
                 input_hash=query_hash,
             ),
         )
-        availability = backend.inspect_availability()
-        if not availability.available:
-            run = create_backend_run_record(
-                descriptor=descriptor,
-                capability=BackendCapability.LITERATURE_RETRIEVAL,
-                input_bindings=input_bindings,
-                config_hash=content_hash(
-                    {
-                        "corpus_scope": query.corpus_scope,
-                        "metadata_filters": query.metadata_filters,
-                        "max_results": query.max_results,
-                    }
-                ),
-                output_hash=None,
-                status=BackendRunStatus.UNAVAILABLE,
-                warnings=(availability.reason or "backend is unavailable",),
-            )
-            BackendRunRepository(knowledge_root).put(run.run_id, run)
-            raise RuntimeError(f"backend {descriptor.backend_id} is unavailable; run_id={run.run_id}")
         config_hash = content_hash(
             {
                 "corpus_scope": query.corpus_scope,
@@ -74,17 +61,34 @@ class ExternalLiteratureRetrievalService:
                 "max_results": query.max_results,
             }
         )
+        runtime_probe = probe_backend_runtime(backend, knowledge_root)
+        runtime = runtime_probe.runtime_identity
+        if runtime_probe.failure_status is not None:
+            run = create_backend_run_record(
+                descriptor=descriptor,
+                runtime_identity=runtime,
+                capability=BackendCapability.LITERATURE_RETRIEVAL,
+                input_bindings=input_bindings,
+                config_hash=config_hash,
+                output_hash=None,
+                status=runtime_probe.failure_status,
+                warnings=(runtime_probe.failure_category or "runtime_probe_failed",),
+            )
+            BackendRunRepository(knowledge_root).put(run.run_id, run)
+            raise BackendInvocationError(f"backend {descriptor.backend_id} runtime probe failed; run_id={run.run_id}")
         try:
             result = ExternalLiteratureRetrievalResult.model_validate(backend.retrieve(query))
             if (
                 result.backend_id != descriptor.backend_id
                 or result.backend_descriptor_hash != descriptor.content_hash
+                or result.runtime_identity_hash != runtime.content_hash
                 or result.query_hash != query_hash
             ):
                 raise ValueError("external retrieval result binding is invalid")
-        except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+        except Exception as error:
             run = create_backend_run_record(
                 descriptor=descriptor,
+                runtime_identity=runtime,
                 capability=BackendCapability.LITERATURE_RETRIEVAL,
                 input_bindings=input_bindings,
                 config_hash=config_hash,
@@ -93,17 +97,18 @@ class ExternalLiteratureRetrievalService:
                 warnings=("backend invocation or output validation failed",),
             )
             BackendRunRepository(knowledge_root).put(run.run_id, run)
-            raise ValueError(f"external retrieval backend failed; run_id={run.run_id}") from error
+            raise BackendInvocationError(f"external retrieval backend failed; run_id={run.run_id}") from error
         ExternalRetrievalResultRepository(knowledge_root).put(result.result_id, result)
         run = create_backend_run_record(
             descriptor=descriptor,
+            runtime_identity=runtime,
             capability=BackendCapability.LITERATURE_RETRIEVAL,
             input_bindings=input_bindings,
             config_hash=config_hash,
             output_hash=result.content_hash,
             status=BackendRunStatus.SUCCEEDED,
             warnings=result.warnings,
-            resolved_count=len(result.hits),
+            candidate_count=len(result.hits),
         )
         BackendRunRepository(knowledge_root).put(run.run_id, run)
         return ExternalRetrievalOutcome(result=result, run_record=run)

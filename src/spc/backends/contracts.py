@@ -41,6 +41,7 @@ def _reject_sensitive_warnings(values: tuple[str, ...]) -> None:
 
 class BackendCapability(StrEnum):
     DOCUMENT_PARSING = "document_parsing"
+    BUILTIN_STRUCTURE = "builtin_structure"
     SCHOLARLY_METADATA = "scholarly_metadata"
     LITERATURE_RETRIEVAL = "literature_retrieval"
     KNOWLEDGE_EXTRACTION = "knowledge_extraction"
@@ -128,6 +129,32 @@ class ExternalBackendDescriptor(StrictModel):
         return self
 
 
+class BackendRuntimeIdentity(StrictModel):
+    runtime_identity_id: NonBlankStr
+    backend_id: NonBlankStr
+    backend_descriptor_hash: Sha256Str
+    resolved_backend_version: NonBlankStr
+    adapter_version: NonBlankStr
+    integration_mode: BackendIntegrationMode
+    runtime_provider: NonBlankStr
+    runtime_config_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> BackendRuntimeIdentity:
+        identity = self.model_dump(
+            mode="json",
+            exclude={"runtime_identity_id", "content_hash"},
+        )
+        expected_id = f"backend-runtime-{content_hash(identity)[:24]}"
+        if self.runtime_identity_id != expected_id:
+            raise ValueError("BackendRuntimeIdentity ID is not content-bound")
+        payload = {"runtime_identity_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("BackendRuntimeIdentity content_hash is invalid")
+        return self
+
+
 class BackendRuntimeAvailability(StrictModel):
     backend_id: NonBlankStr
     available: bool
@@ -168,12 +195,13 @@ class ExternalDocumentElement(StrictModel):
     claimed_start_offset: int | None = Field(default=None, ge=0)
     claimed_end_offset: int | None = Field(default=None, gt=0)
     heading_level: int | None = Field(default=None, ge=1, le=6)
-    content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN
+    proposed_content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN
     table_ref: NonBlankStr | None = None
     row_index: int | None = Field(default=None, ge=0)
     column_index: int | None = Field(default=None, ge=0)
     row_span: int = Field(default=1, ge=1)
     column_span: int = Field(default=1, ge=1)
+    is_header: bool = False
     backend_native_ref: NonBlankStr | None = None
     confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     backend_metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
@@ -196,6 +224,10 @@ class ExternalDocumentElement(StrictModel):
                 raise ValueError("external table caption requires only table_ref")
         elif any(value is not None for value in cell_fields):
             raise ValueError("only an external table cell may set cell coordinates")
+        if self.kind != ExternalDocumentElementKind.TABLE_CELL and (
+            self.row_span != 1 or self.column_span != 1 or self.is_header
+        ):
+            raise ValueError("only an external table cell may set topology fields")
         if (self.claimed_start_offset is None) != (self.claimed_end_offset is None):
             raise ValueError("external claimed offset binding must be complete")
         identity = self.model_dump(mode="json", exclude={"element_id", "content_hash"}, exclude_none=True)
@@ -212,6 +244,7 @@ class ExternalDocumentParseProposal(StrictModel):
     proposal_id: NonBlankStr
     backend_id: NonBlankStr
     backend_descriptor_hash: Sha256Str
+    runtime_identity_hash: Sha256Str
     artifact_id: NonBlankStr
     artifact_sha256: Sha256Str
     media_type: NonBlankStr
@@ -251,12 +284,14 @@ class ReboundDocumentElement(StrictModel):
     page_number: int | None = Field(default=None, ge=1)
     page_hint_consistent: bool | None = None
     heading_level: int | None = Field(default=None, ge=1, le=6)
+    proposed_content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN
     content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN
     table_ref: NonBlankStr | None = None
     row_index: int | None = Field(default=None, ge=0)
     column_index: int | None = Field(default=None, ge=0)
     row_span: int = Field(default=1, ge=1)
     column_span: int = Field(default=1, ge=1)
+    is_header: bool = False
     reason: NonBlankStr | None = None
     content_hash: Sha256Str
 
@@ -276,6 +311,10 @@ class ReboundDocumentElement(StrictModel):
                 raise ValueError("rebound table caption requires only table_ref")
         elif any(value is not None for value in cell_fields):
             raise ValueError("only rebound table records may set table fields")
+        if self.kind != ExternalDocumentElementKind.TABLE_CELL and (
+            self.row_span != 1 or self.column_span != 1 or self.is_header
+        ):
+            raise ValueError("only a rebound table cell may set topology fields")
         exact_binding = (self.start_offset, self.end_offset, self.text_hash)
         if self.status == ExternalBindingStatus.RESOLVED:
             if any(value is None for value in exact_binding) or self.reason is not None:
@@ -362,6 +401,7 @@ class ExternalLiteratureRetrievalResult(StrictModel):
     result_id: NonBlankStr
     backend_id: NonBlankStr
     backend_descriptor_hash: Sha256Str
+    runtime_identity_hash: Sha256Str
     query_hash: Sha256Str
     hits: tuple[ExternalLiteratureRetrievalHit, ...]
     status: ExternalProposalStatus
@@ -389,6 +429,7 @@ class ExternalLiteratureRetrievalResult(StrictModel):
 
 
 class ExternalRetrievalResolution(StrictModel):
+    resolution_id: NonBlankStr
     hit_id: NonBlankStr
     resolved: bool
     literature_id: NonBlankStr | None = None
@@ -397,6 +438,7 @@ class ExternalRetrievalResolution(StrictModel):
     evidence_id: NonBlankStr | None = None
     locator_id: NonBlankStr | None = None
     reason: NonBlankStr | None = None
+    content_hash: Sha256Str
 
     @model_validator(mode="after")
     def validate_state(self) -> ExternalRetrievalResolution:
@@ -412,12 +454,73 @@ class ExternalRetrievalResolution(StrictModel):
                 raise ValueError("resolved retrieval hit requires complete SPC binding")
         elif any(value is not None for value in bindings) or self.reason is None:
             raise ValueError("unresolved retrieval hit must not claim SPC bindings")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"resolution_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"external-retrieval-resolution-{content_hash(identity)[:24]}"
+        if self.resolution_id != expected_id:
+            raise ValueError("ExternalRetrievalResolution ID is not content-bound")
+        payload = {"resolution_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ExternalRetrievalResolution content_hash is invalid")
+        return self
+
+
+class ExternalRetrievalAuthorityBinding(StrictModel):
+    literature_id: NonBlankStr
+    literature_hash: Sha256Str
+    representation_selection_id: NonBlankStr
+    representation_selection_hash: Sha256Str
+    representation_id: NonBlankStr
+    representation_hash: Sha256Str
+    structure_selection_id: NonBlankStr
+    structure_selection_hash: Sha256Str
+    structure_id: NonBlankStr
+    structure_hash: Sha256Str
+
+
+class ExternalRetrievalResolutionBatch(StrictModel):
+    batch_id: NonBlankStr
+    external_result_id: NonBlankStr
+    external_result_hash: Sha256Str
+    authority_bindings: tuple[ExternalRetrievalAuthorityBinding, ...]
+    resolutions: tuple[ExternalRetrievalResolution, ...]
+    resolved_count: int = Field(ge=0)
+    unresolved_count: int = Field(ge=0)
+    resolver_id: NonBlankStr
+    resolver_version: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ExternalRetrievalResolutionBatch:
+        if len({item.resolution_id for item in self.resolutions}) != len(self.resolutions):
+            raise ValueError("retrieval resolution IDs must be unique")
+        resolved = sum(item.resolved for item in self.resolutions)
+        if self.resolved_count != resolved or self.unresolved_count != len(self.resolutions) - resolved:
+            raise ValueError("retrieval resolution batch counts are invalid")
+        authority_ids = tuple(item.literature_id for item in self.authority_bindings)
+        if authority_ids != tuple(sorted(set(authority_ids))):
+            raise ValueError("retrieval authority bindings must be unique and sorted")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"batch_id", "content_hash"},
+        )
+        expected_id = f"external-retrieval-resolution-batch-{content_hash(identity)[:24]}"
+        if self.batch_id != expected_id:
+            raise ValueError("ExternalRetrievalResolutionBatch ID is not content-bound")
+        payload = {"batch_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ExternalRetrievalResolutionBatch content_hash is invalid")
         return self
 
 
 class ScholarlyMetadataProposal(StrictModel):
     proposal_id: NonBlankStr
     backend_id: NonBlankStr
+    backend_descriptor_hash: Sha256Str
+    runtime_identity_hash: Sha256Str
     title: NonBlankStr | None = None
     authors: tuple[NonBlankStr, ...] = ()
     doi: NonBlankStr | None = None
@@ -448,12 +551,16 @@ class BackendRunRecord(StrictModel):
     run_id: NonBlankStr
     backend_id: NonBlankStr
     backend_descriptor_hash: Sha256Str
+    runtime_identity_id: NonBlankStr
+    runtime_identity_hash: Sha256Str
     capability: BackendCapability
     input_bindings: tuple[BackendInputBinding, ...]
     config_hash: Sha256Str
     output_hash: Sha256Str | None = None
     status: BackendRunStatus
     warnings: tuple[NonBlankStr, ...] = ()
+    output_count: int = Field(default=0, ge=0)
+    candidate_count: int = Field(default=0, ge=0)
     resolved_count: int = Field(default=0, ge=0)
     unresolved_count: int = Field(default=0, ge=0)
     content_hash: Sha256Str
@@ -479,14 +586,50 @@ class BackendRunRecord(StrictModel):
         return self
 
 
+class ExternalStructurePromotionRecord(StrictModel):
+    promotion_id: NonBlankStr
+    backend_run_id: NonBlankStr
+    backend_run_hash: Sha256Str
+    proposal_id: NonBlankStr
+    proposal_hash: Sha256Str
+    rebinding_id: NonBlankStr
+    rebinding_hash: Sha256Str
+    structure_id: NonBlankStr
+    structure_hash: Sha256Str
+    selection_id: NonBlankStr
+    selection_hash: Sha256Str
+    promotion_policy: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ExternalStructurePromotionRecord:
+        identity = self.model_dump(
+            mode="json",
+            exclude={"promotion_id", "content_hash"},
+        )
+        expected_id = f"external-structure-promotion-{content_hash(identity)[:24]}"
+        if self.promotion_id != expected_id:
+            raise ValueError("ExternalStructurePromotionRecord ID is not content-bound")
+        payload = {"promotion_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ExternalStructurePromotionRecord content_hash is invalid")
+        return self
+
+
 class BackendAdapter(Protocol):
     descriptor: ExternalBackendDescriptor
 
     def inspect_availability(self) -> BackendRuntimeAvailability: ...
 
+    def resolve_runtime_identity(self) -> BackendRuntimeIdentity: ...
+
 
 class DocumentParsingBackend(BackendAdapter, Protocol):
     def parse(self, request: ExternalDocumentParseInput) -> ExternalDocumentParseProposal: ...
+
+
+class BuiltinStructureBackend(BackendAdapter, Protocol):
+    def structure(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
 class ScientificRetrievalBackend(BackendAdapter, Protocol):
@@ -500,8 +643,8 @@ class ScholarlyMetadataBackend(BackendAdapter, Protocol):
 
 
 class KnowledgeExtractionBackend(BackendAdapter, Protocol):
-    pass
+    def extract_knowledge(self, proposal: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
 class GraphRetrievalBackend(BackendAdapter, Protocol):
-    pass
+    def retrieve_graph(self, query: Mapping[str, Any]) -> Mapping[str, Any]: ...

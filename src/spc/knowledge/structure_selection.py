@@ -45,6 +45,8 @@ class DocumentStructureSelector:
         structure_id: str,
         repositories: KnowledgeRepositories,
         evidence_store: EvidenceStore | None = None,
+        *,
+        rationale: str = "Automatically promote a non-downgrading official structure extraction.",
     ) -> DocumentStructureSelection | None:
         """Promote an official extraction only when authority cannot regress."""
         store = evidence_store or repositories.evidence_store
@@ -77,7 +79,7 @@ class DocumentStructureSelector:
             current,
             repositories,
             store,
-            rationale="Automatically promote a non-downgrading official structure extraction.",
+            rationale=rationale,
         )
 
     def select(

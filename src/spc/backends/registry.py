@@ -11,8 +11,10 @@ from .contracts import (
     BackendAdapter,
     BackendCapability,
     BackendRuntimeAvailability,
+    BackendRuntimeIdentity,
     ExternalBackendDescriptor,
 )
+from .provenance import build_backend_runtime_identity
 from .descriptors import (
     kag_descriptor,
     lightrag_descriptor,
@@ -22,7 +24,7 @@ from .descriptors import (
 from .document import BuiltinDocumentParsingBackend, DoclingDocumentParsingBackend
 from .metadata import GROBIDScholarlyMetadataBackend
 from .retrieval import PaperQALiteratureRetrievalBackend
-from ..serialization import require_safe_path_component
+from ..serialization import content_hash, require_safe_path_component
 
 
 class BackendRegistryError(ValueError):
@@ -47,6 +49,26 @@ class UnavailableBackend:
             available=False,
             reason=self._reason,
         )
+
+    def resolve_runtime_identity(self) -> BackendRuntimeIdentity:
+        return build_backend_runtime_identity(
+            self.descriptor,
+            resolved_backend_version=self.descriptor.backend_version,
+            runtime_provider="unconfigured-adapter",
+            runtime_config_hash=content_hash({}),
+        )
+
+    def retrieve(self, *_args, **_kwargs):
+        raise RuntimeError(self._reason)
+
+    def extract_metadata(self, *_args, **_kwargs):
+        raise RuntimeError(self._reason)
+
+    def extract_knowledge(self, *_args, **_kwargs):
+        raise RuntimeError(self._reason)
+
+    def retrieve_graph(self, *_args, **_kwargs):
+        raise RuntimeError(self._reason)
 
 
 class ConfiguredSubprocessBackend:
@@ -81,9 +103,30 @@ class ConfiguredSubprocessBackend:
             )
         return BackendRuntimeAvailability(
             backend_id=self.descriptor.backend_id,
-            available=True,
-            detected_version="configured-executable",
+            available=False,
+            reason="MinerU subprocess execution is intentionally not implemented in K1F0.1",
         )
+
+    def resolve_runtime_identity(self) -> BackendRuntimeIdentity:
+        return build_backend_runtime_identity(
+            self.descriptor,
+            resolved_backend_version=self.descriptor.backend_version,
+            runtime_provider="configured-subprocess-boundary",
+            runtime_config_hash=content_hash({}),
+        )
+
+    def parse(self, *_args, **_kwargs):
+        raise RuntimeError("MinerU subprocess execution is intentionally not implemented in K1F0.1")
+
+
+_CAPABILITY_METHODS = {
+    BackendCapability.BUILTIN_STRUCTURE: "structure",
+    BackendCapability.DOCUMENT_PARSING: "parse",
+    BackendCapability.LITERATURE_RETRIEVAL: "retrieve",
+    BackendCapability.SCHOLARLY_METADATA: "extract_metadata",
+    BackendCapability.KNOWLEDGE_EXTRACTION: "extract_knowledge",
+    BackendCapability.GRAPH_RETRIEVAL: "retrieve_graph",
+}
 
 
 class BackendRegistry:
@@ -92,6 +135,16 @@ class BackendRegistry:
 
     def register(self, backend: BackendAdapter) -> None:
         descriptor = validate_backend_descriptor(backend.descriptor)
+        for method_name in ("inspect_availability", "resolve_runtime_identity"):
+            if not callable(getattr(backend, method_name, None)):
+                raise BackendRegistryError(f"backend {descriptor.backend_id} does not implement {method_name}()")
+        for capability in descriptor.capability_types:
+            method_name = _CAPABILITY_METHODS[capability]
+            if not callable(getattr(backend, method_name, None)):
+                raise BackendRegistryError(
+                    f"backend {descriptor.backend_id} advertises {capability.value} "
+                    f"but does not implement {method_name}()"
+                )
         existing = self._backends.get(descriptor.backend_id)
         if existing is not None:
             if existing.descriptor != descriptor:
@@ -162,10 +215,10 @@ def load_backend_license_manifest() -> tuple[Mapping[str, object], ...]:
     return tuple(MappingProxyType(dict(item)) for item in records)
 
 
-def default_backend_registry() -> BackendRegistry:
+def default_backend_registry(*, docling_artifacts_path: Path | None = None) -> BackendRegistry:
     registry = BackendRegistry()
     registry.register(BuiltinDocumentParsingBackend())
-    registry.register(DoclingDocumentParsingBackend())
+    registry.register(DoclingDocumentParsingBackend(docling_artifacts_path))
     registry.register(PaperQALiteratureRetrievalBackend())
     registry.register(GROBIDScholarlyMetadataBackend())
     registry.register(ConfiguredSubprocessBackend(mineru_descriptor()))

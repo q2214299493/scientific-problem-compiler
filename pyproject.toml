@@ -17,8 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.12,<1"]
-docling = ["docling"]
-paperqa = ["paper-qa"]
+docling = ["docling>=2.65,<3"]
+paperqa = ["paper-qa>=2026.1,<2027"]
 
 [project.scripts]
 spc = "spc.cli:app"

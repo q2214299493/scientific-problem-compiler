@@ -430,8 +430,10 @@ resolve through the current accepted representation and selected structure.
 The base installation has no Docling, PaperQA2, MinerU, GROBID, graph service,
 or model dependency. Optional Python integrations are lazy-loaded through
 `spc[docling]` or `spc[paperqa]`; subprocess/service adapters require explicit
-local configuration. No upstream source is vendored. License declarations and
-redistribution-review state are recorded in `backend_licenses.yaml`.
+local configuration. Supported optional dependency major versions are bounded
+so an untested upstream API fails closed. No upstream source is vendored.
+License declarations and redistribution-review state are recorded in
+`backend_licenses.yaml`.
 
 ```powershell
 spc backends
@@ -443,11 +445,31 @@ spc structure-literature `
   --representation-id literature-representation-... `
   --backend builtin `
   --knowledge-dir knowledge
+
+spc structure-literature `
+  --literature-id literature-... `
+  --representation-id literature-representation-... `
+  --backend docling `
+  --docling-artifacts-path C:\models\docling `
+  --knowledge-dir knowledge
 ```
 
-`--backend docling` is available only when the optional package is installed.
-Its result is audit-only by default. `--promote-external` explicitly submits an
-exactly rebound result to the existing deterministic, anti-downgrade structure
-selection policy. Every supported external service invocation stores an
-immutable `BackendRunRecord` containing only IDs and hashes—never API keys or
-raw credentials.
+`--backend docling` requires both the compatible optional package and an
+explicit local model-artifact directory. The adapter disables remote services,
+plugins, and implicit model downloads. Its typed document items and table-cell
+topology are normalized into an external proposal; proposed content regions
+remain untrusted until SPC performs exact canonical-text rebinding. The result
+is audit-only by default. `--promote-external` explicitly submits an exactly
+rebound result to the existing deterministic, anti-downgrade structure
+selection policy.
+
+K1F0.1 persists the exact `BackendDescriptor` and content-bound
+`BackendRuntimeIdentity` used for each invocation under the knowledge root. A
+runtime identity records the installed package or service version, adapter
+version, integration mode, provider identity, and non-secret configuration
+hash. `BackendRunRecord` binds both immutable records and distinguishes external
+retrieval candidate count from SPC-resolved and unresolved counts. Resolution
+batches additionally bind the current accepted representation and selected
+structure; stale authority is rejected. Availability, invocation, and
+downstream normalization failures are stored as sanitized audit records without
+API keys, credentials, raw third-party payloads, or local model paths.
