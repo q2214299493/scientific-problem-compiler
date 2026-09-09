@@ -235,7 +235,10 @@ class FilesystemEvidenceStore:
         record_path = self.evidence_records.root / f"{evidence_id}.json"
         if record_path.is_symlink():
             raise ValueError("EvidenceSpan repository record cannot be a symlink")
-        return self.evidence_records.get(evidence_id)
+        evidence = self.evidence_records.get(evidence_id)
+        if evidence.evidence_id != evidence_id:
+            raise ValueError("EvidenceSpan repository key does not match record identity")
+        return evidence
 
     def get_source(self, source_id: str, source_version: str) -> SourceDocument:
         require_safe_path_component(source_id, field="source_id")
@@ -244,7 +247,12 @@ class FilesystemEvidenceStore:
         record_path = self.source_records.root / f"{record_key}.json"
         if record_path.is_symlink():
             raise ValueError("SourceDocument repository record cannot be a symlink")
-        return self.source_records.get(record_key)
+        source = self.source_records.get(record_key)
+        if (source.source_id, source.version) != (source_id, source_version):
+            raise ValueError(
+                "SourceDocument source_id/version does not match repository key identity"
+            )
+        return source
 
     def _content_destination(self, source_id: str, version: str) -> Path:
         destination = self.root / "sources" / source_id / version / "content"
@@ -257,10 +265,48 @@ class FilesystemEvidenceStore:
         return destination
 
     def list_evidence(self) -> tuple[EvidenceSpan, ...]:
-        return self.evidence_records.list()
+        records: list[EvidenceSpan] = []
+        if not self.evidence_records.root.exists():
+            return ()
+        for path in sorted(self.evidence_records.root.glob("*.json")):
+            if path.is_symlink():
+                raise ValueError("EvidenceSpan repository record cannot be a symlink")
+            evidence = load_model(path, EvidenceSpan)
+            if path.stem != evidence.evidence_id:
+                raise ValueError(
+                    "EvidenceSpan repository key does not match record identity"
+                )
+            try:
+                self.verify_evidence_integrity(evidence)
+            except (FileNotFoundError, OSError, ValueError) as error:
+                raise ValueError(
+                    f"EvidenceSpan integrity failed for {evidence.evidence_id}: {error}"
+                ) from error
+            records.append(evidence)
+        return tuple(records)
 
     def list_sources(self) -> tuple[SourceDocument, ...]:
-        return self.source_records.list()
+        records: list[SourceDocument] = []
+        if not self.source_records.root.exists():
+            return ()
+        for path in sorted(self.source_records.root.glob("*.json")):
+            if path.is_symlink():
+                raise ValueError("SourceDocument repository record cannot be a symlink")
+            source = load_model(path, SourceDocument)
+            expected_key = f"{source.source_id}--{source.version}"
+            if path.stem != expected_key:
+                raise ValueError(
+                    "SourceDocument repository key does not match record identity"
+                )
+            try:
+                self.verify_source_integrity(source)
+            except (FileNotFoundError, OSError, ValueError) as error:
+                raise ValueError(
+                    "SourceDocument integrity failed for "
+                    f"{source.source_id}--{source.version}: {error}"
+                ) from error
+            records.append(source)
+        return tuple(records)
 
     def verify_source_integrity(self, source: SourceDocument) -> SourceDocument:
         require_safe_path_component(source.source_id, field="source_id")

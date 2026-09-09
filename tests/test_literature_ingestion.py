@@ -24,7 +24,12 @@ from spc.models import (
     KnowledgeCurationRecord,
     LiteratureRepresentationSelection,
 )
-from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
+from spc.repositories import (
+    EvidenceStore,
+    KnowledgeEvidenceStore,
+    KnowledgeRepositories,
+    SourceEvidenceStore,
+)
 from spc.serialization import content_hash, dump_yaml
 
 
@@ -54,9 +59,14 @@ def ingest_fixture(
     pdf_path: Path = BORN_DIGITAL_PDF,
     parser_version: str = "1.0.0",
     select: bool = True,
-) -> tuple[KnowledgeRepositories, SourceEvidenceStore, object]:
+    shared_evidence: bool = False,
+) -> tuple[KnowledgeRepositories, EvidenceStore, object]:
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
-    evidence_store = SourceEvidenceStore(tmp_path / ".spc")
+    evidence_store: EvidenceStore = (
+        KnowledgeEvidenceStore(tmp_path / "knowledge")
+        if shared_evidence
+        else SourceEvidenceStore(tmp_path / ".spc")
+    )
     outcome = LiteratureIngestionService(
         PypdfLiteratureTextExtractor(parser_version=parser_version)
     ).ingest(pdf_path, metadata(), repositories, evidence_store)
@@ -269,7 +279,9 @@ def test_tampered_raw_artifact_invalidates_trusted_snapshot(tmp_path) -> None:
 
 
 def test_trusted_snapshot_binds_complete_literature_ingestion_chain(tmp_path) -> None:
-    repositories, evidence_store, outcome = ingest_fixture(tmp_path)
+    repositories, evidence_store, outcome = ingest_fixture(
+        tmp_path, shared_evidence=True
+    )
     accept_literature(repositories, outcome.literature_id)
     snapshot = repositories.create_snapshot(
         evidence_store, DomainPackLoader().load("base").profile
@@ -783,7 +795,9 @@ def test_selector_cli_promotes_without_curating_or_extracting_science(tmp_path) 
 
 
 def test_historical_evidence_requires_explicit_authorization(tmp_path) -> None:
-    repositories, evidence_store, first = ingest_fixture(tmp_path)
+    repositories, evidence_store, first = ingest_fixture(
+        tmp_path, shared_evidence=True
+    )
     accept_literature(repositories, first.literature_id)
     second = LiteratureIngestionService(
         PypdfLiteratureTextExtractor(parser_version="2.0.0")

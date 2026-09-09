@@ -1119,7 +1119,8 @@ def test_html_representation_uses_generic_selector_and_trusted_snapshot(
     tmp_path: Path,
 ) -> None:
     html = same_literature_html("Selected HTML representation.")
-    repos, store = repositories(tmp_path)
+    repos = KnowledgeRepositories(tmp_path / "knowledge")
+    store = KnowledgeEvidenceStore(tmp_path / "knowledge")
     outcome = LiteratureAcquisitionService(
         fetcher({ARTICLE_URL: response(ARTICLE_URL, html, "text/html")})
     ).add(ARTICLE_URL, "base", repos, store)

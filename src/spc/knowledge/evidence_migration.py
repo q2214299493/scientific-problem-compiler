@@ -17,6 +17,9 @@ class KnowledgeEvidenceMigrationResult:
     evidence_count: int
     copied_source_count: int
     copied_evidence_count: int
+    referenced_source_count: int = 0
+    legacy_source_count: int = 0
+    already_shared_source_count: int = 0
 
 
 def _literature_source_keys(
@@ -91,15 +94,44 @@ def migrate_knowledge_evidence(
 
     source_keys = _literature_source_keys(repositories)
     copied_sources = 0
+    legacy_sources = 0
+    already_shared_sources = 0
+    legacy_source_keys: set[tuple[str, str]] = set()
     for source_id, source_version in source_keys:
-        source = legacy_store.get_source(source_id, source_version)
-        copied_sources += _copy_source(source, legacy_store, knowledge_store)
+        try:
+            legacy_source = legacy_store.get_source(source_id, source_version)
+            legacy_store.verify_source_integrity(legacy_source)
+        except FileNotFoundError:
+            legacy_source = None
+        try:
+            shared_source = knowledge_store.get_source(source_id, source_version)
+            knowledge_store.verify_source_integrity(shared_source)
+        except FileNotFoundError:
+            shared_source = None
+        if legacy_source is None and shared_source is None:
+            raise FileNotFoundError(
+                "referenced literature source is missing from both legacy and shared "
+                f"evidence stores: {source_id}--{source_version}"
+            )
+        if legacy_source is not None:
+            legacy_sources += 1
+            legacy_source_keys.add((source_id, source_version))
+        if shared_source is not None:
+            already_shared_sources += 1
+        if legacy_source is not None and shared_source is not None:
+            if not source_documents_equivalent(legacy_source, shared_source):
+                raise ValueError(
+                    f"conflicting knowledge source identity: {source_id}--{source_version}"
+                )
+        elif legacy_source is not None:
+            copied_sources += _copy_source(
+                legacy_source, legacy_store, knowledge_store
+            )
 
-    relevant_keys = set(source_keys)
     evidence_records = tuple(
         evidence
         for evidence in legacy_store.list_evidence()
-        if (evidence.source_id, evidence.source_version) in relevant_keys
+        if (evidence.source_id, evidence.source_version) in legacy_source_keys
     )
     copied_evidence = 0
     for evidence in evidence_records:
@@ -110,4 +142,7 @@ def migrate_knowledge_evidence(
         evidence_count=len(evidence_records),
         copied_source_count=copied_sources,
         copied_evidence_count=copied_evidence,
+        referenced_source_count=len(source_keys),
+        legacy_source_count=legacy_sources,
+        already_shared_source_count=already_shared_sources,
     )
