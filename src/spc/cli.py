@@ -49,7 +49,10 @@ from .models import (
     CollectionDiscoveryResult,
     CollectionImportOutcome,
     CollectionImportRecord,
+    CollectionLiteratureMembership,
+    CollectionPageArtifact,
     CollectionPageRecord,
+    CollectionResourceImportResult,
     CollectionResourceOccurrence,
     CollectionScopePolicy,
     CollectionSnapshot,
@@ -254,6 +257,19 @@ def import_literature_collection(
     connector: Annotated[str, typer.Option("--connector")] = "generic-html",
     max_pages: Annotated[int, typer.Option("--max-pages", min=1)] = 100,
     max_resources: Annotated[int, typer.Option("--max-resources", min=1)] = 1000,
+    max_depth: Annotated[int, typer.Option("--max-depth", min=0)] = 10,
+    allowed_origin: Annotated[
+        list[str] | None,
+        typer.Option("--allowed-origin"),
+    ] = None,
+    allowed_path_prefix: Annotated[
+        list[str] | None,
+        typer.Option("--allowed-path-prefix"),
+    ] = None,
+    allow_external_literature_links: Annotated[
+        bool,
+        typer.Option("--allow-external-literature-links"),
+    ] = False,
 ) -> None:
     """Discover a bounded static collection and acquire each unique resource."""
     if connector != "generic-html":
@@ -261,7 +277,13 @@ def import_literature_collection(
     policy = make_collection_scope_policy(
         project_url,
         max_pages=max_pages,
+        max_depth=max_depth,
         max_resources=max_resources,
+        allowed_origins=(tuple(allowed_origin) if allowed_origin else None),
+        allowed_path_prefixes=(
+            tuple(allowed_path_prefix) if allowed_path_prefix else None
+        ),
+        allow_external_literature_links=allow_external_literature_links,
     )
     definition = make_collection_definition(
         project_url,
@@ -846,11 +868,14 @@ def schema_command(
         LiteratureRepresentationReference,
         CollectionScopePolicy,
         CollectionDefinition,
+        CollectionPageArtifact,
         CollectionPageRecord,
         DiscoveredCollectionResource,
         CollectionResourceOccurrence,
         CollectionSnapshot,
         CollectionAcquisitionLink,
+        CollectionResourceImportResult,
+        CollectionLiteratureMembership,
         CollectionImportRecord,
         CollectionDiff,
         CollectionDiscoveryResult,

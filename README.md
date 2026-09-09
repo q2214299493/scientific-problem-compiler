@@ -273,7 +273,9 @@ spc import-literature-collection https://example.org/project/publications `
   --knowledge-dir knowledge `
   --state-dir .spc `
   --max-pages 100 `
-  --max-resources 1000
+  --max-resources 1000 `
+  --max-depth 10 `
+  --allowed-path-prefix /project/publications
 ```
 
 Page records, logical discovered resources, every discovery occurrence,
@@ -283,3 +285,20 @@ are deduplicated without losing page provenance. Each unique resource is handed
 to K1C independently, so one unavailable paper does not abort the batch. K1D
 does not select or curate representations, generate scientific records, or add
 crawl internals to the scientific knowledge graph.
+
+K1D.1 separates traversal termination from proven collection completeness. A
+generic page with no recognized next link is
+`policy_exhausted_unverified`; only an explicit finite pagination chain can be
+`proven_complete` under the generic connector contract. Snapshots bind the
+scope-policy hash, connector completeness contract, and completeness basis.
+Path prefixes use URL-segment boundaries, and optional `--allowed-origin`,
+`--allowed-path-prefix`, `--allow-external-literature-links`, and `--max-depth`
+arguments change scope only when explicitly supplied.
+
+Every successful collection page is stored as exact immutable bytes and bound
+to its page record. After K1C resolution, resources that converge on the same
+`literature_id` become one `CollectionLiteratureMembership` while retaining all
+resource, occurrence, and acquisition references. Import output distinguishes
+occurrences, discovered resources, logical literature, and ingested literature;
+low-confidence DOI text from arbitrary page bodies stays auditable but is not
+silently imported as collection membership.

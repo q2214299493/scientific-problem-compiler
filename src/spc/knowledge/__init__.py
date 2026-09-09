@@ -27,6 +27,7 @@ from .collection import (
     diff_collection_snapshots,
     make_collection_definition,
     make_collection_scope_policy,
+    path_matches_prefix,
 )
 from .ingestion import (
     LiteratureIngestionService,
@@ -78,4 +79,5 @@ __all__ = [
     "diff_collection_snapshots",
     "make_collection_definition",
     "make_collection_scope_policy",
+    "path_matches_prefix",
 ]

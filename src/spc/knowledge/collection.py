@@ -1,35 +1,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 from html.parser import HTMLParser
 import posixpath
 import re
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
+
+from pydantic import ValidationError
 
 from ..immutable import FrozenDict
 from ..models import (
     AcquisitionStatus,
     CollectionAcquisitionLink,
+    CollectionCompletenessStatus,
     CollectionDefinition,
     CollectionDiff,
+    CollectionDiscoveryConfidence,
+    CollectionDiscoveryContext,
     CollectionDiscoveryResult,
     CollectionImportOutcome,
     CollectionImportRecord,
     CollectionImportStatus,
+    CollectionLiteratureMembership,
     CollectionPageRecord,
     CollectionResourceKind,
     CollectionResourceOccurrence,
+    CollectionResourceImportResult,
     CollectionScopePolicy,
     CollectionSnapshot,
     CollectionSourceKind,
+    CollectionTraversalStatus,
     DiscoveredCollectionResource,
 )
 from ..repositories import KnowledgeRepositories, SourceEvidenceStore
 from ..serialization import content_hash
 from .acquisition import (
     SUPPORTED_HTML_TYPES,
+    AcquisitionError,
     LiteratureAcquisitionService,
     SafeHTTPError,
     SafeHTTPFetcher,
@@ -74,6 +84,36 @@ def canonical_origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _canonical_path_prefix(value: str) -> str:
+    path = unquote(value.strip())
+    if not path.startswith("/"):
+        path = f"/{path}"
+    normalized = posixpath.normpath(path)
+    if path.endswith("/") and normalized != "/":
+        normalized += "/"
+    return normalized
+
+
+def _default_path_prefix(entry_path: str) -> str:
+    canonical = _canonical_path_prefix(entry_path or "/")
+    if canonical == "/" or canonical.endswith("/"):
+        return canonical
+    leaf = posixpath.basename(canonical)
+    if "." in leaf:
+        parent = posixpath.dirname(canonical) or "/"
+        return parent if parent == "/" else f"{parent}/"
+    return canonical
+
+
+def path_matches_prefix(path: str, prefix: str) -> bool:
+    candidate = _canonical_path_prefix(path)
+    boundary = _canonical_path_prefix(prefix)
+    if boundary == "/":
+        return True
+    base = boundary.rstrip("/")
+    return candidate == base or candidate.startswith(f"{base}/")
+
+
 def make_collection_scope_policy(
     entry_url: str,
     *,
@@ -89,8 +129,8 @@ def make_collection_scope_policy(
     origin_values = tuple(
         sorted({canonical_origin(item) for item in (allowed_origins or (canonical_entry,))})
     )
-    prefix_values = allowed_path_prefixes or (parsed.path or "/",)
-    prefixes = tuple(sorted({item if item.startswith("/") else f"/{item}" for item in prefix_values}))
+    prefix_values = allowed_path_prefixes or (_default_path_prefix(parsed.path),)
+    prefixes = tuple(sorted({_canonical_path_prefix(item) for item in prefix_values}))
     identity = {
         "allowed_origins": origin_values,
         "allowed_path_prefixes": prefixes,
@@ -111,7 +151,8 @@ def make_collection_definition(
     name: str | None = None,
     source_kind: CollectionSourceKind = CollectionSourceKind.COLLECTION_URL,
     connector_id: str = "generic-html-collection",
-    connector_version: str = "1.0.0",
+    connector_version: str = "1.1.0",
+    connector_completeness_contract: str = "explicit-pagination-terminal-v1",
     scope_policy: CollectionScopePolicy | None = None,
 ) -> CollectionDefinition:
     canonical_entry = canonicalize_url(entry_url)
@@ -123,6 +164,7 @@ def make_collection_definition(
         "domain": domain,
         "connector_id": connector_id,
         "connector_version": connector_version,
+        "connector_completeness_contract": connector_completeness_contract,
         "scope_policy": policy,
     }
     collection_id = f"literature-collection-{content_hash(identity)[:24]}"
@@ -219,6 +261,9 @@ class _Candidate:
     original_identifier: str
     normalized_identifier: str
     discovery_method: str
+    discovery_confidence: CollectionDiscoveryConfidence
+    discovery_context: CollectionDiscoveryContext
+    membership_eligible: bool
     doi: str | None = None
     url: str | None = None
     media_type: str | None = None
@@ -253,13 +298,25 @@ def _resource_candidate(
     original: str,
     method: str,
     base_url: str,
+    confidence: CollectionDiscoveryConfidence,
+    context: CollectionDiscoveryContext,
+    membership_eligible: bool,
     media_type: str | None = None,
 ) -> _Candidate | None:
     if kind == CollectionResourceKind.DOI:
         doi = _clean_doi_candidate(original)
         if doi is None:
             return None
-        return _Candidate(kind, original, doi, method, doi=doi)
+        return _Candidate(
+            kind,
+            original,
+            doi,
+            method,
+            confidence,
+            context,
+            membership_eligible,
+            doi=doi,
+        )
     absolute = canonicalize_url(urljoin(base_url, original))
     embedded_doi = _doi_inside(absolute)
     if embedded_doi is not None:
@@ -268,6 +325,9 @@ def _resource_candidate(
             original,
             embedded_doi,
             f"{method}:embedded_doi",
+            confidence,
+            context,
+            membership_eligible,
             doi=embedded_doi,
         )
     return _Candidate(
@@ -275,6 +335,9 @@ def _resource_candidate(
         original,
         absolute,
         method,
+        confidence,
+        context,
+        membership_eligible,
         url=absolute,
         media_type=media_type,
     )
@@ -292,12 +355,34 @@ def _extract_page(
     parser = _CollectionHTMLParser()
     parser.feed(html)
     candidates: list[_Candidate] = []
-    for match in DOI_DISCOVERY_PATTERN.finditer(html):
+    visible_text = " ".join(parser.visible_text)
+    lowered_html = html.casefold()
+    publication_list = any(
+        marker in lowered_html
+        for marker in (
+            'class="publication',
+            "class='publication",
+            'id="publication',
+            "id='publication",
+        )
+    )
+    for match in DOI_DISCOVERY_PATTERN.finditer(visible_text):
         candidate = _resource_candidate(
             kind=CollectionResourceKind.DOI,
             original=match.group(0),
             method="doi_text",
             base_url=page_url,
+            confidence=(
+                CollectionDiscoveryConfidence.MEDIUM
+                if publication_list
+                else CollectionDiscoveryConfidence.LOW
+            ),
+            context=(
+                CollectionDiscoveryContext.PUBLICATION_LIST_TEXT
+                if publication_list
+                else CollectionDiscoveryContext.ARBITRARY_BODY_TEXT
+            ),
+            membership_eligible=publication_list,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -334,6 +419,9 @@ def _extract_page(
                     value,
                     metadata_dois[0],
                     f"metadata:{key}:associated_doi",
+                    CollectionDiscoveryConfidence.HIGH,
+                    CollectionDiscoveryContext.CITATION_METADATA,
+                    True,
                     doi=metadata_dois[0],
                 )
             else:
@@ -342,6 +430,9 @@ def _extract_page(
                     original=value,
                     method=f"metadata:{key}",
                     base_url=page_url,
+                    confidence=CollectionDiscoveryConfidence.HIGH,
+                    context=CollectionDiscoveryContext.CITATION_METADATA,
+                    membership_eligible=True,
                     media_type=media_type,
                 )
             if candidate is not None:
@@ -370,23 +461,36 @@ def _extract_page(
         method = "link"
         if _doi_inside(link.href):
             kind = CollectionResourceKind.DOI
+            confidence = CollectionDiscoveryConfidence.HIGH
+            context = CollectionDiscoveryContext.EXPLICIT_DOI_LINK
         elif link.media_type == "application/pdf" or path.endswith(".pdf"):
             kind = CollectionResourceKind.PDF_URL
             media_type = "application/pdf"
             method = "direct_pdf_link"
+            confidence = CollectionDiscoveryConfidence.HIGH
+            context = CollectionDiscoveryContext.DIRECT_PDF_LINK
         elif "article" in link.rel or any(marker in path for marker in ARTICLE_PATH_MARKERS):
             kind = CollectionResourceKind.ARTICLE_URL
             media_type = "text/html"
             method = "article_link"
+            confidence = CollectionDiscoveryConfidence.MEDIUM
+            context = CollectionDiscoveryContext.ARTICLE_LINK
         if kind is None:
             continue
-        if canonical_origin(absolute) != canonical_origin(page_url) and not policy.allow_external_literature_links:
+        if (
+            kind != CollectionResourceKind.DOI
+            and canonical_origin(absolute) != canonical_origin(page_url)
+            and not policy.allow_external_literature_links
+        ):
             continue
         candidate = _resource_candidate(
             kind=kind,
             original=link.href,
             method=method,
             base_url=page_url,
+            confidence=confidence,
+            context=context,
+            membership_eligible=True,
             media_type=media_type,
         )
         if candidate is not None:
@@ -415,6 +519,8 @@ def _make_bound(model_type, prefix: str, identity: dict):
         "collection-occurrence": "occurrence_id",
         "collection-snapshot": "snapshot_id",
         "collection-acquisition-link": "link_id",
+        "collection-resource-import": "result_id",
+        "collection-membership": "membership_id",
         "collection-import": "import_id",
         "collection-diff": "diff_id",
     }[prefix]
@@ -424,7 +530,8 @@ def _make_bound(model_type, prefix: str, identity: dict):
 
 class GenericHTMLCollectionConnector:
     connector_id = "generic-html-collection"
-    connector_version = "1.0.0"
+    connector_version = "1.1.0"
+    completeness_contract = "explicit-pagination-terminal-v1"
 
     def discover(
         self,
@@ -432,7 +539,12 @@ class GenericHTMLCollectionConnector:
         repositories: KnowledgeRepositories,
         fetcher: SafeHTTPFetcher,
     ) -> CollectionDiscoveryResult:
-        if definition.connector_id != self.connector_id or definition.connector_version != self.connector_version:
+        if (
+            definition.connector_id != self.connector_id
+            or definition.connector_version != self.connector_version
+            or definition.connector_completeness_contract
+            != self.completeness_contract
+        ):
             raise CollectionError("collection definition does not bind this connector")
         if definition.source_kind == CollectionSourceKind.LOCAL_MANIFEST:
             raise CollectionError("GenericHTMLCollectionConnector does not read local manifests")
@@ -447,6 +559,7 @@ class GenericHTMLCollectionConnector:
         reasons: list[str] = []
         authentication_blocked = False
         resource_limit_reached = False
+        saw_explicit_pagination = False
         while queue and len(pages) < policy.max_pages:
             requested_url, depth = queue.pop(0)
             queued.discard(requested_url)
@@ -491,6 +604,8 @@ class GenericHTMLCollectionConnector:
             except CollectionError:
                 candidates, pagination, dynamic_only, unresolved_pagination = (), (), False, False
                 reasons.append("unsupported_page_encoding")
+            if pagination:
+                saw_explicit_pagination = True
             page_resource_ids: list[str] = []
             accepted_candidates: list[_Candidate] = []
             for candidate in candidates:
@@ -513,13 +628,44 @@ class GenericHTMLCollectionConnector:
                         "doi": candidate.doi,
                         "url": candidate.url,
                         "media_type": candidate.media_type,
+                        "highest_discovery_confidence": candidate.discovery_confidence,
+                        "membership_eligible": candidate.membership_eligible,
                     }
                     payload = {key: value for key, value in payload.items() if value is not None}
                     resource = DiscoveredCollectionResource(
                         **payload, content_hash=content_hash(payload)
                     )
                     resources[candidate.key] = resource
-                    repositories.collection_resources.put(resource.discovered_resource_id, resource)
+                else:
+                    confidence_rank = {
+                        CollectionDiscoveryConfidence.LOW: 0,
+                        CollectionDiscoveryConfidence.MEDIUM: 1,
+                        CollectionDiscoveryConfidence.HIGH: 2,
+                    }
+                    highest = (
+                        candidate.discovery_confidence
+                        if confidence_rank[candidate.discovery_confidence]
+                        > confidence_rank[resource.highest_discovery_confidence]
+                        else resource.highest_discovery_confidence
+                    )
+                    membership_eligible = (
+                        resource.membership_eligible or candidate.membership_eligible
+                    )
+                    if (
+                        highest != resource.highest_discovery_confidence
+                        or membership_eligible != resource.membership_eligible
+                    ):
+                        payload = resource.model_dump(
+                            mode="json", exclude={"content_hash"}, exclude_none=True
+                        )
+                        payload.update(
+                            highest_discovery_confidence=highest,
+                            membership_eligible=membership_eligible,
+                        )
+                        resource = DiscoveredCollectionResource(
+                            **payload, content_hash=content_hash(payload)
+                        )
+                        resources[candidate.key] = resource
                 page_resource_ids.append(resource.discovered_resource_id)
                 accepted_candidates.append(candidate)
             if dynamic_only:
@@ -541,13 +687,26 @@ class GenericHTMLCollectionConnector:
                 queue.append((next_url, depth + 1))
                 queued.add(next_url)
             queue.sort(key=lambda item: (item[1], item[0]))
+            media_type = (
+                response.headers.get("content-type", "").split(";", 1)[0]
+                or "unknown"
+            )
+            page_artifact = repositories.collection_page_artifacts.put(
+                response.body,
+                collection_id=definition.collection_id,
+                requested_url=canonicalize_url(requested_url),
+                resolved_url=canonicalize_url(response.url),
+                media_type=media_type,
+            )
             page = self._page_record(
                 definition,
                 requested_url=requested_url,
                 resolved_url=response.url,
                 http_status=response.status,
-                media_type=response.headers.get("content-type", "").split(";", 1)[0] or "unknown",
+                media_type=media_type,
                 response_sha256=hashlib.sha256(response.body).hexdigest(),
+                page_artifact_id=page_artifact.artifact_id,
+                page_artifact_hash=page_artifact.content_hash,
                 resource_ids=tuple(sorted(set(page_resource_ids))),
                 pagination=tuple(sorted(set(pagination))),
             )
@@ -566,6 +725,9 @@ class GenericHTMLCollectionConnector:
                         "discovery_index": index,
                         "original_identifier": candidate.original_identifier,
                         "discovery_method": candidate.discovery_method,
+                        "discovery_confidence": candidate.discovery_confidence,
+                        "discovery_context": candidate.discovery_context,
+                        "membership_eligible": candidate.membership_eligible,
                     },
                 )
                 repositories.collection_occurrences.put(occurrence.occurrence_id, occurrence)
@@ -577,17 +739,43 @@ class GenericHTMLCollectionConnector:
         unique_reasons = tuple(dict.fromkeys(reasons))
         successful_pages = sum(200 <= page.http_status < 300 for page in pages)
         if authentication_blocked and successful_pages == 0:
-            completeness = CollectionImportStatus.REQUIRES_AUTHENTICATION
+            traversal_status = CollectionTraversalStatus.REQUIRES_AUTHENTICATION
+            completeness_status = CollectionCompletenessStatus.REQUIRES_AUTHENTICATION
+            completeness_basis = ("authentication_prevented_scope_exhaustion",)
         elif successful_pages == 0 and unique_reasons:
-            completeness = CollectionImportStatus.FAILED
+            traversal_status = CollectionTraversalStatus.FAILED
+            completeness_status = CollectionCompletenessStatus.FAILED
+            completeness_basis = ("no_collection_page_was_retrieved",)
+        elif "unsupported_dynamic_collection" in unique_reasons:
+            traversal_status = CollectionTraversalStatus.UNSUPPORTED_DYNAMIC
+            completeness_status = CollectionCompletenessStatus.UNSUPPORTED_DYNAMIC
+            completeness_basis = ("generic_connector_cannot_execute_dynamic_continuation",)
         elif unique_reasons:
-            completeness = CollectionImportStatus.PARTIAL
+            traversal_status = CollectionTraversalStatus.LIMITED
+            completeness_status = CollectionCompletenessStatus.PARTIAL
+            completeness_basis = tuple(f"scope_not_exhausted:{reason}" for reason in unique_reasons)
+        elif saw_explicit_pagination:
+            traversal_status = CollectionTraversalStatus.EXHAUSTED
+            completeness_status = CollectionCompletenessStatus.PROVEN_COMPLETE
+            completeness_basis = ("explicit_pagination_chain_reached_terminal_page",)
         else:
-            completeness = CollectionImportStatus.COMPLETE
+            traversal_status = CollectionTraversalStatus.EXHAUSTED
+            completeness_status = CollectionCompletenessStatus.POLICY_EXHAUSTED_UNVERIFIED
+            completeness_basis = ("no_explicit_completeness_evidence",)
+            unique_reasons = ("collection_completeness_unverified",)
+        completeness = {
+            CollectionCompletenessStatus.PROVEN_COMPLETE: CollectionImportStatus.COMPLETE,
+            CollectionCompletenessStatus.REQUIRES_AUTHENTICATION: CollectionImportStatus.REQUIRES_AUTHENTICATION,
+            CollectionCompletenessStatus.FAILED: CollectionImportStatus.FAILED,
+        }.get(completeness_status, CollectionImportStatus.PARTIAL)
         ordered_pages = tuple(sorted(pages, key=lambda item: item.page_id))
         ordered_resources = tuple(
             sorted(resources.values(), key=lambda item: item.discovered_resource_id)
         )
+        for resource in ordered_resources:
+            repositories.collection_resources.put(
+                resource.discovered_resource_id, resource
+            )
         ordered_occurrences = tuple(
             sorted(occurrences, key=lambda item: item.occurrence_id)
         )
@@ -598,6 +786,8 @@ class GenericHTMLCollectionConnector:
                 "collection_id": definition.collection_id,
                 "connector_id": self.connector_id,
                 "connector_version": self.connector_version,
+                "connector_completeness_contract": self.completeness_contract,
+                "scope_policy_hash": policy.content_hash,
                 "page_record_hashes": FrozenDict(
                     {item.page_id: item.content_hash for item in ordered_pages}
                 ),
@@ -607,11 +797,32 @@ class GenericHTMLCollectionConnector:
                         for item in ordered_resources
                     }
                 ),
+                "resource_provenance_hashes": FrozenDict(
+                    {
+                        resource.discovered_resource_id: content_hash(
+                            {
+                                "resource_hash": resource.content_hash,
+                                "occurrence_hashes": tuple(
+                                    sorted(
+                                        occurrence.content_hash
+                                        for occurrence in ordered_occurrences
+                                        if occurrence.discovered_resource_id
+                                        == resource.discovered_resource_id
+                                    )
+                                ),
+                            }
+                        )
+                        for resource in ordered_resources
+                    }
+                ),
                 "occurrence_hashes": FrozenDict(
                     {item.occurrence_id: item.content_hash for item in ordered_occurrences}
                 ),
                 "visited_page_count": len(ordered_pages),
                 "unique_resource_count": len(ordered_resources),
+                "traversal_status": traversal_status,
+                "completeness_status": completeness_status,
+                "completeness_basis": completeness_basis,
                 "completeness": completeness,
                 "completeness_reasons": unique_reasons,
             },
@@ -630,7 +841,10 @@ class GenericHTMLCollectionConnector:
         parsed = urlparse(canonicalize_url(url))
         return (
             canonical_origin(url) in set(policy.allowed_origins)
-            and any(parsed.path.startswith(prefix) for prefix in policy.allowed_path_prefixes)
+            and any(
+                path_matches_prefix(parsed.path, prefix)
+                for prefix in policy.allowed_path_prefixes
+            )
         )
 
     @staticmethod
@@ -642,6 +856,8 @@ class GenericHTMLCollectionConnector:
         http_status: int,
         media_type: str,
         response_sha256: str,
+        page_artifact_id: str | None = None,
+        page_artifact_hash: str | None = None,
         resource_ids: tuple[str, ...],
         pagination: tuple[str, ...],
     ) -> CollectionPageRecord:
@@ -655,6 +871,8 @@ class GenericHTMLCollectionConnector:
                 "http_status": http_status,
                 "media_type": media_type,
                 "response_sha256": response_sha256,
+                "page_artifact_id": page_artifact_id,
+                "page_artifact_hash": page_artifact_hash,
                 "connector_id": definition.connector_id,
                 "connector_version": definition.connector_version,
                 "discovered_resource_refs": tuple(sorted(set(resource_ids))),
@@ -671,6 +889,21 @@ def diff_collection_snapshots(
         raise CollectionError("collection snapshots belong to different collections")
     old_ids = set(old.discovered_resource_hashes)
     new_ids = set(new.discovered_resource_hashes)
+    shared_ids = old_ids & new_ids
+    changed_ids = {
+        resource_id
+        for resource_id in shared_ids
+        if (
+            old.discovered_resource_hashes[resource_id]
+            != new.discovered_resource_hashes[resource_id]
+            or old.resource_provenance_hashes.get(
+                resource_id, old.discovered_resource_hashes[resource_id]
+            )
+            != new.resource_provenance_hashes.get(
+                resource_id, new.discovered_resource_hashes[resource_id]
+            )
+        )
+    }
     return _make_bound(
         CollectionDiff,
         "collection-diff",
@@ -681,9 +914,18 @@ def diff_collection_snapshots(
             "new_snapshot_hash": new.content_hash,
             "added_resource_ids": tuple(sorted(new_ids - old_ids)),
             "removed_resource_ids": tuple(sorted(old_ids - new_ids)),
-            "unchanged_resource_ids": tuple(sorted(old_ids & new_ids)),
+            "changed_resource_ids": tuple(sorted(changed_ids)),
+            "unchanged_resource_ids": tuple(sorted(shared_ids - changed_ids)),
         },
     )
+
+
+EXPECTED_COLLECTION_ACQUISITION_EXCEPTIONS = (
+    AcquisitionError,
+    FileExistsError,
+    OSError,
+    ValidationError,
+)
 
 
 class CollectionImportService:
@@ -693,12 +935,14 @@ class CollectionImportService:
         fetcher: SafeHTTPFetcher | None = None,
         connector: CollectionConnector | None = None,
         acquisition_service: LiteratureAcquisitionService | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.fetcher = fetcher or SafeHTTPFetcher()
         self.connector = connector or GenericHTMLCollectionConnector()
         self.acquisition_service = acquisition_service or LiteratureAcquisitionService(
             self.fetcher
         )
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def run(
         self,
@@ -710,6 +954,7 @@ class CollectionImportService:
     ) -> CollectionImportOutcome:
         discovery = self.connector.discover(definition, repositories, self.fetcher)
         links: list[CollectionAcquisitionLink] = []
+        results: list[CollectionResourceImportResult] = []
         warnings = list(discovery.snapshot.completeness_reasons)
         counts = {
             "ingested": 0,
@@ -717,19 +962,64 @@ class CollectionImportService:
             "auth": 0,
             "unavailable": 0,
             "failed": 0,
+            "unverified": 0,
         }
         for resource in discovery.resources:
+            if not resource.membership_eligible:
+                result = self._failed_resource_result(
+                    definition,
+                    discovery.snapshot,
+                    resource,
+                    status=AcquisitionStatus.DISCOVERED,
+                    failure_code="UNVERIFIED_COLLECTION_MEMBERSHIP",
+                )
+                repositories.collection_resource_import_results.put(
+                    result.result_id, result
+                )
+                results.append(result)
+                counts["unverified"] += 1
+                continue
             source = resource.doi or resource.url
             if source is None:
-                warnings.append(f"{resource.discovered_resource_id}:missing_acquisition_input")
+                result = self._failed_resource_result(
+                    definition,
+                    discovery.snapshot,
+                    resource,
+                    status=AcquisitionStatus.FAILED,
+                    failure_code="MISSING_ACQUISITION_INPUT",
+                )
+                repositories.collection_resource_import_results.put(
+                    result.result_id, result
+                )
+                results.append(result)
+                counts["failed"] += 1
                 continue
-            outcome = self.acquisition_service.add(
-                source,
-                definition.domain,
-                repositories,
-                evidence_store,
-            )
-            acquisition = repositories.literature_acquisitions.get(outcome.acquisition_id)
+            try:
+                outcome = self.acquisition_service.add(
+                    source,
+                    definition.domain,
+                    repositories,
+                    evidence_store,
+                )
+                acquisition = repositories.literature_acquisitions.get(
+                    outcome.acquisition_id
+                )
+            except EXPECTED_COLLECTION_ACQUISITION_EXCEPTIONS as error:
+                failure_code = f"EXPECTED_ACQUISITION_FAILURE:{type(error).__name__}"
+                result = self._failed_resource_result(
+                    definition,
+                    discovery.snapshot,
+                    resource,
+                    status=AcquisitionStatus.FAILED,
+                    failure_code=failure_code,
+                )
+                repositories.collection_resource_import_results.put(
+                    result.result_id, result
+                )
+                results.append(result)
+                counts["failed"] += 1
+                warnings.append(f"{resource.discovered_resource_id}:{failure_code}")
+                continue
             link = _make_bound(
                 CollectionAcquisitionLink,
                 "collection-acquisition-link",
@@ -746,55 +1036,83 @@ class CollectionImportService:
             )
             repositories.collection_acquisition_links.put(link.link_id, link)
             links.append(link)
-            if outcome.acquisition_status == AcquisitionStatus.INGESTED:
-                counts["ingested"] += 1
-            elif outcome.acquisition_status == AcquisitionStatus.METADATA_ONLY:
-                counts["metadata_only"] += 1
-            elif outcome.acquisition_status == AcquisitionStatus.REQUIRES_AUTHENTICATION:
-                counts["auth"] += 1
-            elif outcome.acquisition_status in {
-                AcquisitionStatus.FULLTEXT_UNAVAILABLE,
-                AcquisitionStatus.UNSUPPORTED_MEDIA,
-            }:
-                counts["unavailable"] += 1
-            else:
-                counts["failed"] += 1
+            result = _make_bound(
+                CollectionResourceImportResult,
+                "collection-resource-import",
+                {
+                    "collection_id": definition.collection_id,
+                    "snapshot_id": discovery.snapshot.snapshot_id,
+                    "discovered_resource_id": resource.discovered_resource_id,
+                    "discovered_resource_hash": resource.content_hash,
+                    "acquisition_link_id": link.link_id,
+                    "acquisition_link_hash": link.content_hash,
+                    "acquisition_status": outcome.acquisition_status,
+                },
+            )
+            repositories.collection_resource_import_results.put(result.result_id, result)
+            results.append(result)
+            self._increment_count(counts, outcome.acquisition_status)
             warnings.extend(
                 f"{resource.discovered_resource_id}:{warning}"
                 for warning in outcome.warnings
             )
+        memberships = self._build_memberships(discovery, links, repositories)
         total = len(discovery.resources)
-        missing_links = total - len(links)
-        counts["failed"] += missing_links
         if (
-            discovery.snapshot.completeness == CollectionImportStatus.REQUIRES_AUTHENTICATION
+            discovery.snapshot.completeness_status
+            == CollectionCompletenessStatus.REQUIRES_AUTHENTICATION
             and total == 0
         ):
             status = CollectionImportStatus.REQUIRES_AUTHENTICATION
         elif (
-            discovery.snapshot.completeness == CollectionImportStatus.COMPLETE
-            and counts["auth"] == counts["unavailable"] == counts["failed"] == 0
+            discovery.snapshot.completeness_status
+            == CollectionCompletenessStatus.PROVEN_COMPLETE
+            and counts["auth"]
+            == counts["unavailable"]
+            == counts["failed"]
+            == counts["unverified"]
+            == 0
         ):
             status = CollectionImportStatus.COMPLETE
-        elif discovery.snapshot.completeness == CollectionImportStatus.FAILED and total == 0:
+        elif (
+            discovery.snapshot.completeness_status
+            == CollectionCompletenessStatus.FAILED
+            and total == 0
+        ):
             status = CollectionImportStatus.FAILED
         else:
             status = CollectionImportStatus.PARTIAL
-        link_hashes = FrozenDict({item.link_id: item.content_hash for item in links})
+        execution_time = self.clock().astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
         record = _make_bound(
             CollectionImportRecord,
             "collection-import",
             {
+                "executed_at": execution_time,
                 "collection_id": definition.collection_id,
                 "snapshot_id": discovery.snapshot.snapshot_id,
                 "snapshot_hash": discovery.snapshot.content_hash,
-                "acquisition_link_hashes": link_hashes,
+                "acquisition_link_hashes": FrozenDict(
+                    {item.link_id: item.content_hash for item in links}
+                ),
+                "resource_result_hashes": FrozenDict(
+                    {item.result_id: item.content_hash for item in results}
+                ),
+                "membership_hashes": FrozenDict(
+                    {item.membership_id: item.content_hash for item in memberships}
+                ),
                 "total_resources": total,
+                "discovery_occurrence_count": len(discovery.occurrences),
+                "discovered_resource_count": total,
+                "logical_literature_count": len(memberships),
+                "ingested_literature_count": len(memberships),
                 "ingested_count": counts["ingested"],
                 "metadata_only_count": counts["metadata_only"],
                 "auth_required_count": counts["auth"],
                 "unavailable_count": counts["unavailable"],
                 "failed_count": counts["failed"],
+                "unverified_membership_count": counts["unverified"],
                 "status": status,
                 "warnings": tuple(dict.fromkeys(warnings)),
             },
@@ -807,14 +1125,100 @@ class CollectionImportService:
             collection_id=definition.collection_id,
             snapshot_id=discovery.snapshot.snapshot_id,
             completeness=discovery.snapshot.completeness,
+            traversal_status=discovery.snapshot.traversal_status,
+            completeness_status=discovery.snapshot.completeness_status,
+            completeness_basis=discovery.snapshot.completeness_basis,
             visited_pages=discovery.snapshot.visited_page_count,
             discovered_resources=len(discovery.occurrences),
             unique_resources=total,
+            discovery_occurrence_count=len(discovery.occurrences),
+            discovered_resource_count=total,
+            logical_literature_count=len(memberships),
+            ingested_literature_count=len(memberships),
             ingested=counts["ingested"],
             metadata_only=counts["metadata_only"],
             requires_authentication=counts["auth"],
             unavailable=counts["unavailable"],
             failed=counts["failed"],
+            unverified_membership=counts["unverified"],
             import_id=record.import_id,
             warnings=record.warnings,
         )
+
+    @staticmethod
+    def _failed_resource_result(
+        definition: CollectionDefinition,
+        snapshot: CollectionSnapshot,
+        resource: DiscoveredCollectionResource,
+        *,
+        status: AcquisitionStatus,
+        failure_code: str,
+    ) -> CollectionResourceImportResult:
+        return _make_bound(
+            CollectionResourceImportResult,
+            "collection-resource-import",
+            {
+                "collection_id": definition.collection_id,
+                "snapshot_id": snapshot.snapshot_id,
+                "discovered_resource_id": resource.discovered_resource_id,
+                "discovered_resource_hash": resource.content_hash,
+                "acquisition_status": status,
+                "failure_code": failure_code,
+            },
+        )
+
+    @staticmethod
+    def _increment_count(counts: dict[str, int], status: AcquisitionStatus) -> None:
+        if status == AcquisitionStatus.INGESTED:
+            counts["ingested"] += 1
+        elif status == AcquisitionStatus.METADATA_ONLY:
+            counts["metadata_only"] += 1
+        elif status == AcquisitionStatus.REQUIRES_AUTHENTICATION:
+            counts["auth"] += 1
+        elif status in {
+            AcquisitionStatus.FULLTEXT_UNAVAILABLE,
+            AcquisitionStatus.UNSUPPORTED_MEDIA,
+        }:
+            counts["unavailable"] += 1
+        else:
+            counts["failed"] += 1
+
+    @staticmethod
+    def _build_memberships(
+        discovery: CollectionDiscoveryResult,
+        links: list[CollectionAcquisitionLink],
+        repositories: KnowledgeRepositories,
+    ) -> tuple[CollectionLiteratureMembership, ...]:
+        grouped: dict[str, list[CollectionAcquisitionLink]] = {}
+        for link in links:
+            if link.resulting_literature_id is not None:
+                grouped.setdefault(link.resulting_literature_id, []).append(link)
+        memberships: list[CollectionLiteratureMembership] = []
+        for literature_id, literature_links in sorted(grouped.items()):
+            resource_ids = {
+                link.discovered_resource_id for link in literature_links
+            }
+            occurrence_ids = {
+                occurrence.occurrence_id
+                for occurrence in discovery.occurrences
+                if occurrence.discovered_resource_id in resource_ids
+            }
+            membership = _make_bound(
+                CollectionLiteratureMembership,
+                "collection-membership",
+                {
+                    "collection_id": discovery.definition.collection_id,
+                    "snapshot_id": discovery.snapshot.snapshot_id,
+                    "literature_id": literature_id,
+                    "discovered_resource_refs": tuple(sorted(resource_ids)),
+                    "acquisition_refs": tuple(
+                        sorted({link.acquisition_id for link in literature_links})
+                    ),
+                    "occurrence_refs": tuple(sorted(occurrence_ids)),
+                },
+            )
+            repositories.collection_literature_memberships.put(
+                membership.membership_id, membership
+            )
+            memberships.append(membership)
+        return tuple(memberships)

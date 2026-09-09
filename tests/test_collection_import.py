@@ -1,21 +1,36 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import re
+import stat
 
 from typer.testing import CliRunner
 
 from spc.cli import app
-from spc.knowledge.acquisition import HTTPResponse, SafeHTTPFetcher
+import pytest
+
+from spc.knowledge.acquisition import AcquisitionError, HTTPResponse, SafeHTTPFetcher
 from spc.knowledge.collection import (
     CollectionImportService,
     GenericHTMLCollectionConnector,
     diff_collection_snapshots,
     make_collection_definition,
     make_collection_scope_policy,
+    path_matches_prefix,
 )
-from spc.models import CollectionImportStatus, CollectionResourceKind
+from spc.models import (
+    AcquisitionInputKind,
+    AcquisitionStatus,
+    CollectionCompletenessStatus,
+    CollectionDiscoveryConfidence,
+    CollectionImportStatus,
+    CollectionResourceKind,
+    LiteratureAcquisitionOutcome,
+    LiteratureAcquisitionRecord,
+)
 from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
+from spc.serialization import content_hash
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -105,7 +120,11 @@ def test_one_page_collection_discovers_multiple_dois(tmp_path: Path) -> None:
     html = b"<html><body>10.1234/alpha <a href='https://doi.org/10.1234/beta'>paper</a></body></html>"
     result, _ = discover(tmp_path, url, {url: response(url, html)})
 
-    assert result.snapshot.completeness == CollectionImportStatus.COMPLETE
+    assert result.snapshot.completeness == CollectionImportStatus.PARTIAL
+    assert (
+        result.snapshot.completeness_status
+        == CollectionCompletenessStatus.POLICY_EXHAUSTED_UNVERIFIED
+    )
     assert [item.doi for item in result.resources] == ["10.1234/alpha", "10.1234/beta"]
 
 
@@ -123,6 +142,10 @@ def test_multi_page_pagination_and_cross_page_occurrences(tmp_path: Path) -> Non
 
     assert result.snapshot.visited_page_count == 2
     assert result.snapshot.unique_resource_count == 2
+    assert (
+        result.snapshot.completeness_status
+        == CollectionCompletenessStatus.PROVEN_COMPLETE
+    )
     shared = next(item for item in result.resources if item.doi == "10.1234/shared")
     assert sum(
         item.discovered_resource_id == shared.discovered_resource_id
@@ -345,7 +368,8 @@ def test_changed_second_crawl_creates_snapshot_and_diff(tmp_path: Path) -> None:
     assert len(repos.collection_snapshots.list()) == 2
     assert len(diff.added_resource_ids) == 1
     assert len(diff.removed_resource_ids) == 1
-    assert len(diff.unchanged_resource_ids) == 1
+    assert len(diff.changed_resource_ids) == 1
+    assert diff.unchanged_resource_ids == ()
 
 
 def test_import_isolates_failed_pdf_and_preserves_counts_and_trust_boundary(
@@ -375,6 +399,7 @@ def test_import_isolates_failed_pdf_and_preserves_counts_and_trust_boundary(
     assert outcome.failed == 1
     assert record.total_resources == 2
     assert len(repos.collection_acquisition_links.list()) == 2
+    assert len(repos.collection_resource_import_results.list()) == 2
     assert repos.literature_representation_selections.list() == ()
     assert repos.curations.list() == ()
     assert repos.source_claims.list() == ()
@@ -390,4 +415,387 @@ def test_cli_exposes_bounded_collection_import_options() -> None:
     assert result.exit_code == 0
     assert "--max-pages" in plain_output
     assert "--max-resources" in plain_output
+    assert "--max-depth" in plain_output
+    assert "--allowed-origin" in plain_output
+    assert "--allowed-path-prefix" in plain_output
+    assert "--allow-external-lit" in plain_output
     assert "--connector" in plain_output
+
+
+class FakeAcquisitionService:
+    def __init__(self, outcomes: dict[str, str | Exception]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[str] = []
+
+    def add(
+        self,
+        source: str,
+        domain: str,
+        repositories: KnowledgeRepositories,
+        _evidence_store: SourceEvidenceStore,
+    ) -> LiteratureAcquisitionOutcome:
+        self.calls.append(source)
+        configured = self.outcomes[source]
+        if isinstance(configured, Exception):
+            raise configured
+        source_hash = content_hash({"source": source, "domain": domain})
+        identity = {
+            "request_id": f"request-{source_hash[:20]}",
+            "request_hash": content_hash({"request": source}),
+            "resolver_id": "fake-collection-test-resolver",
+            "resolver_version": "1.0.0",
+            "resolved_resource_id": f"resolved-{source_hash[:20]}",
+            "resolved_resource_hash": content_hash({"resolved": source}),
+            "attempt_refs": (),
+            "attempt_hashes": (),
+            "resulting_literature_id": configured,
+            "resulting_ingestion_id": f"ingestion-{source_hash[:20]}",
+            "status": AcquisitionStatus.INGESTED,
+            "warnings": (),
+        }
+        acquisition_id = f"literature-acquisition-{content_hash(identity)[:24]}"
+        payload = {"acquisition_id": acquisition_id, **identity}
+        record = LiteratureAcquisitionRecord(
+            **payload,
+            content_hash=content_hash(payload),
+        )
+        repositories.literature_acquisitions.put(record.acquisition_id, record)
+        return LiteratureAcquisitionOutcome(
+            input_kind=(
+                AcquisitionInputKind.DOI
+                if source.startswith("10.")
+                else AcquisitionInputKind.URL
+            ),
+            canonical_identifier=source,
+            acquisition_status=AcquisitionStatus.INGESTED,
+            fulltext_status=AcquisitionStatus.FULLTEXT_FOUND,
+            literature_id=configured,
+            ingestion_id=identity["resulting_ingestion_id"],
+            acquisition_id=record.acquisition_id,
+        )
+
+
+def test_path_scope_uses_segment_boundaries() -> None:
+    assert path_matches_prefix("/project", "/project")
+    assert path_matches_prefix("/project/", "/project")
+    assert path_matches_prefix("/project/page2", "/project")
+    assert not path_matches_prefix("/project-old", "/project")
+    assert not path_matches_prefix("/project-admin", "/project")
+
+
+def test_pagination_child_path_is_accepted_but_prefix_collision_is_rejected(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    child = "https://collection.example/project/page2"
+    collision = "https://collection.example/project-old/page2"
+    transport = FakeHTTPTransport(
+        {
+            entry: response(
+                entry,
+                (
+                    f"<a rel='next' href='{child}'>Next</a>"
+                    f"<a rel='next' href='{collision}'>Next</a>"
+                ).encode(),
+            ),
+            child: response(child, b"<p>terminal</p>"),
+        }
+    )
+    safe = SafeHTTPFetcher(transport, dns_resolver=lambda _host: (PUBLIC_IP,))
+    repos, _ = repositories(tmp_path)
+    result = GenericHTMLCollectionConnector().discover(
+        make_collection_definition(entry, "base"), repos, safe
+    )
+
+    assert transport.calls == [entry, child]
+    assert "unresolved_pagination_outside_scope" in result.snapshot.completeness_reasons
+
+
+def test_default_filename_entry_scope_uses_conservative_parent() -> None:
+    policy = make_collection_scope_policy(
+        "https://collection.example/project/index.html"
+    )
+
+    assert policy.allowed_path_prefixes == ("/project/",)
+    assert path_matches_prefix("/project/page2", policy.allowed_path_prefixes[0])
+    assert not path_matches_prefix("/project-old", policy.allowed_path_prefixes[0])
+
+
+def test_scope_and_completeness_contract_are_snapshot_bound(tmp_path: Path) -> None:
+    url = "https://collection.example/project/index.html"
+    narrow = make_collection_scope_policy(url, allowed_path_prefixes=("/project/a",))
+    broad = make_collection_scope_policy(url, allowed_path_prefixes=("/project",))
+    narrow_definition = make_collection_definition(url, "base", scope_policy=narrow)
+    broad_definition = make_collection_definition(url, "base", scope_policy=broad)
+    first, _ = discover(tmp_path, url, {url: response(url, b"<p>empty</p>")})
+
+    assert narrow_definition.collection_id != broad_definition.collection_id
+    assert first.snapshot.scope_policy_hash == first.definition.scope_policy.content_hash
+    assert (
+        first.snapshot.connector_completeness_contract
+        == first.definition.connector_completeness_contract
+    )
+    assert first.snapshot.completeness_basis == ("no_explicit_completeness_evidence",)
+
+
+def test_cli_custom_collection_scope_is_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeOutcome:
+        @staticmethod
+        def model_dump_json(*, indent: int) -> str:
+            assert indent == 2
+            return "{}"
+
+    def fake_run(_self, definition, _repositories, _evidence_store):
+        captured["definition"] = definition
+        return FakeOutcome()
+
+    monkeypatch.setattr(CollectionImportService, "run", fake_run)
+    result = CliRunner().invoke(
+        app,
+        [
+            "import-literature-collection",
+            "https://collection.example/project/index.html",
+            "--domain",
+            "base",
+            "--allowed-origin",
+            "https://collection.example",
+            "--allowed-path-prefix",
+            "/project/publications",
+            "--allow-external-literature-links",
+            "--max-depth",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    definition = captured["definition"]
+    assert definition.scope_policy.allowed_origins == ("https://collection.example",)
+    assert definition.scope_policy.allowed_path_prefixes == (
+        "/project/publications",
+    )
+    assert definition.scope_policy.allow_external_literature_links is True
+    assert definition.scope_policy.max_depth == 3
+
+
+def test_post_resolution_deduplicates_three_resources_to_one_literature(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    article = "https://collection.example/project/article/paper-one"
+    pdf = "https://collection.example/project/paper-one.pdf"
+    doi = "10.1234/paper-one"
+    page = (
+        f"<a href='https://doi.org/{doi}'>DOI</a>"
+        f"<a href='{article}'>Article</a>"
+        f"<a href='{pdf}'>PDF</a>"
+    ).encode()
+    fake = FakeAcquisitionService(
+        {doi: "literature-shared", article: "literature-shared", pdf: "literature-shared"}
+    )
+    repos, store = repositories(tmp_path)
+    outcome = CollectionImportService(
+        fetcher=fetcher({entry: response(entry, page)}),
+        acquisition_service=fake,
+    ).run(make_collection_definition(entry, "base"), repos, store)
+    membership = repos.collection_literature_memberships.list()[0]
+
+    assert outcome.discovery_occurrence_count == 3
+    assert outcome.discovered_resource_count == 3
+    assert outcome.logical_literature_count == 1
+    assert outcome.ingested_literature_count == 1
+    assert len(membership.discovered_resource_refs) == 3
+    assert len(membership.acquisition_refs) == 3
+    assert len(membership.occurrence_refs) == 3
+
+
+def test_expected_acquisition_failure_does_not_abort_later_resource(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    first = "https://collection.example/project/a.pdf"
+    second = "https://collection.example/project/b.pdf"
+    page = f"<a href='{first}'>A</a><a href='{second}'>B</a>".encode()
+    fake = FakeAcquisitionService(
+        {first: AcquisitionError("expected failure"), second: "literature-b"}
+    )
+    repos, store = repositories(tmp_path)
+    outcome = CollectionImportService(
+        fetcher=fetcher({entry: response(entry, page)}),
+        acquisition_service=fake,
+    ).run(make_collection_definition(entry, "base"), repos, store)
+
+    assert set(fake.calls) == {first, second}
+    assert outcome.failed == 1
+    assert outcome.ingested == 1
+    assert len(repos.collection_resource_import_results.list()) == 2
+    assert len(repos.collection_literature_memberships.list()) == 1
+
+
+def test_unexpected_programming_error_is_not_swallowed(tmp_path: Path) -> None:
+    entry = "https://collection.example/project"
+    pdf = "https://collection.example/project/a.pdf"
+    fake = FakeAcquisitionService({pdf: RuntimeError("programming defect")})
+    repos, store = repositories(tmp_path)
+    service = CollectionImportService(
+        fetcher=fetcher({entry: response(entry, f"<a href='{pdf}'>PDF</a>".encode())}),
+        acquisition_service=fake,
+    )
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        service.run(make_collection_definition(entry, "base"), repos, store)
+
+
+def test_collection_page_exact_bytes_are_hash_verifiable(tmp_path: Path) -> None:
+    entry = "https://collection.example/project"
+    body = b"<html><body>exact collection bytes</body></html>"
+    result, repos = discover(tmp_path, entry, {entry: response(entry, body)})
+    page = result.pages[0]
+    artifact = repos.collection_page_artifacts.verify_page_record(page)
+
+    assert repos.collection_page_artifacts.read_bytes(artifact.artifact_id) == body
+    content_path = (
+        tmp_path
+        / "knowledge"
+        / "collection_page_artifacts"
+        / artifact.artifact_id
+        / "content.bin"
+    )
+    content_path.chmod(stat.S_IWRITE)
+    content_path.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="hash changed|byte size changed"):
+        repos.collection_page_artifacts.verify_page_record(page)
+
+
+def test_same_resource_id_with_changed_hash_is_reported_changed(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    repos, _ = repositories(tmp_path)
+    definition = make_collection_definition(entry, "base")
+    first = GenericHTMLCollectionConnector().discover(
+        definition,
+        repos,
+        fetcher({entry: response(entry, b"<p>10.1234/shared</p>")}),
+    )
+    second = GenericHTMLCollectionConnector().discover(
+        definition,
+        repos,
+        fetcher(
+            {
+                entry: response(
+                    entry,
+                    b"<meta name='citation_doi' content='10.1234/shared'>",
+                )
+            }
+        ),
+    )
+    diff = diff_collection_snapshots(first.snapshot, second.snapshot)
+
+    assert first.resources[0].discovered_resource_id == second.resources[0].discovered_resource_id
+    assert first.resources[0].content_hash != second.resources[0].content_hash
+    assert diff.changed_resource_ids == (first.resources[0].discovered_resource_id,)
+    assert diff.unchanged_resource_ids == ()
+
+
+def test_same_resource_with_changed_discovery_provenance_is_reported_changed(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    repos, _ = repositories(tmp_path)
+    definition = make_collection_definition(entry, "base")
+    first = GenericHTMLCollectionConnector().discover(
+        definition,
+        repos,
+        fetcher(
+            {
+                entry: response(
+                    entry,
+                    b"<meta name='citation_doi' content='10.1234/shared'>",
+                )
+            }
+        ),
+    )
+    second = GenericHTMLCollectionConnector().discover(
+        definition,
+        repos,
+        fetcher(
+            {
+                entry: response(
+                    entry,
+                    b"<a href='https://doi.org/10.1234/shared'>DOI</a>",
+                )
+            }
+        ),
+    )
+    diff = diff_collection_snapshots(first.snapshot, second.snapshot)
+
+    assert first.resources[0].content_hash == second.resources[0].content_hash
+    assert diff.changed_resource_ids == (first.resources[0].discovered_resource_id,)
+    assert diff.unchanged_resource_ids == ()
+
+
+def test_identical_snapshot_still_creates_distinct_import_events(tmp_path: Path) -> None:
+    entry = "https://collection.example/project"
+    body = b"<p>10.1234/reference-only</p>"
+    times = iter(
+        (
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+    )
+    repos, store = repositories(tmp_path)
+    service = CollectionImportService(
+        fetcher=fetcher({entry: response(entry, body)}),
+        clock=lambda: next(times),
+    )
+    definition = make_collection_definition(entry, "base")
+    first = service.run(definition, repos, store)
+    second = service.run(definition, repos, store)
+
+    assert first.snapshot_id == second.snapshot_id
+    assert first.import_id != second.import_id
+    assert len(repos.collection_snapshots.list()) == 1
+    assert len(repos.collection_imports.list()) == 2
+
+
+def test_arbitrary_body_doi_is_audited_but_not_imported_as_membership(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    fake = FakeAcquisitionService({})
+    repos, store = repositories(tmp_path)
+    outcome = CollectionImportService(
+        fetcher=fetcher(
+            {entry: response(entry, b"References include 10.1234/not-a-member")}
+        ),
+        acquisition_service=fake,
+    ).run(make_collection_definition(entry, "base"), repos, store)
+    resource = repos.collection_resources.list()[0]
+
+    assert resource.highest_discovery_confidence == CollectionDiscoveryConfidence.LOW
+    assert resource.membership_eligible is False
+    assert fake.calls == []
+    assert outcome.unverified_membership == 1
+    assert outcome.logical_literature_count == 0
+    assert repos.collection_literature_memberships.list() == ()
+
+
+def test_citation_metadata_doi_is_high_confidence_membership_candidate(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    result, _ = discover(
+        tmp_path,
+        entry,
+        {
+            entry: response(
+                entry,
+                b"<meta name='citation_doi' content='10.1234/member'>",
+            )
+        },
+    )
+
+    assert result.resources[0].highest_discovery_confidence == CollectionDiscoveryConfidence.HIGH
+    assert result.resources[0].membership_eligible is True
