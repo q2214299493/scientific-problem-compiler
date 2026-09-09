@@ -375,10 +375,31 @@ binds one or more exact canonical blocks; callers must select a region when a
 multi-paragraph cell cannot be represented by one honest `EvidenceSpan`.
 Empty cells retain topology without inventing text.
 
-Every successful `structure-literature` run creates or reuses an immutable
-`DocumentStructureSelection`. Re-running the same extractor is idempotent;
-changing its version or configuration creates a separate audit artifact and
-advances the selection chain. Trusted snapshots bind only the current selected
-structure and reject locators attached to an older structure. PDF line-only
-extraction remains explicitly partial and does not promote wrapped lines or
-weak title-case text into paragraphs or headings.
+The built-in extractor may create or reuse an immutable
+`DocumentStructureSelection` only when its result does not reduce extraction
+quality or return to an earlier structure. Custom extractor output is stored as
+an audit artifact and is never authoritative by default. Explicit promotion,
+including an intentional rollback, uses:
+
+```powershell
+spc select-document-structure `
+  --representation-id literature-representation-... `
+  --structure-id document-structure-... `
+  --rationale "Reviewed corrected structure" `
+  --allow-rollback `
+  --knowledge-dir knowledge
+```
+
+Each promotion appends an immutable selection event; old selections and
+structures remain available for audit. Trusted snapshots bind exactly the
+current selected structure and reject locators attached to an older structure.
+
+### K1E.2 content regions
+
+HTML structure blocks and `StructuredEvidenceLocator` records preserve a local
+`content_region`: main content, references, navigation, footer, related content,
+supplementary context, or unknown. Reference/navigation headings cannot alter
+the main scientific section path, and locally negative regions override a broad
+article container. PDF regions remain `unknown` until a reliable layout-aware
+extractor exists. Integer-numbered PDF lines are treated conservatively as
+unresolved text rather than inferred headings or list items.

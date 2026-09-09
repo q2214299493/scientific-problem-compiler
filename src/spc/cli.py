@@ -163,6 +163,7 @@ from .knowledge.structure import (
     DocumentStructureService,
     inspect_document_structure,
 )
+from .knowledge.structure_selection import DocumentStructureSelector
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import (
@@ -397,7 +398,10 @@ def structure_literature(
     )
     report = {
         "structure_id": result.artifact.structure_id,
-        "structure_selection_id": result.selection.selection_id,
+        "structure_selection_id": (
+            result.selection.selection_id if result.selection is not None else None
+        ),
+        "authoritative": result.selection is not None,
         "representation_id": result.artifact.representation_id,
         "pages": sum(
             block.block_type.value == "page" for block in result.blocks
@@ -414,6 +418,37 @@ def structure_literature(
         "warnings": result.artifact.warnings,
     }
     typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+@app.command("select-document-structure")
+def select_document_structure(
+    representation_id: Annotated[str, typer.Option("--representation-id")],
+    structure_id: Annotated[str, typer.Option("--structure-id")],
+    rationale: Annotated[str, typer.Option("--rationale")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    allow_rollback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-rollback",
+            help="Explicitly permit selecting an earlier structure from the immutable history.",
+        ),
+    ] = False,
+) -> None:
+    """Explicitly promote one stored document structure artifact."""
+    repositories = KnowledgeRepositories(knowledge_dir)
+    artifact = repositories.document_structure_artifacts.get(structure_id)
+    selection = DocumentStructureSelector().select(
+        artifact.literature_id,
+        representation_id,
+        structure_id,
+        repositories,
+        KnowledgeEvidenceStore(knowledge_dir),
+        rationale=rationale,
+        allow_rollback=allow_rollback,
+    )
+    typer.echo(selection.model_dump_json(indent=2))
 
 
 @app.command("inspect-literature-structure")

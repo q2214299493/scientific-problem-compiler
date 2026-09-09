@@ -211,6 +211,16 @@ class DocumentBlockType(StrEnum):
     OTHER_TEXT = "other_text"
 
 
+class DocumentContentRegion(StrEnum):
+    MAIN_CONTENT = "main_content"
+    REFERENCES = "references"
+    NAVIGATION = "navigation"
+    FOOTER = "footer"
+    RELATED_CONTENT = "related_content"
+    SUPPLEMENTARY_CONTEXT = "supplementary_context"
+    UNKNOWN = "unknown"
+
+
 class StructureExtractionStatus(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
@@ -2154,6 +2164,7 @@ class DocumentStructureBlock(StrictModel):
     page_number: int | None = Field(default=None, ge=1)
     heading_level: int | None = Field(default=None, ge=1, le=6)
     section_path: tuple[NonBlankStr, ...] = ()
+    content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN
     label: NonBlankStr | None = None
     start_offset: int = Field(ge=0)
     end_offset: int = Field(gt=0)
@@ -2176,6 +2187,8 @@ class DocumentStructureBlock(StrictModel):
         identity = self.model_dump(
             mode="json", exclude={"block_id", "content_hash"}, exclude_none=True
         )
+        if self.content_region == DocumentContentRegion.UNKNOWN:
+            identity.pop("content_region", None)
         expected_id = f"document-block-{content_hash(identity)[:24]}"
         if self.block_id != expected_id:
             raise ValueError("DocumentStructureBlock block_id is not content-bound")
@@ -2395,6 +2408,7 @@ class StructuredEvidenceLocator(StrictModel):
     block_id: NonBlankStr
     page_number: int | None = Field(default=None, ge=1)
     section_path: tuple[NonBlankStr, ...] = ()
+    content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN
     table_id: NonBlankStr | None = None
     table_cell_id: NonBlankStr | None = None
     row_index: int | None = Field(default=None, ge=0)
@@ -2425,6 +2439,8 @@ class StructuredEvidenceLocator(StrictModel):
         identity = self.model_dump(
             mode="json", exclude={"locator_id", "content_hash"}, exclude_none=True
         )
+        if self.content_region == DocumentContentRegion.UNKNOWN:
+            identity.pop("content_region", None)
         expected_id = f"structured-locator-{content_hash(identity)[:24]}"
         if self.locator_id != expected_id:
             raise ValueError("StructuredEvidenceLocator locator_id is not content-bound")

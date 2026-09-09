@@ -13,6 +13,7 @@ from ..models import (
     CanonicalTextBlock,
     CanonicalTextArtifact,
     DocumentBlockType,
+    DocumentContentRegion,
     DocumentStructureArtifact,
     DocumentStructureBlock,
     DocumentStructureSelection,
@@ -56,7 +57,7 @@ class ExtractedDocumentStructure:
 @dataclass(frozen=True)
 class DocumentStructureExtractionResult:
     artifact: DocumentStructureArtifact
-    selection: DocumentStructureSelection
+    selection: DocumentStructureSelection | None
     blocks: tuple[DocumentStructureBlock, ...]
     tables: tuple[TableStructure, ...]
     table_cells: tuple[TableCellStructure, ...]
@@ -88,6 +89,7 @@ def _make_block(
     page_number: int | None = None,
     heading_level: int | None = None,
     section_path: tuple[str, ...] = (),
+    content_region: DocumentContentRegion = DocumentContentRegion.UNKNOWN,
     label: str | None = None,
 ) -> DocumentStructureBlock:
     identity = {
@@ -98,12 +100,15 @@ def _make_block(
         "page_number": page_number,
         "heading_level": heading_level,
         "section_path": section_path,
+        "content_region": content_region,
         "label": label,
         "start_offset": start_offset,
         "end_offset": end_offset,
         "text_hash": _text_hash(text),
     }
     identity = {key: value for key, value in identity.items() if value is not None}
+    if content_region == DocumentContentRegion.UNKNOWN:
+        identity.pop("content_region", None)
     block_id = f"document-block-{content_hash(identity)[:24]}"
     payload = {"block_id": block_id, **identity}
     return DocumentStructureBlock(
@@ -119,7 +124,7 @@ def _label(text: str, prefix: str, fallback_number: int) -> str:
 
 def _heading_level(text: str) -> int | None:
     stripped = text.strip()
-    numbered = re.match(r"^(\d+(?:\.\d+)*)[.)]?\s+\S", stripped)
+    numbered = re.match(r"^(\d+(?:\.\d+)+)[.)]?\s+\S", stripped)
     if numbered:
         return min(6, numbered.group(1).count(".") + 1)
     return None
@@ -208,12 +213,12 @@ def _make_figure(
 
 class PDFDocumentStructureExtractor:
     extractor_id = "pdf-canonical-structure"
-    extractor_version = "2.0.0"
+    extractor_version = "3.0.0"
     representation_kind = LiteratureRepresentationKind.PDF
     extractor_config_hash = content_hash(
         {
             "source": "canonical_page_blocks",
-            "heading_policy": "numbered_heading_only_v2",
+            "heading_policy": "hierarchical_numbered_heading_only_v3",
             "paragraph_policy": "unresolved_without_layout",
             "caption_policy": "line_prefix_table_figure_v1",
             "table_cells": "never_infer",
@@ -258,7 +263,7 @@ class PDFDocumentStructureExtractor:
                 block_type = DocumentBlockType.OTHER_TEXT
                 heading_level = _heading_level(text)
                 label: str | None = None
-                if re.match(r"^(?:[-*•]|\d+[.)])\s+", text):
+                if re.match(r"^(?:[-*•])\s+", text):
                     block_type = DocumentBlockType.LIST_ITEM
                     heading_level = None
                 elif re.match(r"(?i)^table\s*[A-Za-z0-9.-]+", text):
@@ -341,7 +346,7 @@ class PDFDocumentStructureExtractor:
 class _HTMLElement:
     tag: str
     text: str
-    negative_context: bool
+    content_region: DocumentContentRegion
     table_index: int | None
     row_index: int | None
     row_span: int
@@ -364,28 +369,28 @@ class _HTMLTableCell:
 
 class _HTMLStructureParser(HTMLParser):
     CAPTURE_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "caption", "th", "td", "figcaption"})
-    NEGATIVE_TOKENS = frozenset(
+    REFERENCE_TOKENS = frozenset(
         {
             "references",
             "reference",
             "bibliography",
             "citations",
             "cited-by",
-            "footer",
-            "navigation",
-            "nav",
-            "related-articles",
-            "recommended",
             "references-list",
         }
     )
+    NAVIGATION_TOKENS = frozenset({"navigation", "nav", "menu"})
+    FOOTER_TOKENS = frozenset({"footer", "site-footer"})
+    RELATED_TOKENS = frozenset({"related", "related-articles", "recommended", "recommended-articles"})
+    SUPPLEMENTARY_TOKENS = frozenset({"supplement", "supplementary", "supplementary-material"})
+    MAIN_TOKENS = frozenset({"article", "article-content", "main", "main-content"})
     VOID_TAGS = frozenset(
         {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
     )
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.stack: list[tuple[str, bool]] = []
+        self.stack: list[tuple[str, DocumentContentRegion]] = []
         self.active: list[tuple[str, list[str], dict[str, object]]] = []
         self.elements: list[_HTMLElement] = []
         self.cells: list[_HTMLTableCell] = []
@@ -412,20 +417,41 @@ class _HTMLStructureParser(HTMLParser):
         return parsed, invalid
 
     @classmethod
-    def _negative(cls, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
-        if tag in {"nav", "footer", "aside"}:
-            return True
+    def _region(
+        cls,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        parent: DocumentContentRegion,
+    ) -> DocumentContentRegion:
         values = " ".join(value or "" for key, value in attrs if key in {"id", "class", "role"})
         tokens = {token for token in re.split(r"[^a-z0-9-]+", values.casefold()) if token}
-        return bool(tokens & cls.NEGATIVE_TOKENS)
+        if tokens & cls.REFERENCE_TOKENS:
+            return DocumentContentRegion.REFERENCES
+        if tag == "nav" or tokens & cls.NAVIGATION_TOKENS:
+            return DocumentContentRegion.NAVIGATION
+        if tag == "footer" or tokens & cls.FOOTER_TOKENS:
+            return DocumentContentRegion.FOOTER
+        if tokens & cls.RELATED_TOKENS:
+            return DocumentContentRegion.RELATED_CONTENT
+        if tag == "aside" or tokens & cls.SUPPLEMENTARY_TOKENS:
+            return DocumentContentRegion.SUPPLEMENTARY_CONTEXT
+        if parent not in {
+            DocumentContentRegion.UNKNOWN,
+            DocumentContentRegion.MAIN_CONTENT,
+        }:
+            return parent
+        if tag in {"article", "main"} or tokens & cls.MAIN_TOKENS:
+            return DocumentContentRegion.MAIN_CONTENT
+        return parent
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized = tag.casefold()
         if normalized in {"script", "style", "noscript"}:
             self.ignored_depth += 1
-        negative = self._negative(normalized, attrs) or any(item[1] for item in self.stack)
+        parent_region = self.stack[-1][1] if self.stack else DocumentContentRegion.UNKNOWN
+        region = self._region(normalized, attrs, parent_region)
         if normalized not in self.VOID_TAGS:
-            self.stack.append((normalized, negative))
+            self.stack.append((normalized, region))
         if self.ignored_depth:
             return
         if normalized == "table":
@@ -470,7 +496,7 @@ class _HTMLStructureParser(HTMLParser):
             row_span = 1
             column_span = 1
         metadata: dict[str, object] = {
-            "negative": negative,
+            "content_region": region,
             "table_index": table["index"] if table is not None else None,
             "row_index": table["row"] if table is not None else None,
             "row_span": row_span,
@@ -494,7 +520,7 @@ class _HTMLStructureParser(HTMLParser):
                         _HTMLElement(
                             tag=normalized,
                             text=text,
-                            negative_context=bool(metadata["negative"]),
+                            content_region=DocumentContentRegion(metadata["content_region"]),
                             table_index=metadata["table_index"],
                             row_index=metadata["row_index"],
                             row_span=int(metadata["row_span"]),
@@ -578,12 +604,18 @@ def validate_table_cell_topology(
 
 class HTMLDocumentStructureExtractor:
     extractor_id = "html-canonical-structure"
-    extractor_version = "2.0.0"
+    extractor_version = "3.0.0"
     representation_kind = LiteratureRepresentationKind.HTML
     extractor_config_hash = content_hash(
         {
             "tags": tuple(sorted(_HTMLStructureParser.CAPTURE_TAGS)),
-            "negative_context": tuple(sorted(_HTMLStructureParser.NEGATIVE_TOKENS)),
+            "content_regions": {
+                "references": tuple(sorted(_HTMLStructureParser.REFERENCE_TOKENS)),
+                "navigation": tuple(sorted(_HTMLStructureParser.NAVIGATION_TOKENS)),
+                "footer": tuple(sorted(_HTMLStructureParser.FOOTER_TOKENS)),
+                "related": tuple(sorted(_HTMLStructureParser.RELATED_TOKENS)),
+                "supplementary": tuple(sorted(_HTMLStructureParser.SUPPLEMENTARY_TOKENS)),
+            },
             "binding": "dom_owner_to_exact_canonical_blocks_v2",
             "table_coordinates": "rowspan_colspan_occupancy_grid_v1",
         }
@@ -634,7 +666,10 @@ class HTMLDocumentStructureExtractor:
             )
             level: int | None = None
             if event.tag.startswith("h") and len(event.tag) == 2 and event.tag[1].isdigit():
-                if event.negative_context:
+                if event.content_region not in {
+                    DocumentContentRegion.MAIN_CONTENT,
+                    DocumentContentRegion.UNKNOWN,
+                }:
                     block_type = DocumentBlockType.OTHER_TEXT
                 else:
                     block_type = DocumentBlockType.HEADING
@@ -644,8 +679,15 @@ class HTMLDocumentStructureExtractor:
                             heading_titles.pop(existing, None)
                             heading_blocks.pop(existing, None)
                     heading_titles[level] = event.text
-            section_path = tuple(heading_titles[item] for item in sorted(heading_titles))
-            parent = heading_blocks[max(heading_blocks)].block_id if heading_blocks else None
+            if event.content_region in {
+                DocumentContentRegion.MAIN_CONTENT,
+                DocumentContentRegion.UNKNOWN,
+            }:
+                section_path = tuple(heading_titles[item] for item in sorted(heading_titles))
+                parent = heading_blocks[max(heading_blocks)].block_id if heading_blocks else None
+            else:
+                section_path = (event.content_region.value,)
+                parent = None
             label: str | None = None
             if block_type == DocumentBlockType.TABLE_CAPTION:
                 label = _label(event.text, "table", (event.table_index or 0) + 1)
@@ -659,6 +701,7 @@ class HTMLDocumentStructureExtractor:
                 parent_block_id=parent,
                 heading_level=level,
                 section_path=section_path,
+                content_region=event.content_region,
                 label=label,
                 start_offset=canonical_block.start_offset,
                 end_offset=canonical_block.end_offset,
@@ -674,8 +717,8 @@ class HTMLDocumentStructureExtractor:
             if canonical_block.block_id in matched_ids:
                 continue
             recovered = source.canonical_text[canonical_block.start_offset : canonical_block.end_offset]
-            section_path = tuple(heading_titles[item] for item in sorted(heading_titles))
-            parent = heading_blocks[max(heading_blocks)].block_id if heading_blocks else None
+            section_path = ()
+            parent = None
             blocks.append(
                 _make_block(
                     structure_id=structure_id,
@@ -683,6 +726,7 @@ class HTMLDocumentStructureExtractor:
                     ordinal=ordinal,
                     parent_block_id=parent,
                     section_path=section_path,
+                    content_region=DocumentContentRegion.UNKNOWN,
                     start_offset=canonical_block.start_offset,
                     end_offset=canonical_block.end_offset,
                     text=recovered,
@@ -855,6 +899,7 @@ class DocumentStructureService:
         extractor: DocumentStructureExtractor | None = None,
     ) -> DocumentStructureExtractionResult:
         store = evidence_store or repositories.evidence_store
+        custom_extractor = extractor is not None
         representation = repositories.literature_representation_refs.get(representation_id)
         validate_literature_representation(representation, repositories, store)
         if representation.literature_id != literature_id:
@@ -930,13 +975,15 @@ class DocumentStructureService:
         validate_document_structure(artifact, repositories, store)
         from .structure_selection import DocumentStructureSelector
 
-        selection = DocumentStructureSelector().select(
-            literature_id,
-            representation_id,
-            artifact.structure_id,
-            repositories,
-            store,
-        )
+        selection = None
+        if not custom_extractor:
+            selection = DocumentStructureSelector().consider_auto_promotion(
+                literature_id,
+                representation_id,
+                artifact.structure_id,
+                repositories,
+                store,
+            )
         return DocumentStructureExtractionResult(
             artifact=artifact,
             selection=selection,
@@ -1002,6 +1049,15 @@ def _validate_structure_records(
     heading_titles: dict[int, str] = {}
     for block in sorted(blocks, key=lambda item: item.ordinal):
         if block.block_type == DocumentBlockType.PAGE:
+            continue
+        if block.content_region not in {
+            DocumentContentRegion.MAIN_CONTENT,
+            DocumentContentRegion.UNKNOWN,
+        }:
+            if block.section_path != (block.content_region.value,):
+                raise ValueError("specialized content region has misleading section path")
+            continue
+        if block.content_region == DocumentContentRegion.UNKNOWN and not block.section_path:
             continue
         if block.block_type == DocumentBlockType.HEADING:
             level = block.heading_level or 1
@@ -1156,7 +1212,9 @@ def format_structured_evidence_locator(
 ) -> str:
     prefix = "PDF" if locator.page_number is not None else "HTML"
     parts = [f"{prefix} p.{locator.page_number}" if locator.page_number else prefix]
-    parts.extend(locator.section_path)
+    if locator.content_region != DocumentContentRegion.UNKNOWN:
+        parts.append(locator.content_region.value)
+    parts.extend(item for item in locator.section_path if item != locator.content_region.value)
     if locator.table_id is not None:
         label = locator.table_id
         if repositories is not None:
@@ -1200,6 +1258,7 @@ def verify_structured_evidence_locator(
         or evidence.end_offset > block.end_offset
         or record.page_number != block.page_number
         or record.section_path != block.section_path
+        or record.content_region != block.content_region
     ):
         raise ValueError("structured evidence locator provenance or offsets are invalid")
     if record.table_cell_id is not None:
@@ -1257,6 +1316,7 @@ def _create_locator(
         "block_id": block.block_id,
         "page_number": block.page_number,
         "section_path": block.section_path,
+        "content_region": block.content_region,
         "table_id": table.table_id if table else None,
         "table_cell_id": cell.cell_id if cell else None,
         "row_index": cell.row_index if cell else None,
@@ -1266,6 +1326,8 @@ def _create_locator(
         "canonical_end_offset": evidence.end_offset,
     }
     identity = {key: value for key, value in identity.items() if value is not None}
+    if block.content_region == DocumentContentRegion.UNKNOWN:
+        identity.pop("content_region", None)
     locator_id = f"structured-locator-{content_hash(identity)[:24]}"
     payload = {"locator_id": locator_id, **identity}
     locator = StructuredEvidenceLocator(**payload, content_hash=content_hash(payload))
@@ -1282,7 +1344,9 @@ def _display_for_block(
     figure: FigureStructure | None = None,
 ) -> str:
     parts = [f"PDF p.{block.page_number}" if block.page_number else "HTML"]
-    parts.extend(block.section_path)
+    if block.content_region != DocumentContentRegion.UNKNOWN:
+        parts.append(block.content_region.value)
+    parts.extend(item for item in block.section_path if item != block.content_region.value)
     if table is not None and cell is not None:
         parts.extend(
             (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -32,10 +33,15 @@ from spc.knowledge.structure import (
     validate_table_cell_topology,
     verify_structured_evidence_locator,
 )
-from spc.knowledge.structure_selection import resolve_current_structure_selection
+from spc.knowledge.structure_selection import (
+    DocumentStructureSelector,
+    resolve_current_structure_selection,
+)
 from spc.models import (
     CurationStatus,
     DocumentBlockType,
+    DocumentContentRegion,
+    DocumentStructureSelection,
     KnowledgeCurationRecord,
     StructureExtractionStatus,
     TableCellStructure,
@@ -111,6 +117,15 @@ class VersionedHTMLStructureExtractor(HTMLDocumentStructureExtractor):
     def __init__(self, version: str) -> None:
         self.extractor_version = version
         self.extractor_config_hash = content_hash({"test_extractor_version": version})
+
+
+class StatusHTMLStructureExtractor(VersionedHTMLStructureExtractor):
+    def __init__(self, version: str, status: StructureExtractionStatus) -> None:
+        super().__init__(version)
+        self.status = status
+
+    def extract(self, structure_id, source):
+        return replace(super().extract(structure_id, source), status=self.status)
 
 
 def pdf_structure(tmp_path: Path, *, parser_version: str = "1.0.0"):
@@ -288,6 +303,100 @@ def test_html_hierarchy_table_cells_figure_and_structured_evidence(
         assert format_structured_evidence_locator(locator, repositories)
 
 
+def test_html_content_regions_are_local_exact_and_locator_bound(
+    tmp_path: Path,
+) -> None:
+    html = article_html(
+        """
+        <h1>Results</h1>
+        <p>Repeated evidence text.</p>
+        <div class="references">
+          <h2>References</h2>
+          <p>Repeated evidence text.</p>
+          <ul><li>DOI 10.0000/reference.</li></ul>
+          <table><caption>Reference table</caption><tr><td>Reference cell</td></tr></table>
+          <figure><figcaption>Reference figure caption.</figcaption></figure>
+        </div>
+        <h2>Discussion</h2><p>Main discussion.</p>
+        <nav><p>Navigation link.</p></nav>
+        <footer><p>Footer note.</p></footer>
+        <div class="related-articles"><p>Related paper.</p></div>
+        <aside><p>Supplementary note.</p></aside>
+        """
+    )
+    repositories, store, _, result = html_structure(tmp_path, html)
+    text = repositories.canonical_html_text_artifacts.read_text(result.artifact.canonical_text_id)
+    by_text: dict[str, list] = {}
+    for block in result.blocks:
+        recovered = text[block.start_offset : block.end_offset]
+        by_text.setdefault(recovered, []).append(block)
+
+    main, reference = by_text["Repeated evidence text."]
+    assert main.content_region == DocumentContentRegion.MAIN_CONTENT
+    assert main.section_path == ("Results",)
+    assert reference.content_region == DocumentContentRegion.REFERENCES
+    assert reference.section_path == ("references",)
+    assert by_text["References"][0].block_type == DocumentBlockType.OTHER_TEXT
+    assert by_text["DOI 10.0000/reference."][0].block_type == DocumentBlockType.LIST_ITEM
+    assert by_text["DOI 10.0000/reference."][0].content_region == DocumentContentRegion.REFERENCES
+    assert by_text["Discussion"][0].section_path == ("Results", "Discussion")
+    assert by_text["Main discussion."][0].section_path == (
+        "Results",
+        "Discussion",
+    )
+    assert by_text["Navigation link."][0].content_region == DocumentContentRegion.NAVIGATION
+    assert by_text["Footer note."][0].content_region == DocumentContentRegion.FOOTER
+    assert by_text["Related paper."][0].content_region == DocumentContentRegion.RELATED_CONTENT
+    assert by_text["Supplementary note."][0].content_region == DocumentContentRegion.SUPPLEMENTARY_CONTEXT
+    for value in (
+        "Reference table",
+        "Reference cell",
+        "Reference figure caption.",
+    ):
+        assert by_text[value][0].content_region == DocumentContentRegion.REFERENCES
+        assert by_text[value][0].section_path == ("references",)
+
+    _, main_locator = create_evidence_from_block(result.artifact.structure_id, main.block_id, repositories, store)
+    _, reference_locator = create_evidence_from_block(
+        result.artifact.structure_id, reference.block_id, repositories, store
+    )
+    assert main_locator.content_region == DocumentContentRegion.MAIN_CONTENT
+    assert reference_locator.content_region == DocumentContentRegion.REFERENCES
+    assert "references" in format_structured_evidence_locator(reference_locator, repositories)
+
+    forged_identity = reference_locator.model_dump(
+        mode="json", exclude={"locator_id", "content_hash"}, exclude_none=True
+    )
+    forged_identity["content_region"] = DocumentContentRegion.MAIN_CONTENT
+    forged_id = f"structured-locator-{content_hash(forged_identity)[:24]}"
+    forged_payload = {"locator_id": forged_id, **forged_identity}
+    forged = reference_locator.__class__(
+        **forged_payload,
+        content_hash=content_hash(forged_payload),
+    )
+    repositories.structured_evidence_locators.put(forged.locator_id, forged)
+    with pytest.raises(ValueError, match="provenance or offsets"):
+        verify_structured_evidence_locator(forged, repositories, store)
+
+
+def test_reference_context_overrides_broad_article_context(tmp_path: Path) -> None:
+    html = article_html(
+        """
+        <div class="article-content publications">
+          <h1>Results</h1><p>Scientific result.</p>
+          <section class="references"><p>Reference DOI 10.0000/example.</p></section>
+        </div>
+        """
+    )
+    repositories, _, _, result = html_structure(tmp_path, html)
+    text = repositories.canonical_html_text_artifacts.read_text(result.artifact.canonical_text_id)
+    blocks = {text[block.start_offset : block.end_offset]: block for block in result.blocks}
+
+    assert blocks["Scientific result."].content_region == DocumentContentRegion.MAIN_CONTENT
+    assert blocks["Reference DOI 10.0000/example."].content_region == DocumentContentRegion.REFERENCES
+    assert blocks["Reference DOI 10.0000/example."].section_path == ("references",)
+
+
 def test_locator_and_evidence_tampering_fail_closed(tmp_path: Path) -> None:
     repositories, store, _, result = html_structure(tmp_path)
     paragraph = next(
@@ -459,6 +568,70 @@ def test_structure_cli_and_shared_repository_are_project_independent(
     assert all(block["page_number"] == 1 for block in json.loads(inspection.output)["blocks"])
 
 
+def test_structure_selection_cli_requires_explicit_rollback_flag(
+    tmp_path: Path,
+) -> None:
+    repositories, store, outcome, first = html_structure(tmp_path)
+    second = DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+        extractor=VersionedHTMLStructureExtractor("cli-promote-2.0.0"),
+    )
+    runner = CliRunner()
+    promote = runner.invoke(
+        app,
+        [
+            "select-document-structure",
+            "--representation-id",
+            outcome.representation_id or "",
+            "--structure-id",
+            second.artifact.structure_id,
+            "--rationale",
+            "Promote reviewed CLI candidate.",
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ],
+    )
+    assert promote.exit_code == 0, promote.output
+
+    rejected = runner.invoke(
+        app,
+        [
+            "select-document-structure",
+            "--representation-id",
+            outcome.representation_id or "",
+            "--structure-id",
+            first.artifact.structure_id,
+            "--rationale",
+            "Rollback without explicit flag.",
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ],
+    )
+    assert rejected.exit_code != 0
+
+    rollback = runner.invoke(
+        app,
+        [
+            "select-document-structure",
+            "--representation-id",
+            outcome.representation_id or "",
+            "--structure-id",
+            first.artifact.structure_id,
+            "--rationale",
+            "Explicitly restore reviewed structure.",
+            "--allow-rollback",
+            "--knowledge-dir",
+            str(tmp_path / "knowledge"),
+        ],
+    )
+    assert rollback.exit_code == 0, rollback.output
+    current = resolve_current_structure_selection(outcome.representation_id or "", repositories, store)
+    assert current.structure_id == first.artifact.structure_id
+
+
 def test_nested_html_content_retains_exact_table_ownership(tmp_path: Path) -> None:
     html = article_html(
         """
@@ -576,9 +749,20 @@ def test_legacy_single_region_table_cell_identity_remains_readable(
     assert legacy.start_offset == current.start_offset
 
 
-def test_structure_selection_is_idempotent_and_versioned(tmp_path: Path) -> None:
+def test_structure_generation_is_audit_only_until_explicit_selection(
+    tmp_path: Path,
+) -> None:
     first_extractor = VersionedHTMLStructureExtractor("test-1.0.0")
     repositories, store, outcome, first = html_structure(tmp_path, extractor=first_extractor)
+    assert first.selection is None
+    first_selection = DocumentStructureSelector().select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        first.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Explicitly select the first reviewed structure.",
+    )
     rerun = DocumentStructureService().extract(
         outcome.literature_id or "",
         outcome.representation_id or "",
@@ -593,14 +777,193 @@ def test_structure_selection_is_idempotent_and_versioned(tmp_path: Path) -> None
         store,
         extractor=VersionedHTMLStructureExtractor("test-2.0.0"),
     )
+    second_selection = DocumentStructureSelector().select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        second.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Explicitly promote the second reviewed structure.",
+    )
     current = resolve_current_structure_selection(outcome.representation_id or "", repositories, store)
 
     assert rerun.artifact.structure_id == first.artifact.structure_id
-    assert rerun.selection.selection_id == first.selection.selection_id
+    assert rerun.selection is None
     assert second.artifact.structure_id != first.artifact.structure_id
-    assert second.selection.supersedes_selection_id == first.selection.selection_id
-    assert current.selection_id == second.selection.selection_id
+    assert second.selection is None
+    assert second_selection.supersedes_selection_id == first_selection.selection_id
+    assert current.selection_id == second_selection.selection_id
     assert repositories.document_structure_artifacts.get(first.artifact.structure_id) == first.artifact
+
+
+def test_structure_auto_promotion_prevents_downgrade_and_history_rollback(
+    tmp_path: Path,
+) -> None:
+    repositories, store, outcome, first = html_structure(
+        tmp_path,
+        extractor=VersionedHTMLStructureExtractor("authority-1.0.0"),
+    )
+    selector = DocumentStructureSelector()
+    first_selection = selector.select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        first.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Select reviewed structure v1.",
+    )
+    second = DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+        extractor=VersionedHTMLStructureExtractor("authority-2.0.0"),
+    )
+    second_selection = selector.select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        second.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Select reviewed structure v2.",
+    )
+
+    rerun_first = DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+        extractor=VersionedHTMLStructureExtractor("authority-1.0.0"),
+    )
+    current = resolve_current_structure_selection(outcome.representation_id or "", repositories, store)
+    assert rerun_first.selection is None
+    assert current.selection_id == second_selection.selection_id
+
+    with pytest.raises(ValueError, match="allow_rollback"):
+        selector.select(
+            outcome.literature_id or "",
+            outcome.representation_id or "",
+            first.artifact.structure_id,
+            repositories,
+            store,
+            rationale="Attempt rollback without explicit permission.",
+        )
+    rollback = selector.select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        first.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Explicitly restore reviewed structure v1.",
+        allow_rollback=True,
+    )
+    assert rollback.supersedes_selection_id == second_selection.selection_id
+    assert repositories.document_structure_selections.get(first_selection.selection_id) == first_selection
+    assert repositories.document_structure_selections.get(second_selection.selection_id) == second_selection
+
+
+def test_structure_quality_policy_never_auto_promotes_weaker_or_unusable_artifact(
+    tmp_path: Path,
+) -> None:
+    repositories, store, outcome, complete = html_structure(tmp_path)
+    assert complete.selection is not None
+    rerun = DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+    )
+    assert rerun.selection is not None
+    assert rerun.selection.selection_id == complete.selection.selection_id
+    selector = DocumentStructureSelector()
+    for version, status in (
+        ("quality-partial", StructureExtractionStatus.PARTIAL),
+        ("quality-unsupported", StructureExtractionStatus.UNSUPPORTED),
+        ("quality-unresolved", StructureExtractionStatus.UNRESOLVED),
+    ):
+        candidate = DocumentStructureService().extract(
+            outcome.literature_id or "",
+            outcome.representation_id or "",
+            repositories,
+            store,
+            extractor=StatusHTMLStructureExtractor(version, status),
+        )
+        assert candidate.selection is None
+        selected = selector.consider_auto_promotion(
+            outcome.literature_id or "",
+            outcome.representation_id or "",
+            candidate.artifact.structure_id,
+            repositories,
+            store,
+        )
+        assert selected is not None
+        assert selected.selection_id == complete.selection.selection_id
+
+
+def test_complete_structure_may_auto_replace_partial_structure(tmp_path: Path) -> None:
+    repositories, store, outcome, partial = html_structure(
+        tmp_path,
+        extractor=StatusHTMLStructureExtractor("quality-initial-partial", StructureExtractionStatus.PARTIAL),
+    )
+    selector = DocumentStructureSelector()
+    partial_selection = selector.select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        partial.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Select the only reviewed partial structure.",
+    )
+    complete = DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+        extractor=VersionedHTMLStructureExtractor("quality-complete"),
+    )
+    promoted = selector.consider_auto_promotion(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        complete.artifact.structure_id,
+        repositories,
+        store,
+    )
+
+    assert promoted is not None
+    assert promoted.structure_id == complete.artifact.structure_id
+    assert promoted.supersedes_selection_id == partial_selection.selection_id
+
+
+def test_unknown_selection_policy_and_tampered_selection_fail_closed(
+    tmp_path: Path,
+) -> None:
+    repositories, store, _, result = html_structure(tmp_path)
+    current = result.selection
+    assert current is not None
+    identity = current.model_dump(mode="json", exclude={"selection_id", "content_hash"}, exclude_none=True)
+    identity.update(
+        {
+            "selected_by_policy": "forged-policy",
+            "supersedes_selection_id": current.selection_id,
+        }
+    )
+    selection_id = f"document-structure-selection-{content_hash(identity)[:24]}"
+    payload = {"selection_id": selection_id, **identity}
+    forged = DocumentStructureSelection(
+        **payload,
+        content_hash=content_hash(payload),
+    )
+    repositories.document_structure_selections.put(forged.selection_id, forged)
+
+    with pytest.raises(ValueError, match="unknown document structure selection policy"):
+        resolve_current_structure_selection(forged.representation_id, repositories, store)
+
+    path = repositories.document_structure_selections.root / f"{forged.selection_id}.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored["rationale"] = "tampered"
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    with pytest.raises(ValueError):
+        repositories.document_structure_selections.get(forged.selection_id)
 
 
 def test_trusted_snapshot_uses_only_current_selected_structure(
@@ -608,6 +971,14 @@ def test_trusted_snapshot_uses_only_current_selected_structure(
 ) -> None:
     repositories, store, outcome, first = html_structure(
         tmp_path, extractor=VersionedHTMLStructureExtractor("trust-1.0.0")
+    )
+    DocumentStructureSelector().select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        first.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Select the first trusted structure.",
     )
     document = repositories.literature_documents.get(outcome.literature_id or "")
     representation_selection = repositories.literature_representation_selections.resolve_current(document.literature_id)
@@ -647,6 +1018,14 @@ def test_trusted_snapshot_uses_only_current_selected_structure(
         store,
         extractor=VersionedHTMLStructureExtractor("trust-2.0.0"),
     )
+    second_selection = DocumentStructureSelector().select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        second.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Promote the second trusted structure.",
+    )
     with pytest.raises(ValueError, match="current selected structure"):
         create_evidence_from_block(
             first.artifact.structure_id,
@@ -671,7 +1050,7 @@ def test_trusted_snapshot_uses_only_current_selected_structure(
     snapshot = repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
     assert snapshot.document_structure_hashes == {second.artifact.structure_id: second.artifact.content_hash}
     assert snapshot.document_structure_selection_hashes == {
-        second.selection.selection_id: second.selection.content_hash
+        second_selection.selection_id: second_selection.content_hash
     }
     assert old_locator.locator_id not in snapshot.structured_evidence_locator_hashes
 
@@ -701,5 +1080,6 @@ def test_pdf_structure_is_conservative_and_offset_exact(tmp_path: Path) -> None:
     )
     assert "paragraph boundaries are unresolved" in " ".join(result.artifact.warnings)
     assert _heading_level("Methods Overview") is None
-    assert _heading_level("1 Results") == 1
+    assert _heading_level("1 Results") is None
+    assert _heading_level("1.1 Results") == 2
     assert all(text[block.start_offset : block.end_offset] for block in result.blocks)
