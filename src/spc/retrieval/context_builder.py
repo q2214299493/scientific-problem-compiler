@@ -11,7 +11,13 @@ from ..models import (
     ScientificContextPacket,
     scientific_context_semantic_hash,
 )
-from ..repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
+from ..repositories import (
+    CompositeEvidenceStore,
+    KnowledgeEvidenceStore,
+    KnowledgeRepositories,
+    ProjectEvidenceStore,
+    initialize_state,
+)
 from ..serialization import content_hash
 from .capability_retriever import retrieve_capabilities
 from .evidence_retriever import retrieve_evidence_spans
@@ -35,15 +41,18 @@ class ScientificContextBuilder:
     ) -> ScientificContextPacket:
         pack = self.domain_loader.load(domain)
         initialize_state(state_dir, domain=domain)
-        evidence_store = SourceEvidenceStore(state_dir)
+        evidence_store = CompositeEvidenceStore(
+            KnowledgeEvidenceStore(knowledge_dir),
+            ProjectEvidenceStore(state_dir),
+        )
         knowledge = KnowledgeRepositories(knowledge_dir)
         knowledge.load_expert_cases(pack.expert_cases)
         knowledge.load_workflow_patterns(pack.workflow_patterns)
         knowledge.load_capabilities(pack.capabilities)
 
         query = build_retrieval_query(raw_request, domain, pack.profile)
-        snapshot = knowledge.create_snapshot(evidence_store, pack.profile)
         evidence_hits = retrieve_evidence_spans(query, evidence_store, pack.profile)
+        snapshot = knowledge.create_snapshot(evidence_store, pack.profile)
         expert_case_hits = retrieve_expert_cases(query, knowledge.expert_cases, pack.profile)
         workflow_hits = retrieve_workflow_patterns(
             query, knowledge.workflow_patterns, pack.profile
@@ -75,7 +84,7 @@ class ScientificContextBuilder:
         retrieved_statements = tuple(
             GroundedStatement(
                 statement_id=f"retrieved-statement-{index}",
-                text=evidence_store.get(hit.record_id).text,
+                text=evidence_store.get_evidence(hit.record_id).text,
                 classification=EvidenceClassification.EVIDENCE,
                 evidence_refs=(hit.record_id,),
             )

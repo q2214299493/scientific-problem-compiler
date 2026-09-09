@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Generic, Iterable, TypeVar
+from typing import Generic, Iterable, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -67,6 +67,15 @@ from .serialization import (
 )
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def source_documents_equivalent(
+    left: SourceDocument, right: SourceDocument
+) -> bool:
+    """Compare source identity/content metadata, excluding storage event time."""
+    return left.model_dump(exclude={"ingested_at"}) == right.model_dump(
+        exclude={"ingested_at"}
+    )
 
 
 STATE_DIRECTORIES = (
@@ -170,20 +179,93 @@ class IdentityBoundRepository(ModelRepository[ModelT]):
         return records
 
 
-class SourceEvidenceStore:
-    def __init__(self, state_root: Path) -> None:
-        initialize_state(state_root)
-        self.state_root = state_root
-        self.source_records = ModelRepository(state_root / "sources", SourceDocument)
-        self.evidence_records = ModelRepository(state_root / "evidence", EvidenceSpan)
+class EvidenceStore(Protocol):
+    project_state_root: Path | None
+
+    def get_evidence(self, evidence_id: str) -> EvidenceSpan: ...
+
+    def get_source(self, source_id: str, source_version: str) -> SourceDocument: ...
+
+    def list_evidence(self) -> tuple[EvidenceSpan, ...]: ...
+
+    def list_sources(self) -> tuple[SourceDocument, ...]: ...
+
+    def ingest_source(
+        self,
+        source_path: Path,
+        source_id: str,
+        version: str,
+        title: str | None = None,
+        *,
+        source_role: str = "unspecified",
+        source_type: str = "unspecified",
+    ) -> SourceDocument: ...
+
+    def add_evidence(self, evidence: EvidenceSpan) -> Path: ...
+
+    def verify_source_integrity(self, source: SourceDocument) -> SourceDocument: ...
+
+    def verify_evidence_integrity(self, evidence: EvidenceSpan) -> SourceDocument: ...
+
+
+class FilesystemEvidenceStore:
+    """Root-agnostic immutable filesystem storage for sources and evidence."""
+
+    project_state_root: Path | None = None
+
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        resolved_root = root.resolve()
+        for directory in (root / "sources", root / "evidence"):
+            directory.mkdir(exist_ok=True)
+            if directory.is_symlink() or not directory.resolve().is_relative_to(
+                resolved_root
+            ):
+                raise ValueError("evidence repository directory escapes its root")
+        self.root = root
+        self.state_root = root
+        self.source_records = ModelRepository(root / "sources", SourceDocument)
+        self.evidence_records = ModelRepository(root / "evidence", EvidenceSpan)
 
     def get(self, key: str) -> EvidenceSpan:
-        return self.evidence_records.get(key)
+        return self.get_evidence(key)
+
+    def get_evidence(self, evidence_id: str) -> EvidenceSpan:
+        require_safe_path_component(evidence_id, field="evidence_id")
+        record_path = self.evidence_records.root / f"{evidence_id}.json"
+        if record_path.is_symlink():
+            raise ValueError("EvidenceSpan repository record cannot be a symlink")
+        return self.evidence_records.get(evidence_id)
+
+    def get_source(self, source_id: str, source_version: str) -> SourceDocument:
+        require_safe_path_component(source_id, field="source_id")
+        require_safe_path_component(source_version, field="source version")
+        record_key = f"{source_id}--{source_version}"
+        record_path = self.source_records.root / f"{record_key}.json"
+        if record_path.is_symlink():
+            raise ValueError("SourceDocument repository record cannot be a symlink")
+        return self.source_records.get(record_key)
+
+    def _content_destination(self, source_id: str, version: str) -> Path:
+        destination = self.root / "sources" / source_id / version / "content"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            destination.is_symlink()
+            or not destination.parent.resolve().is_relative_to(self.root.resolve())
+        ):
+            raise ValueError("source content destination escapes the evidence store")
+        return destination
+
+    def list_evidence(self) -> tuple[EvidenceSpan, ...]:
+        return self.evidence_records.list()
+
+    def list_sources(self) -> tuple[SourceDocument, ...]:
+        return self.source_records.list()
 
     def verify_source_integrity(self, source: SourceDocument) -> SourceDocument:
         require_safe_path_component(source.source_id, field="source_id")
         require_safe_path_component(source.version, field="source version")
-        stored_source = self.source_records.get(f"{source.source_id}--{source.version}")
+        stored_source = self.get_source(source.source_id, source.version)
         if stored_source != source:
             raise ValueError("SourceDocument differs from its repository record")
         if not source.read_only:
@@ -204,10 +286,47 @@ class SourceEvidenceStore:
             raise ValueError("stored source content hash does not match SourceDocument")
         return source
 
+    def source_content_path(self, source: SourceDocument) -> Path:
+        self.verify_source_integrity(source)
+        return self.root.joinpath(*PurePosixPath(source.stored_path).parts)
+
+    def read_source_bytes(self, source: SourceDocument) -> bytes:
+        return self.source_content_path(source).read_bytes()
+
+    def import_source_record(
+        self, source: SourceDocument, content: bytes
+    ) -> SourceDocument:
+        require_safe_path_component(source.source_id, field="source_id")
+        require_safe_path_component(source.version, field="source version")
+        if hashlib.sha256(content).hexdigest() != source.content_sha256:
+            raise ValueError("imported source bytes do not match SourceDocument")
+        expected_path = (
+            PurePosixPath("sources")
+            / source.source_id
+            / source.version
+            / "content"
+        )
+        if PurePosixPath(source.stored_path) != expected_path:
+            raise ValueError("imported SourceDocument path is not canonical")
+        destination = self._content_destination(source.source_id, source.version)
+        if destination.exists() and destination.read_bytes() != content:
+            raise FileExistsError(
+                f"source version already exists with different content: {destination}"
+            )
+        if not destination.exists():
+            destination.write_bytes(content)
+            os.chmod(destination, 0o444)
+        record_key = f"{source.source_id}--{source.version}"
+        record_path = self.source_records.root / f"{record_key}.json"
+        if record_path.is_symlink():
+            raise ValueError("SourceDocument repository record cannot be a symlink")
+        self.source_records.put(record_key, source)
+        return self.verify_source_integrity(source)
+
     def _verify_evidence_against_source(self, evidence: EvidenceSpan) -> SourceDocument:
         require_safe_path_component(evidence.source_id, field="evidence source_id")
         require_safe_path_component(evidence.source_version, field="evidence source_version")
-        source = self.source_records.get(f"{evidence.source_id}--{evidence.source_version}")
+        source = self.get_source(evidence.source_id, evidence.source_version)
         if (source.source_id, source.version) != (
             evidence.source_id,
             evidence.source_version,
@@ -229,7 +348,7 @@ class SourceEvidenceStore:
         return source
 
     def verify_evidence_integrity(self, evidence: EvidenceSpan) -> SourceDocument:
-        stored_evidence = self.evidence_records.get(evidence.evidence_id)
+        stored_evidence = self.get_evidence(evidence.evidence_id)
         if stored_evidence != evidence:
             raise ValueError("EvidenceSpan differs from its repository record")
         return self._verify_evidence_against_source(stored_evidence)
@@ -244,13 +363,34 @@ class SourceEvidenceStore:
         source_role: str = "unspecified",
         source_type: str = "unspecified",
     ) -> SourceDocument:
+        return self.ingest_source(
+            source_path,
+            source_id,
+            version,
+            title,
+            source_role=source_role,
+            source_type=source_type,
+        )
+
+    def ingest_source(
+        self,
+        source_path: Path,
+        source_id: str,
+        version: str,
+        title: str | None = None,
+        *,
+        source_role: str = "unspecified",
+        source_type: str = "unspecified",
+    ) -> SourceDocument:
         require_safe_path_component(source_id, field="source_id")
         require_safe_path_component(version, field="version")
         content = source_path.read_bytes()
         sha256 = hashlib.sha256(content).hexdigest()
         record_key = f"{source_id}--{version}"
-        destination = self.state_root / "sources" / source_id / version / "content"
+        destination = self._content_destination(source_id, version)
         record_path = self.state_root / "sources" / f"{record_key}.json"
+        if record_path.is_symlink():
+            raise ValueError("SourceDocument repository record cannot be a symlink")
         if record_path.exists():
             existing = self.source_records.get(record_key)
             if (
@@ -260,11 +400,10 @@ class SourceEvidenceStore:
                 and existing.source_role == source_role
                 and existing.source_type == source_type
             ):
-                return existing
+                return self.verify_source_integrity(existing)
             raise FileExistsError(f"source version already exists with different metadata: {record_path}")
         if destination.exists() and destination.read_bytes() != content:
             raise FileExistsError(f"source version already exists with different content: {destination}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.exists():
             shutil.copyfile(source_path, destination)
             os.chmod(destination, 0o444)
@@ -278,11 +417,149 @@ class SourceEvidenceStore:
             source_type=source_type,
         )
         self.source_records.put(record_key, record)
-        return record
+        return self.verify_source_integrity(record)
 
     def add_evidence(self, evidence: EvidenceSpan) -> Path:
         self._verify_evidence_against_source(evidence)
+        record_path = self.evidence_records.root / f"{evidence.evidence_id}.json"
+        if record_path.is_symlink():
+            raise ValueError("EvidenceSpan repository record cannot be a symlink")
         return self.evidence_records.put(evidence.evidence_id, evidence)
+
+
+class ProjectEvidenceStore(FilesystemEvidenceStore):
+    def __init__(self, state_root: Path) -> None:
+        initialize_state(state_root)
+        super().__init__(state_root)
+        self.project_state_root = state_root
+
+
+class SourceEvidenceStore(ProjectEvidenceStore):
+    """Backward-compatible name for the project-local evidence store."""
+
+
+class KnowledgeEvidenceStore(FilesystemEvidenceStore):
+    def __init__(self, knowledge_root: Path) -> None:
+        self.knowledge_root = knowledge_root
+        super().__init__(knowledge_root / "evidence_store")
+
+
+class CompositeEvidenceStore:
+    """Conflict-detecting read view over shared and project evidence stores."""
+
+    def __init__(self, *stores: EvidenceStore) -> None:
+        if not stores:
+            raise ValueError("CompositeEvidenceStore requires at least one store")
+        self.stores = stores
+        project_roots = {
+            store.project_state_root
+            for store in stores
+            if store.project_state_root is not None
+        }
+        if len(project_roots) > 1:
+            raise ValueError("composite cannot contain multiple project evidence roots")
+        self.project_state_root = next(iter(project_roots), None)
+
+    @staticmethod
+    def _require_unambiguous(records: list[BaseModel], identity: str) -> BaseModel:
+        if not records:
+            raise FileNotFoundError(identity)
+        first = records[0]
+        if any(record != first for record in records[1:]):
+            raise ValueError(f"conflicting evidence-store identity: {identity}")
+        return first
+
+    @staticmethod
+    def _require_unambiguous_sources(
+        records: list[SourceDocument], identity: str
+    ) -> SourceDocument:
+        if not records:
+            raise FileNotFoundError(identity)
+        first = min(records, key=lambda item: item.ingested_at)
+        if any(not source_documents_equivalent(record, first) for record in records):
+            raise ValueError(f"conflicting evidence-store identity: {identity}")
+        return first
+
+    def get_evidence(self, evidence_id: str) -> EvidenceSpan:
+        matches: list[EvidenceSpan] = []
+        for store in self.stores:
+            try:
+                evidence = store.get_evidence(evidence_id)
+            except FileNotFoundError:
+                continue
+            try:
+                store.verify_evidence_integrity(evidence)
+            except (FileNotFoundError, OSError, ValueError) as error:
+                raise ValueError(
+                    f"EvidenceSpan integrity failed for {evidence_id}: {error}"
+                ) from error
+            matches.append(evidence)
+        return cast(EvidenceSpan, self._require_unambiguous(matches, evidence_id))
+
+    def get(self, key: str) -> EvidenceSpan:
+        return self.get_evidence(key)
+
+    def get_source(self, source_id: str, source_version: str) -> SourceDocument:
+        identity = f"{source_id}--{source_version}"
+        matches: list[SourceDocument] = []
+        for store in self.stores:
+            try:
+                source = store.get_source(source_id, source_version)
+            except FileNotFoundError:
+                continue
+            store.verify_source_integrity(source)
+            matches.append(source)
+        return self._require_unambiguous_sources(matches, identity)
+
+    def list_evidence(self) -> tuple[EvidenceSpan, ...]:
+        grouped: dict[str, list[EvidenceSpan]] = {}
+        for store in self.stores:
+            for evidence in store.list_evidence():
+                grouped.setdefault(evidence.evidence_id, []).append(evidence)
+        return tuple(
+            cast(
+                EvidenceSpan,
+                self._require_unambiguous(grouped[evidence_id], evidence_id),
+            )
+            for evidence_id in sorted(grouped)
+        )
+
+    def list_sources(self) -> tuple[SourceDocument, ...]:
+        grouped: dict[tuple[str, str], list[SourceDocument]] = {}
+        for store in self.stores:
+            for source in store.list_sources():
+                grouped.setdefault((source.source_id, source.version), []).append(
+                    source
+                )
+        return tuple(
+            self._require_unambiguous_sources(grouped[key], "--".join(key))
+            for key in sorted(grouped)
+        )
+
+    def verify_source_integrity(self, source: SourceDocument) -> SourceDocument:
+        stored = self.get_source(source.source_id, source.version)
+        if not source_documents_equivalent(stored, source):
+            raise ValueError("SourceDocument differs from composite repository record")
+        return stored
+
+    def verify_evidence_integrity(self, evidence: EvidenceSpan) -> SourceDocument:
+        stored = self.get_evidence(evidence.evidence_id)
+        if stored != evidence:
+            raise ValueError("EvidenceSpan differs from composite repository record")
+        return self.get_source(evidence.source_id, evidence.source_version)
+
+    @staticmethod
+    def _writes_forbidden() -> None:
+        raise TypeError("writes through CompositeEvidenceStore require an explicit target store")
+
+    def ingest_source(self, *args, **kwargs) -> SourceDocument:
+        self._writes_forbidden()
+
+    def ingest(self, *args, **kwargs) -> SourceDocument:
+        self._writes_forbidden()
+
+    def add_evidence(self, evidence: EvidenceSpan) -> Path:
+        self._writes_forbidden()
 
 
 class ExpertCaseRepository(ModelRepository[ExpertCase]):
@@ -1270,6 +1547,7 @@ class CollectionDiffRepository(IdentityBoundRepository[CollectionDiff]):
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
         self.root = root
+        self.evidence_store = KnowledgeEvidenceStore(root)
         self.expert_cases = ExpertCaseRepository(root)
         self.workflow_patterns = LiteratureWorkflowRepository(root)
         self.capabilities = ScientificCapabilityRepository(root)
@@ -1420,12 +1698,23 @@ class KnowledgeRepositories:
 
     def create_snapshot(
         self,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         domain_profile: DomainProfile,
     ) -> KnowledgeSnapshot:
         from .knowledge.trust import TrustedKnowledgeValidator
 
-        trusted = TrustedKnowledgeValidator(self, evidence_store).validate()
+        if isinstance(evidence_store, CompositeEvidenceStore):
+            snapshot_evidence = evidence_store
+        elif (
+            isinstance(evidence_store, KnowledgeEvidenceStore)
+            and evidence_store.root.resolve() == self.evidence_store.root.resolve()
+        ):
+            snapshot_evidence = evidence_store
+        else:
+            snapshot_evidence = CompositeEvidenceStore(
+                self.evidence_store, evidence_store
+            )
+        trusted = TrustedKnowledgeValidator(self, snapshot_evidence).validate()
         literature_source_keys = {
             (item.source_id, item.source_version)
             for item in self.literature_ingestions.list()
@@ -1459,13 +1748,13 @@ class KnowledgeRepositories:
             },
             "evidence_span_hashes": {
                 item.evidence_id: content_hash(item)
-                for item in evidence_store.evidence_records.list()
+                for item in snapshot_evidence.list_evidence()
                 if (item.source_id, item.source_version) not in literature_source_keys
                 or item.evidence_id in trusted_evidence_ids
             },
             "evidence_source_versions": {
                 f"{item.source_id}@{item.version}": item.content_sha256
-                for item in evidence_store.source_records.list()
+                for item in snapshot_evidence.list_sources()
                 if (item.source_id, item.version) not in literature_source_keys
                 or (item.source_id, item.version) in trusted_source_keys
             },

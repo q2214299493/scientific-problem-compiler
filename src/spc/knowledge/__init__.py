@@ -40,6 +40,10 @@ from .ingestion import (
     validate_literature_ingestion_chain,
 )
 from .mermaid import knowledge_graph_to_mermaid
+from .evidence_migration import (
+    KnowledgeEvidenceMigrationResult,
+    migrate_knowledge_evidence,
+)
 from .trust import TrustedKnowledgeError, TrustedKnowledgeValidator
 
 __all__ = [
@@ -55,6 +59,7 @@ __all__ = [
     "GenericHTMLCollectionConnector",
     "KnowledgeGraphBuilder",
     "KnowledgeGraphError",
+    "KnowledgeEvidenceMigrationResult",
     "TrustedKnowledgeError",
     "TrustedKnowledgeValidator",
     "LiteratureIngestionService",
@@ -73,6 +78,7 @@ __all__ = [
     "validate_literature_ingestion_chain",
     "detect_acquisition_input",
     "knowledge_graph_to_mermaid",
+    "migrate_knowledge_evidence",
     "normalize_doi",
     "validate_literature_representation",
     "canonicalize_url",

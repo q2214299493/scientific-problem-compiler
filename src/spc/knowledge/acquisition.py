@@ -47,7 +47,7 @@ from ..models import (
     SourceDocument,
     literature_identity_id,
 )
-from ..repositories import KnowledgeRepositories, SourceEvidenceStore
+from ..repositories import EvidenceStore, KnowledgeRepositories
 from ..serialization import content_hash
 from .ingestion import (
     LiteratureIngestionService,
@@ -997,7 +997,7 @@ class _CandidateResult:
 def validate_literature_representation(
     representation: LiteratureRepresentationReference,
     repositories: KnowledgeRepositories,
-    evidence_store: SourceEvidenceStore,
+    evidence_store: EvidenceStore,
 ) -> LiteratureRepresentationReference:
     stored = repositories.literature_representation_refs.get(
         representation.representation_id
@@ -1033,8 +1033,8 @@ def validate_literature_representation(
     canonical = repositories.canonical_html_text_artifacts.get(
         representation.canonical_text_id or ""
     )
-    source = evidence_store.source_records.get(
-        f"{representation.source_id}--{representation.source_version}"
+    source = evidence_store.get_source(
+        representation.source_id, representation.source_version
     )
     evidence_store.verify_source_integrity(source)
     if (
@@ -1071,7 +1071,7 @@ class LiteratureAcquisitionService:
         original_input: str,
         domain: str,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         explicit_metadata: Mapping[str, object] | None = None,
     ) -> LiteratureAcquisitionOutcome:
         input_kind = detect_acquisition_input(original_input)
@@ -1332,7 +1332,7 @@ class LiteratureAcquisitionService:
         resource: ResolvedLiteratureResource,
         request: LiteratureAcquisitionRequest,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         explicit_metadata: Mapping[str, object] | None,
     ) -> _CandidateResult:
         if candidate.media_type == "application/pdf":
@@ -1373,7 +1373,7 @@ class LiteratureAcquisitionService:
         resource: ResolvedLiteratureResource,
         request: LiteratureAcquisitionRequest,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         explicit_metadata: Mapping[str, object] | None,
     ) -> _CandidateResult:
         http_status: int | None = None
@@ -1500,7 +1500,7 @@ class LiteratureAcquisitionService:
         metadata: LiteratureMetadata,
         manifest: MetadataMergeManifest,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         http_status: int | None,
     ) -> _CandidateResult:
         if hashlib.sha256(pdf_path.read_bytes()).hexdigest() != hashlib.sha256(
@@ -1570,7 +1570,7 @@ class LiteratureAcquisitionService:
         resource: ResolvedLiteratureResource,
         request: LiteratureAcquisitionRequest,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         explicit_metadata: Mapping[str, object] | None,
     ) -> _CandidateResult:
         _, base_manifest = _merge_metadata(
@@ -1639,7 +1639,7 @@ class LiteratureAcquisitionService:
         canonical_path = repositories.root.joinpath(
             *Path(canonical.stored_path).parts
         )
-        source = evidence_store.ingest(
+        source = evidence_store.ingest_source(
             canonical_path,
             f"source-{literature_id}",
             f"html-{canonical.canonical_text_id.removeprefix('canonical-html-text-')}",

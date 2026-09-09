@@ -74,6 +74,14 @@ from .models import (
     ScientificTaskExecutionContext,
     SPCExportPackage,
 )
+from .repositories import (
+    CompositeEvidenceStore,
+    EvidenceStore,
+    FilesystemEvidenceStore,
+    KnowledgeEvidenceStore,
+    ProjectEvidenceStore,
+    SourceEvidenceStore,
+)
 
 __all__ = [
     "AcquisitionAttemptRecord",
@@ -148,5 +156,11 @@ __all__ = [
     "ScientificQuestionPlan",
     "ScientificTaskExecutionContext",
     "SPCExportPackage",
+    "CompositeEvidenceStore",
+    "EvidenceStore",
+    "FilesystemEvidenceStore",
+    "KnowledgeEvidenceStore",
+    "ProjectEvidenceStore",
+    "SourceEvidenceStore",
 ]
 __version__ = "0.1.0"

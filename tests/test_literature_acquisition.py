@@ -36,7 +36,11 @@ from spc.models import (
     KnowledgeCurationRecord,
     MetadataValueOrigin,
 )
-from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
+from spc.repositories import (
+    KnowledgeEvidenceStore,
+    KnowledgeRepositories,
+    SourceEvidenceStore,
+)
 from spc.serialization import content_hash
 
 
@@ -461,6 +465,8 @@ def test_add_literature_cli_reports_local_pdf_without_selecting_it(tmp_path: Pat
     assert output["acquisition_status"] == "ingested"
     assert output["literature_id"]
     assert KnowledgeRepositories(tmp_path / "knowledge").literature_representation_selections.list() == ()
+    assert KnowledgeEvidenceStore(tmp_path / "knowledge").list_sources()
+    assert not (tmp_path / ".spc" / "sources").exists()
 
 
 def test_local_input_kind_requires_existing_file(tmp_path: Path) -> None:

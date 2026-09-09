@@ -46,7 +46,7 @@ from ..models import (
 from ..serialization import content_hash
 
 if TYPE_CHECKING:
-    from ..repositories import KnowledgeRepositories, SourceEvidenceStore
+    from ..repositories import EvidenceStore, KnowledgeRepositories
 
 
 REPOSITORY_NODE_SPECS = (
@@ -141,7 +141,7 @@ class TrustedKnowledgeValidator:
     def __init__(
         self,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore | None,
+        evidence_store: EvidenceStore | None,
     ) -> None:
         self.repositories = repositories
         self.evidence_store = evidence_store
@@ -236,7 +236,7 @@ class TrustedKnowledgeValidator:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
                 "EVIDENCE_STORE_REQUIRED",
-                "trusted knowledge validation requires a SourceEvidenceStore",
+                "trusted knowledge validation requires an EvidenceStore",
             )
         self._reachable = {}
         current = self.resolve_current_curations()
@@ -797,7 +797,7 @@ class TrustedKnowledgeValidator:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
                 "EVIDENCE_STORE_REQUIRED",
-                "trusted knowledge validation requires a SourceEvidenceStore",
+                "trusted knowledge validation requires an EvidenceStore",
             )
         issues, source = source_quote_record_issues(
             quote,
@@ -877,10 +877,10 @@ class TrustedKnowledgeValidator:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
                 "EVIDENCE_STORE_REQUIRED",
-                "trusted knowledge validation requires a SourceEvidenceStore",
+                "trusted knowledge validation requires an EvidenceStore",
             )
         try:
-            evidence = self.evidence_store.get(evidence_id)
+            evidence = self.evidence_store.get_evidence(evidence_id)
             source = self.evidence_store.verify_evidence_integrity(evidence)
         except Exception as error:
             raise TrustedKnowledgeError(
@@ -918,7 +918,7 @@ class TrustedKnowledgeValidator:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
                 "EVIDENCE_STORE_REQUIRED",
-                "historical evidence authorization requires a SourceEvidenceStore",
+                "historical evidence authorization requires an EvidenceStore",
             )
         from .acquisition import validate_literature_representation
         from .ingestion import LiteratureRepresentationSelector
@@ -950,7 +950,7 @@ class TrustedKnowledgeValidator:
             ):
                 raise ValueError("historical authorization binding mismatch")
             for evidence_id in authorization.evidence_refs:
-                evidence = self.evidence_store.get(evidence_id)
+                evidence = self.evidence_store.get_evidence(evidence_id)
                 evidence_source = self.evidence_store.verify_evidence_integrity(evidence)
                 if (evidence_source.source_id, evidence_source.version) != (
                     authorization.source_id,
@@ -1018,12 +1018,10 @@ class TrustedKnowledgeValidator:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
                 "EVIDENCE_STORE_REQUIRED",
-                "trusted knowledge validation requires a SourceEvidenceStore",
+                "trusted knowledge validation requires an EvidenceStore",
             )
         try:
-            source = self.evidence_store.source_records.get(
-                f"{source_id}--{source_version}"
-            )
+            source = self.evidence_store.get_source(source_id, source_version)
             if (source.source_id, source.version) != (source_id, source_version):
                 raise ValueError("source identity mismatch")
             self.evidence_store.verify_source_integrity(source)

@@ -36,7 +36,7 @@ from ..models import (
     CollectionTraversalStatus,
     DiscoveredCollectionResource,
 )
-from ..repositories import KnowledgeRepositories, SourceEvidenceStore
+from ..repositories import EvidenceStore, KnowledgeRepositories
 from ..serialization import content_hash
 from .acquisition import (
     SUPPORTED_HTML_TYPES,
@@ -1101,7 +1101,7 @@ class CollectionImportService:
         self,
         definition: CollectionDefinition,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
         *,
         previous_snapshot: CollectionSnapshot | None = None,
     ) -> CollectionImportOutcome:

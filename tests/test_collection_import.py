@@ -31,7 +31,11 @@ from spc.models import (
     LiteratureAcquisitionOutcome,
     LiteratureAcquisitionRecord,
 )
-from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
+from spc.repositories import (
+    KnowledgeEvidenceStore,
+    KnowledgeRepositories,
+    SourceEvidenceStore,
+)
 from spc.serialization import content_hash
 
 
@@ -552,8 +556,9 @@ def test_cli_custom_collection_scope_is_applied(monkeypatch: pytest.MonkeyPatch)
             assert indent == 2
             return "{}"
 
-    def fake_run(_self, definition, _repositories, _evidence_store):
+    def fake_run(_self, definition, _repositories, evidence_store):
         captured["definition"] = definition
+        captured["evidence_store"] = evidence_store
         return FakeOutcome()
 
     monkeypatch.setattr(CollectionImportService, "run", fake_run)
@@ -582,6 +587,7 @@ def test_cli_custom_collection_scope_is_applied(monkeypatch: pytest.MonkeyPatch)
     )
     assert definition.scope_policy.allow_external_literature_links is True
     assert definition.scope_policy.max_depth == 3
+    assert isinstance(captured["evidence_store"], KnowledgeEvidenceStore)
 
 
 def test_post_resolution_deduplicates_three_resources_to_one_literature(

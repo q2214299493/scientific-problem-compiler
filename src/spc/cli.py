@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
@@ -150,9 +151,17 @@ from .knowledge.collection import (
     make_collection_definition,
     make_collection_scope_policy,
 )
+from .knowledge.evidence_migration import migrate_knowledge_evidence
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
-from .repositories import KnowledgeRepositories, SourceEvidenceStore, initialize_state
+from .repositories import (
+    CompositeEvidenceStore,
+    KnowledgeEvidenceStore,
+    KnowledgeRepositories,
+    ProjectEvidenceStore,
+    SourceEvidenceStore,
+    initialize_state,
+)
 from .serialization import (
     dump_yaml,
     export_json_schemas,
@@ -175,6 +184,13 @@ app = typer.Typer(
 
 def _emit_report(report: object) -> None:
     typer.echo(json.dumps(report.model_dump(mode="json"), indent=2, ensure_ascii=False))
+
+
+def _evidence_view(knowledge_dir: Path, state_dir: Path) -> CompositeEvidenceStore:
+    return CompositeEvidenceStore(
+        KnowledgeEvidenceStore(knowledge_dir),
+        ProjectEvidenceStore(state_dir),
+    )
 
 
 @app.command()
@@ -214,7 +230,7 @@ def ingest_literature(
         paper,
         metadata_payload,
         KnowledgeRepositories(knowledge_dir),
-        SourceEvidenceStore(state_dir),
+        KnowledgeEvidenceStore(knowledge_dir),
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -240,7 +256,7 @@ def add_literature(
         source,
         domain,
         KnowledgeRepositories(knowledge_dir),
-        SourceEvidenceStore(state_dir),
+        KnowledgeEvidenceStore(knowledge_dir),
         explicit_metadata=metadata_payload,
     )
     typer.echo(outcome.model_dump_json(indent=2))
@@ -293,7 +309,7 @@ def import_literature_collection(
     outcome = CollectionImportService().run(
         definition,
         KnowledgeRepositories(knowledge_dir),
-        SourceEvidenceStore(state_dir),
+        KnowledgeEvidenceStore(knowledge_dir),
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -329,9 +345,25 @@ def select_literature_representation(
         selected_by,
         rationale,
         KnowledgeRepositories(knowledge_dir),
-        SourceEvidenceStore(state_dir),
+        _evidence_view(knowledge_dir, state_dir),
     )
     typer.echo(outcome.model_dump_json(indent=2))
+
+
+@app.command("migrate-knowledge-evidence")
+def migrate_knowledge_evidence_command(
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Copy legacy literature evidence into the shared knowledge evidence store."""
+    result = migrate_knowledge_evidence(
+        KnowledgeRepositories(knowledge_dir),
+        ProjectEvidenceStore(state_dir),
+        KnowledgeEvidenceStore(knowledge_dir),
+    )
+    typer.echo(json.dumps(asdict(result), indent=2, ensure_ascii=False))
 
 
 @app.command()
@@ -359,6 +391,9 @@ def interpret(
     output: Annotated[Path, typer.Option("--output")],
     provider: Annotated[str, typer.Option("--provider")] = "mock",
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
 ) -> None:
     """Build a validated ScientificEvidencePacket with an offline provider."""
     if provider != "mock":
@@ -367,7 +402,7 @@ def interpret(
     try:
         packet = ScientificEvidencePacketBuilder(MockInterpretationProvider()).build(
             context,
-            SourceEvidenceStore(state_dir),
+            _evidence_view(knowledge_dir, state_dir),
         )
     except EvidencePacketIntegrityError as error:
         _emit_report(error.report)
@@ -398,7 +433,7 @@ def plan(
     evidence_packet = load_model(evidence_packet_file, ScientificEvidencePacket)
     if context.domain != domain:
         raise typer.BadParameter("--domain must match the ScientificContextPacket domain")
-    evidence_repository = SourceEvidenceStore(state_dir)
+    evidence_repository = _evidence_view(knowledge_dir, state_dir)
     try:
         planning_input = PlanningContextResolver().resolve(
             context,
@@ -527,6 +562,9 @@ def validate(
     kind: Annotated[str, typer.Option("--kind", help="plan or export")] = "plan",
     domain: Annotated[str | None, typer.Option("--domain")] = None,
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
     record_output: Annotated[Path | None, typer.Option("--record-output")] = None,
     validation_id: Annotated[str, typer.Option("--validation-id")] = "validation-1",
 ) -> None:
@@ -541,7 +579,7 @@ def validate(
         report = validate_question_plan(
             plan,
             pack.capabilities,
-            SourceEvidenceStore(state_dir),
+            _evidence_view(knowledge_dir, state_dir),
         )
         if record_output is not None:
             dump_yaml(
@@ -602,7 +640,7 @@ def review(
     planning_input = load_model(planning_input_file, ScientificPlanningInput)
     candidate_plan = load_model(candidate_plan_file, ScientificQuestionPlan)
     validation_record = load_model(validation_record_file, PlanValidationRecord)
-    evidence_repository = SourceEvidenceStore(state_dir)
+    evidence_repository = _evidence_view(knowledge_dir, state_dir)
     try:
         review_input = ApprovalContextResolver().resolve(
             context,
@@ -794,6 +832,9 @@ def export(
     target: Annotated[str, typer.Option("--target")] = "ft-agent",
     exports_dir: Annotated[Path, typer.Option("--exports-dir")] = Path("exports"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path(
+        "knowledge"
+    ),
     human_selected: Annotated[bool, typer.Option("--human-selected")] = False,
 ) -> None:
     """Create a planning-only immutable handoff package after both gates pass."""
@@ -827,7 +868,7 @@ def export(
     try:
         path = GenericExportService(
             exports_dir,
-            SourceEvidenceStore(state_dir),
+            _evidence_view(knowledge_dir, state_dir),
         ).export(
             plan=plan,
             verdict=verdict,

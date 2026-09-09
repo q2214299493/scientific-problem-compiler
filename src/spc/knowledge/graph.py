@@ -12,7 +12,7 @@ from ..models import (
     KnowledgeGraphNode,
     KnowledgeViewMode,
 )
-from ..repositories import KnowledgeRepositories, SourceEvidenceStore
+from ..repositories import EvidenceStore, KnowledgeRepositories
 from ..serialization import canonical_json_bytes, content_hash
 from .trust import (
     REPOSITORY_NODE_SPECS,
@@ -29,7 +29,7 @@ class KnowledgeGraphBuilder:
     def build(
         self,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore | None = None,
+        evidence_store: EvidenceStore | None = None,
         *,
         view_mode: KnowledgeViewMode | str = KnowledgeViewMode.TRUSTED,
         domain: str | None = None,

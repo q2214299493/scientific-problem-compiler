@@ -311,3 +311,31 @@ article, and PDF links remain immutable audit occurrences with an explicit
 unverified decision; citation metadata and locally verified publication cards
 remain eligible. If the same resource later appears in an eligible context,
 the logical resource is promoted while every original occurrence is retained.
+
+## Knowledge Layer K1E0
+
+K1E0 separates persistent knowledge evidence from project-local evidence.
+`KnowledgeEvidenceStore(knowledge_dir)` stores literature and future expert
+source material under `knowledge/evidence_store/sources` and
+`knowledge/evidence_store/evidence`. `ProjectEvidenceStore(state_dir)` retains
+reviewer comments, manuscripts, author responses, and other project evidence
+under `.spc`. `SourceEvidenceStore` remains the backward-compatible project
+store name.
+
+`CompositeEvidenceStore(knowledge_store, project_store)` provides the read-only
+view used by retrieval and Phase 2 validation. It detects source or EvidenceSpan
+identity collisions and fails closed; writes require choosing one concrete
+store explicitly. Literature ingestion, acquisition, collection import, and
+representation selection now use the shared knowledge store by default.
+
+Legacy literature evidence can be copied without deleting project records:
+
+```powershell
+spc migrate-knowledge-evidence `
+  --knowledge-dir knowledge `
+  --state-dir .spc
+```
+
+Migration follows existing literature ingestion/representation references,
+verifies source bytes and EvidenceSpans before and after copying, rejects
+conflicts, and is idempotent.

@@ -30,7 +30,7 @@ from ..models import (
     StrictModel,
     literature_identity_id,
 )
-from ..repositories import KnowledgeRepositories, SourceEvidenceStore
+from ..repositories import EvidenceStore, KnowledgeRepositories
 from ..serialization import content_hash
 
 
@@ -217,7 +217,7 @@ class LiteratureIngestionService:
         pdf_path: Path,
         metadata: LiteratureMetadata | Mapping[str, Any],
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
     ) -> LiteratureIngestionOutcome:
         metadata_record = (
             metadata
@@ -289,7 +289,7 @@ class LiteratureIngestionService:
         )
         source_id = f"source-{literature_id}"
         source_version = f"canonical-{canonical.canonical_text_id.removeprefix('canonical-text-')}"
-        source = evidence_store.ingest(
+        source = evidence_store.ingest_source(
             canonical_path,
             source_id,
             source_version,
@@ -409,7 +409,7 @@ class LiteratureIngestionService:
 def validate_literature_ingestion_chain(
     ingestion: LiteratureIngestionRecord,
     repositories: KnowledgeRepositories,
-    evidence_store: SourceEvidenceStore,
+    evidence_store: EvidenceStore,
 ) -> ValidatedLiteratureIngestionChain:
     if ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED:
         raise ValueError("representation selection requires accepted ingestion")
@@ -429,8 +429,8 @@ def validate_literature_ingestion_chain(
         or ingestion.parser_config_hash != canonical.parser_config_hash
     ):
         raise ValueError("raw/canonical/ingestion binding is invalid")
-    source = evidence_store.source_records.get(
-        f"{ingestion.source_id}--{ingestion.source_version}"
+    source = evidence_store.get_source(
+        ingestion.source_id or "", ingestion.source_version or ""
     )
     evidence_store.verify_source_integrity(source)
     if (
@@ -454,7 +454,7 @@ class LiteratureRepresentationSelector:
     def _pdf_representation(
         ingestion: LiteratureIngestionRecord,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
     ) -> LiteratureRepresentationReference:
         chain = validate_literature_ingestion_chain(
             ingestion, repositories, evidence_store
@@ -488,7 +488,7 @@ class LiteratureRepresentationSelector:
         cls,
         representation_or_ingestion_id: str,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
     ) -> LiteratureRepresentationReference:
         try:
             representation = repositories.literature_representation_refs.get(
@@ -512,7 +512,7 @@ class LiteratureRepresentationSelector:
         cls,
         selection: LiteratureRepresentationSelection,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
     ) -> LiteratureRepresentationReference:
         if selection.representation_id is not None:
             representation = cls.resolve_reference(
@@ -548,7 +548,7 @@ class LiteratureRepresentationSelector:
         selected_by: str,
         rationale: str,
         repositories: KnowledgeRepositories,
-        evidence_store: SourceEvidenceStore,
+        evidence_store: EvidenceStore,
     ) -> LiteratureRepresentationSelectionOutcome:
         representation = self.resolve_reference(
             representation_id, repositories, evidence_store
@@ -612,7 +612,7 @@ def create_evidence_span_from_canonical_text(
     start_offset: int,
     end_offset: int,
     repositories: KnowledgeRepositories,
-    evidence_store: SourceEvidenceStore,
+    evidence_store: EvidenceStore,
     *,
     locator: str | None = None,
     historical_ingestion: bool = False,
@@ -655,8 +655,8 @@ def create_evidence_span_from_canonical_text(
     validate_literature_representation(
         representation, repositories, evidence_store
     )
-    source = evidence_store.source_records.get(
-        f"{representation.source_id}--{representation.source_version}"
+    source = evidence_store.get_source(
+        representation.source_id, representation.source_version
     )
     evidence_store.verify_source_integrity(source)
     recovered = text[start_offset:end_offset]
