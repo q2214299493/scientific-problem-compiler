@@ -24,7 +24,9 @@ from spc.models import (
     AcquisitionStatus,
     CollectionCompletenessStatus,
     CollectionDiscoveryConfidence,
+    CollectionDiscoveryContext,
     CollectionImportStatus,
+    CollectionMembershipDecision,
     CollectionResourceKind,
     LiteratureAcquisitionOutcome,
     LiteratureAcquisitionRecord,
@@ -378,7 +380,10 @@ def test_import_isolates_failed_pdf_and_preserves_counts_and_trust_boundary(
     entry = "https://collection.example/project"
     good = "https://collection.example/project/good.pdf"
     bad = "https://collection.example/project/bad.pdf"
-    page = f"<a href='{good}'>good</a><a href='{bad}'>bad</a>".encode()
+    page = (
+        f"<div class='publication-item'><a href='{good}'>good</a>"
+        f"<a href='{bad}'>bad</a></div>"
+    ).encode()
     responses: dict[str, HTTPResponse | list[HTTPResponse]] = {
         entry: response(entry, page),
         good: [
@@ -587,9 +592,10 @@ def test_post_resolution_deduplicates_three_resources_to_one_literature(
     pdf = "https://collection.example/project/paper-one.pdf"
     doi = "10.1234/paper-one"
     page = (
+        "<div class='publication-item'>"
         f"<a href='https://doi.org/{doi}'>DOI</a>"
         f"<a href='{article}'>Article</a>"
-        f"<a href='{pdf}'>PDF</a>"
+        f"<a href='{pdf}'>PDF</a></div>"
     ).encode()
     fake = FakeAcquisitionService(
         {doi: "literature-shared", article: "literature-shared", pdf: "literature-shared"}
@@ -616,7 +622,10 @@ def test_expected_acquisition_failure_does_not_abort_later_resource(
     entry = "https://collection.example/project"
     first = "https://collection.example/project/a.pdf"
     second = "https://collection.example/project/b.pdf"
-    page = f"<a href='{first}'>A</a><a href='{second}'>B</a>".encode()
+    page = (
+        f"<div class='publication-item'><a href='{first}'>A</a>"
+        f"<a href='{second}'>B</a></div>"
+    ).encode()
     fake = FakeAcquisitionService(
         {first: AcquisitionError("expected failure"), second: "literature-b"}
     )
@@ -639,7 +648,14 @@ def test_unexpected_programming_error_is_not_swallowed(tmp_path: Path) -> None:
     fake = FakeAcquisitionService({pdf: RuntimeError("programming defect")})
     repos, store = repositories(tmp_path)
     service = CollectionImportService(
-        fetcher=fetcher({entry: response(entry, f"<a href='{pdf}'>PDF</a>".encode())}),
+        fetcher=fetcher(
+            {
+                entry: response(
+                    entry,
+                    f"<div class='publication-item'><a href='{pdf}'>PDF</a></div>".encode(),
+                )
+            }
+        ),
         acquisition_service=fake,
     )
 
@@ -686,7 +702,7 @@ def test_same_resource_id_with_changed_hash_is_reported_changed(
             {
                 entry: response(
                     entry,
-                    b"<meta name='citation_doi' content='10.1234/shared'>",
+                    b"<div class='publication-item'><a href='https://doi.org/10.1234/shared'>First</a></div>",
                 )
             }
         ),
@@ -712,7 +728,7 @@ def test_same_resource_with_changed_discovery_provenance_is_reported_changed(
             {
                 entry: response(
                     entry,
-                    b"<meta name='citation_doi' content='10.1234/shared'>",
+                    b"<div class='publication-item'><a href='https://doi.org/10.1234/shared'>First</a></div>",
                 )
             }
         ),
@@ -724,7 +740,7 @@ def test_same_resource_with_changed_discovery_provenance_is_reported_changed(
             {
                 entry: response(
                     entry,
-                    b"<a href='https://doi.org/10.1234/shared'>DOI</a>",
+                    b"<section id='publications'><a href='https://doi.org/10.1234/shared'>Second</a></section>",
                 )
             }
         ),
@@ -799,3 +815,146 @@ def test_citation_metadata_doi_is_high_confidence_membership_candidate(
 
     assert result.resources[0].highest_discovery_confidence == CollectionDiscoveryConfidence.HIGH
     assert result.resources[0].membership_eligible is True
+    assert result.resources[0].membership_decision == CollectionMembershipDecision.ELIGIBLE
+
+
+def test_publication_section_does_not_promote_reference_section_doi(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    html = b"""
+    <section class='publications'>
+      <article class='publication-item'>10.1234/member</article>
+      <section class='references'>10.1234/reference</section>
+    </section>
+    """
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+    resources = {item.doi: item for item in result.resources}
+    occurrences = {
+        item.original_identifier: item for item in result.occurrences
+    }
+
+    assert resources["10.1234/member"].membership_eligible is True
+    assert resources["10.1234/reference"].membership_eligible is False
+    reference = occurrences["10.1234/reference"]
+    assert reference.discovery_context == CollectionDiscoveryContext.REFERENCE_CONTEXT
+    assert (
+        reference.membership_decision
+        == CollectionMembershipDecision.EXCLUDED_REFERENCE_CONTEXT
+    )
+
+
+def test_explicit_doi_link_inside_references_is_audited_not_eligible(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    html = b"""
+    <div class='references-list'>
+      <a href='https://doi.org/10.1234/reference-link'>cited paper</a>
+    </div>
+    """
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+
+    assert result.resources[0].membership_eligible is False
+    assert (
+        result.occurrences[0].membership_decision
+        == CollectionMembershipDecision.EXCLUDED_REFERENCE_CONTEXT
+    )
+
+
+def test_doi_text_inside_references_is_audited_not_eligible(tmp_path: Path) -> None:
+    entry = "https://collection.example/project"
+    html = b"<section role='references'>10.1234/reference-text</section>"
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+
+    assert result.resources[0].membership_eligible is False
+    assert result.occurrences[0].discovery_context == CollectionDiscoveryContext.REFERENCE_CONTEXT
+
+
+def test_pdf_link_inside_bibliography_is_audited_not_eligible(tmp_path: Path) -> None:
+    entry = "https://collection.example/project"
+    html = b"<div id='bibliography'><a href='/project/cited.pdf'>PDF</a></div>"
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+
+    assert result.resources[0].resource_kind == CollectionResourceKind.PDF_URL
+    assert result.resources[0].membership_eligible is False
+    assert result.occurrences[0].discovery_context == CollectionDiscoveryContext.REFERENCE_CONTEXT
+
+
+def test_related_article_link_is_audited_not_eligible(tmp_path: Path) -> None:
+    entry = "https://collection.example/project"
+    html = b"""
+    <aside class='related-articles'>
+      <a href='/project/article/recommended'>Recommended paper</a>
+    </aside>
+    """
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+
+    assert result.resources[0].resource_kind == CollectionResourceKind.ARTICLE_URL
+    assert result.resources[0].membership_eligible is False
+    assert result.occurrences[0].discovery_context == CollectionDiscoveryContext.NAVIGATION_CONTEXT
+
+
+def test_publication_card_makes_doi_pdf_and_article_links_eligible(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    html = b"""
+    <article class='publication-item'>
+      <a href='https://doi.org/10.1234/member-link'>DOI</a>
+      <a href='/project/member.pdf'>PDF</a>
+      <a href='/project/article/member'>Article</a>
+    </article>
+    """
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+
+    assert len(result.resources) == 3
+    assert all(item.membership_eligible for item in result.resources)
+    assert all(
+        item.membership_decision == CollectionMembershipDecision.ELIGIBLE
+        for item in result.resources
+    )
+
+
+def test_verified_occurrence_promotes_deduplicated_reference_discovery(
+    tmp_path: Path,
+) -> None:
+    first = "https://collection.example/project?page=1"
+    second = "https://collection.example/project?page=2"
+    html_first = (
+        "<section class='references'>"
+        "<a href='https://doi.org/10.1234/shared-context'>Cited</a>"
+        "</section>"
+        f"<a rel='next' href='{second}'>Next</a>"
+    ).encode()
+    html_second = b"""
+    <article class='publication-item'>
+      <a href='https://doi.org/10.1234/shared-context'>Member</a>
+    </article>
+    """
+    result, _ = discover(
+        tmp_path,
+        first,
+        {
+            first: response(first, html_first),
+            second: response(second, html_second),
+        },
+    )
+
+    assert len(result.resources) == 1
+    assert result.resources[0].membership_eligible is True
+    assert result.resources[0].membership_decision == CollectionMembershipDecision.ELIGIBLE
+    assert len(result.occurrences) == 2
+    assert {item.membership_eligible for item in result.occurrences} == {False, True}
+
+
+def test_neutral_explicit_doi_link_remains_auditable_but_unverified(
+    tmp_path: Path,
+) -> None:
+    entry = "https://collection.example/project"
+    html = b"<a href='https://doi.org/10.1234/unverified-link'>Paper</a>"
+    result, _ = discover(tmp_path, entry, {entry: response(entry, html)})
+
+    assert result.resources[0].membership_eligible is False
+    assert result.resources[0].membership_decision == CollectionMembershipDecision.UNVERIFIED
+    assert result.occurrences[0].discovery_context == CollectionDiscoveryContext.UNVERIFIED_CONTEXT

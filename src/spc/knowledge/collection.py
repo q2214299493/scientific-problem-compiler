@@ -25,6 +25,7 @@ from ..models import (
     CollectionImportRecord,
     CollectionImportStatus,
     CollectionLiteratureMembership,
+    CollectionMembershipDecision,
     CollectionPageRecord,
     CollectionResourceKind,
     CollectionResourceOccurrence,
@@ -50,6 +51,37 @@ from .acquisition import (
 DOI_DISCOVERY_PATTERN = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 ARTICLE_PATH_MARKERS = ("/article/", "/doi/", "/paper/", "/publication/", "/content/")
 NEXT_LABELS = {"next", "next page", "older", "more", "下一页", "下页"}
+POSITIVE_MEMBERSHIP_CONTEXTS = frozenset(
+    {
+        "publication",
+        "publications",
+        "paper",
+        "papers",
+        "article",
+        "articles",
+        "result",
+        "results",
+        "research-output",
+        "publication-item",
+    }
+)
+REFERENCE_CONTEXTS = frozenset(
+    {
+        "references",
+        "reference",
+        "bibliography",
+        "citations",
+        "cited-by",
+        "references-list",
+    }
+)
+NAVIGATION_CONTEXTS = frozenset(
+    {"footer", "navigation", "nav", "related-articles", "recommended"}
+)
+VOID_HTML_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+)
+CONTEXT_TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 class CollectionError(ValueError):
@@ -192,6 +224,13 @@ class _Link:
     rel: tuple[str, ...]
     media_type: str | None
     css_class: tuple[str, ...]
+    context_tokens: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _TextFragment:
+    text: str
+    context_tokens: frozenset[str]
 
 
 class _CollectionHTMLParser(HTMLParser):
@@ -202,17 +241,40 @@ class _CollectionHTMLParser(HTMLParser):
         self._active_link: dict[str, object] | None = None
         self._link_text: list[str] = []
         self.script_count = 0
-        self.visible_text: list[str] = []
+        self.text_fragments: list[_TextFragment] = []
         self._hidden_depth = 0
+        self._context_stack: list[tuple[str, frozenset[str]]] = []
+
+    @staticmethod
+    def _element_context(tag: str, attrs: dict[str, str]) -> frozenset[str]:
+        values = [tag]
+        values.extend(
+            attrs.get(key, "")
+            for key in ("id", "class", "role", "aria-label", "name")
+        )
+        tokens: set[str] = set()
+        for value in values:
+            normalized = value.casefold().replace("_", "-")
+            for match in CONTEXT_TOKEN_PATTERN.findall(normalized):
+                tokens.add(match)
+                tokens.update(part for part in match.split("-") if part)
+        return frozenset(tokens)
+
+    def _current_context(self) -> frozenset[str]:
+        return frozenset(
+            token for _tag, context in self._context_stack for token in context
+        )
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {key.casefold(): value or "" for key, value in attrs}
         normalized_tag = tag.casefold()
+        element_context = self._element_context(normalized_tag, values)
+        full_context = self._current_context() | element_context
         if normalized_tag == "a" and values.get("href"):
-            self._active_link = values
+            self._active_link = {**values, "context_tokens": full_context}
             self._link_text = []
         elif normalized_tag == "link" and values.get("href"):
-            self._append_link(values, "")
+            self._append_link({**values, "context_tokens": full_context}, "")
         elif normalized_tag == "meta":
             key = (values.get("name") or values.get("property") or "").casefold()
             value = values.get("content", "").strip()
@@ -222,6 +284,15 @@ class _CollectionHTMLParser(HTMLParser):
             self._hidden_depth += 1
             if normalized_tag == "script":
                 self.script_count += 1
+        if normalized_tag not in VOID_HTML_TAGS:
+            self._context_stack.append((normalized_tag, element_context))
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.casefold() not in VOID_HTML_TAGS:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
         normalized_tag = tag.casefold()
@@ -231,6 +302,10 @@ class _CollectionHTMLParser(HTMLParser):
             self._link_text = []
         if normalized_tag in {"script", "style"} and self._hidden_depth:
             self._hidden_depth -= 1
+        for index in range(len(self._context_stack) - 1, -1, -1):
+            if self._context_stack[index][0] == normalized_tag:
+                del self._context_stack[index:]
+                break
 
     def handle_data(self, data: str) -> None:
         text = " ".join(data.split())
@@ -239,7 +314,7 @@ class _CollectionHTMLParser(HTMLParser):
         if self._active_link is not None:
             self._link_text.append(text)
         if not self._hidden_depth:
-            self.visible_text.append(text)
+            self.text_fragments.append(_TextFragment(text, self._current_context()))
 
     def _append_link(self, attrs: dict[str, object], text: str) -> None:
         rel = tuple(sorted(set(str(attrs.get("rel", "")).casefold().split())))
@@ -251,6 +326,7 @@ class _CollectionHTMLParser(HTMLParser):
                 rel=rel,
                 media_type=str(attrs.get("type", "")).casefold() or None,
                 css_class=css_class,
+                context_tokens=frozenset(attrs.get("context_tokens", ())),
             )
         )
 
@@ -264,6 +340,8 @@ class _Candidate:
     discovery_confidence: CollectionDiscoveryConfidence
     discovery_context: CollectionDiscoveryContext
     membership_eligible: bool
+    membership_decision: CollectionMembershipDecision
+    membership_reason: str
     doi: str | None = None
     url: str | None = None
     media_type: str | None = None
@@ -301,6 +379,8 @@ def _resource_candidate(
     confidence: CollectionDiscoveryConfidence,
     context: CollectionDiscoveryContext,
     membership_eligible: bool,
+    membership_decision: CollectionMembershipDecision,
+    membership_reason: str,
     media_type: str | None = None,
 ) -> _Candidate | None:
     if kind == CollectionResourceKind.DOI:
@@ -315,6 +395,8 @@ def _resource_candidate(
             confidence,
             context,
             membership_eligible,
+            membership_decision,
+            membership_reason,
             doi=doi,
         )
     absolute = canonicalize_url(urljoin(base_url, original))
@@ -328,6 +410,8 @@ def _resource_candidate(
             confidence,
             context,
             membership_eligible,
+            membership_decision,
+            membership_reason,
             doi=embedded_doi,
         )
     return _Candidate(
@@ -338,8 +422,47 @@ def _resource_candidate(
         confidence,
         context,
         membership_eligible,
+        membership_decision,
+        membership_reason,
         url=absolute,
         media_type=media_type,
+    )
+
+
+def _membership_context(
+    context_tokens: frozenset[str],
+) -> tuple[
+    CollectionMembershipDecision,
+    str,
+    CollectionDiscoveryContext,
+    bool,
+]:
+    if context_tokens & REFERENCE_CONTEXTS:
+        return (
+            CollectionMembershipDecision.EXCLUDED_REFERENCE_CONTEXT,
+            "negative reference or bibliography context",
+            CollectionDiscoveryContext.REFERENCE_CONTEXT,
+            False,
+        )
+    if context_tokens & NAVIGATION_CONTEXTS:
+        return (
+            CollectionMembershipDecision.EXCLUDED_NAVIGATION_CONTEXT,
+            "negative navigation, related-content, or footer context",
+            CollectionDiscoveryContext.NAVIGATION_CONTEXT,
+            False,
+        )
+    if context_tokens & POSITIVE_MEMBERSHIP_CONTEXTS:
+        return (
+            CollectionMembershipDecision.ELIGIBLE,
+            "local publication-member context",
+            CollectionDiscoveryContext.PUBLICATION_MEMBER_CONTEXT,
+            True,
+        )
+    return (
+        CollectionMembershipDecision.UNVERIFIED,
+        "no local collection-membership context",
+        CollectionDiscoveryContext.UNVERIFIED_CONTEXT,
+        False,
     )
 
 
@@ -355,37 +478,28 @@ def _extract_page(
     parser = _CollectionHTMLParser()
     parser.feed(html)
     candidates: list[_Candidate] = []
-    visible_text = " ".join(parser.visible_text)
-    lowered_html = html.casefold()
-    publication_list = any(
-        marker in lowered_html
-        for marker in (
-            'class="publication',
-            "class='publication",
-            'id="publication',
-            "id='publication",
+    for fragment in parser.text_fragments:
+        decision, reason, context, membership_eligible = _membership_context(
+            fragment.context_tokens
         )
-    )
-    for match in DOI_DISCOVERY_PATTERN.finditer(visible_text):
-        candidate = _resource_candidate(
-            kind=CollectionResourceKind.DOI,
-            original=match.group(0),
-            method="doi_text",
-            base_url=page_url,
-            confidence=(
-                CollectionDiscoveryConfidence.MEDIUM
-                if publication_list
-                else CollectionDiscoveryConfidence.LOW
-            ),
-            context=(
-                CollectionDiscoveryContext.PUBLICATION_LIST_TEXT
-                if publication_list
-                else CollectionDiscoveryContext.ARBITRARY_BODY_TEXT
-            ),
-            membership_eligible=publication_list,
-        )
-        if candidate is not None:
-            candidates.append(candidate)
+        for match in DOI_DISCOVERY_PATTERN.finditer(fragment.text):
+            candidate = _resource_candidate(
+                kind=CollectionResourceKind.DOI,
+                original=match.group(0),
+                method="doi_text",
+                base_url=page_url,
+                confidence=(
+                    CollectionDiscoveryConfidence.MEDIUM
+                    if membership_eligible
+                    else CollectionDiscoveryConfidence.LOW
+                ),
+                context=context,
+                membership_eligible=membership_eligible,
+                membership_decision=decision,
+                membership_reason=reason,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
     metadata_article_keys = {
         "citation_fulltext_html_url",
         "citation_abstract_html_url",
@@ -422,6 +536,8 @@ def _extract_page(
                     CollectionDiscoveryConfidence.HIGH,
                     CollectionDiscoveryContext.CITATION_METADATA,
                     True,
+                    CollectionMembershipDecision.ELIGIBLE,
+                    "citation metadata identifies the page's primary work",
                     doi=metadata_dois[0],
                 )
             else:
@@ -433,6 +549,8 @@ def _extract_page(
                     confidence=CollectionDiscoveryConfidence.HIGH,
                     context=CollectionDiscoveryContext.CITATION_METADATA,
                     membership_eligible=True,
+                    membership_decision=CollectionMembershipDecision.ELIGIBLE,
+                    membership_reason="citation metadata identifies the page's primary work",
                     media_type=media_type,
                 )
             if candidate is not None:
@@ -461,20 +579,18 @@ def _extract_page(
         method = "link"
         if _doi_inside(link.href):
             kind = CollectionResourceKind.DOI
-            confidence = CollectionDiscoveryConfidence.HIGH
-            context = CollectionDiscoveryContext.EXPLICIT_DOI_LINK
+            base_confidence = CollectionDiscoveryConfidence.HIGH
+            method = "explicit_doi_link"
         elif link.media_type == "application/pdf" or path.endswith(".pdf"):
             kind = CollectionResourceKind.PDF_URL
             media_type = "application/pdf"
             method = "direct_pdf_link"
-            confidence = CollectionDiscoveryConfidence.HIGH
-            context = CollectionDiscoveryContext.DIRECT_PDF_LINK
+            base_confidence = CollectionDiscoveryConfidence.HIGH
         elif "article" in link.rel or any(marker in path for marker in ARTICLE_PATH_MARKERS):
             kind = CollectionResourceKind.ARTICLE_URL
             media_type = "text/html"
             method = "article_link"
-            confidence = CollectionDiscoveryConfidence.MEDIUM
-            context = CollectionDiscoveryContext.ARTICLE_LINK
+            base_confidence = CollectionDiscoveryConfidence.MEDIUM
         if kind is None:
             continue
         if (
@@ -483,19 +599,28 @@ def _extract_page(
             and not policy.allow_external_literature_links
         ):
             continue
+        decision, reason, context, membership_eligible = _membership_context(
+            link.context_tokens
+        )
         candidate = _resource_candidate(
             kind=kind,
             original=link.href,
             method=method,
             base_url=page_url,
-            confidence=confidence,
+            confidence=(
+                base_confidence
+                if membership_eligible
+                else CollectionDiscoveryConfidence.LOW
+            ),
             context=context,
-            membership_eligible=True,
+            membership_eligible=membership_eligible,
+            membership_decision=decision,
+            membership_reason=reason,
             media_type=media_type,
         )
         if candidate is not None:
             candidates.append(candidate)
-    visible = " ".join(parser.visible_text).casefold()
+    visible = " ".join(fragment.text for fragment in parser.text_fragments).casefold()
     dynamic_only = (
         parser.script_count > 0
         and not candidates
@@ -630,6 +755,8 @@ class GenericHTMLCollectionConnector:
                         "media_type": candidate.media_type,
                         "highest_discovery_confidence": candidate.discovery_confidence,
                         "membership_eligible": candidate.membership_eligible,
+                        "membership_decision": candidate.membership_decision,
+                        "membership_reason": candidate.membership_reason,
                     }
                     payload = {key: value for key, value in payload.items() if value is not None}
                     resource = DiscoveredCollectionResource(
@@ -651,9 +778,31 @@ class GenericHTMLCollectionConnector:
                     membership_eligible = (
                         resource.membership_eligible or candidate.membership_eligible
                     )
+                    decision_rank = {
+                        CollectionMembershipDecision.EXCLUDED_NAVIGATION_CONTEXT: 0,
+                        CollectionMembershipDecision.EXCLUDED_REFERENCE_CONTEXT: 0,
+                        CollectionMembershipDecision.UNVERIFIED: 1,
+                        CollectionMembershipDecision.ELIGIBLE: 2,
+                    }
+                    current_decision = resource.membership_decision
+                    candidate_wins = decision_rank[candidate.membership_decision] > (
+                        decision_rank[current_decision]
+                    )
+                    membership_decision = (
+                        candidate.membership_decision
+                        if candidate_wins
+                        else current_decision
+                    )
+                    membership_reason = (
+                        candidate.membership_reason
+                        if candidate_wins
+                        else resource.membership_reason
+                    )
                     if (
                         highest != resource.highest_discovery_confidence
                         or membership_eligible != resource.membership_eligible
+                        or membership_decision != resource.membership_decision
+                        or membership_reason != resource.membership_reason
                     ):
                         payload = resource.model_dump(
                             mode="json", exclude={"content_hash"}, exclude_none=True
@@ -661,6 +810,8 @@ class GenericHTMLCollectionConnector:
                         payload.update(
                             highest_discovery_confidence=highest,
                             membership_eligible=membership_eligible,
+                            membership_decision=membership_decision,
+                            membership_reason=membership_reason,
                         )
                         resource = DiscoveredCollectionResource(
                             **payload, content_hash=content_hash(payload)
@@ -728,6 +879,8 @@ class GenericHTMLCollectionConnector:
                         "discovery_confidence": candidate.discovery_confidence,
                         "discovery_context": candidate.discovery_context,
                         "membership_eligible": candidate.membership_eligible,
+                        "membership_decision": candidate.membership_decision,
+                        "membership_reason": candidate.membership_reason,
                     },
                 )
                 repositories.collection_occurrences.put(occurrence.occurrence_id, occurrence)

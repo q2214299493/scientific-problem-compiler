@@ -167,6 +167,17 @@ class CollectionDiscoveryContext(StrEnum):
     ARTICLE_LINK = "article_link"
     PUBLICATION_LIST_TEXT = "publication_list_text"
     ARBITRARY_BODY_TEXT = "arbitrary_body_text"
+    PUBLICATION_MEMBER_CONTEXT = "publication_member_context"
+    REFERENCE_CONTEXT = "reference_context"
+    NAVIGATION_CONTEXT = "navigation_context"
+    UNVERIFIED_CONTEXT = "unverified_context"
+
+
+class CollectionMembershipDecision(StrEnum):
+    ELIGIBLE = "eligible"
+    UNVERIFIED = "unverified"
+    EXCLUDED_REFERENCE_CONTEXT = "excluded_reference_context"
+    EXCLUDED_NAVIGATION_CONTEXT = "excluded_navigation_context"
 
 
 class FullTextAccessStatus(StrEnum):
@@ -1199,6 +1210,8 @@ class DiscoveredCollectionResource(StrictModel):
     media_type: NonBlankStr | None = None
     highest_discovery_confidence: CollectionDiscoveryConfidence
     membership_eligible: bool
+    membership_decision: CollectionMembershipDecision
+    membership_reason: NonBlankStr
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -1210,6 +1223,10 @@ class DiscoveredCollectionResource(StrictModel):
             and self.membership_eligible
         ):
             raise ValueError("low-confidence discovery cannot establish collection membership")
+        if self.membership_eligible != (
+            self.membership_decision == CollectionMembershipDecision.ELIGIBLE
+        ):
+            raise ValueError("membership eligibility and decision are inconsistent")
         if self.resource_kind == CollectionResourceKind.DOI:
             if self.doi != self.normalized_identifier or self.url is not None:
                 raise ValueError("DOI collection resource binding is invalid")
@@ -1240,6 +1257,8 @@ class CollectionResourceOccurrence(StrictModel):
     discovery_confidence: CollectionDiscoveryConfidence
     discovery_context: CollectionDiscoveryContext
     membership_eligible: bool
+    membership_decision: CollectionMembershipDecision
+    membership_reason: NonBlankStr
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -1251,6 +1270,10 @@ class CollectionResourceOccurrence(StrictModel):
             and self.membership_eligible
         ):
             raise ValueError("low-confidence occurrence cannot establish collection membership")
+        if self.membership_eligible != (
+            self.membership_decision == CollectionMembershipDecision.ELIGIBLE
+        ):
+            raise ValueError("occurrence eligibility and decision are inconsistent")
         identity = self.model_dump(mode="json", exclude={"occurrence_id", "content_hash"})
         expected_id = f"collection-occurrence-{content_hash(identity)[:24]}"
         if self.occurrence_id != expected_id:

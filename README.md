@@ -302,3 +302,12 @@ resource, occurrence, and acquisition references. Import output distinguishes
 occurrences, discovered resources, logical literature, and ingested literature;
 low-confidence DOI text from arbitrary page bodies stays auditable but is not
 silently imported as collection membership.
+
+K1D.2 makes membership classification local to each discovered text fragment
+or link. Lightweight ancestor semantics identify publication/member contexts
+and exclude references, bibliographies, related content, navigation, and
+footers even when the same page also contains a publication list. Neutral DOI,
+article, and PDF links remain immutable audit occurrences with an explicit
+unverified decision; citation metadata and locally verified publication cards
+remain eligible. If the same resource later appears in an eligible context,
+the logical resource is promoted while every original occurrence is retained.
