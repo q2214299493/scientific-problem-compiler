@@ -28,6 +28,7 @@ from .models import (
     DiscoveredCollectionResource,
     DocumentStructureArtifact,
     DocumentStructureBlock,
+    DocumentStructureSelection,
     DomainProfile,
     EvidenceSpan,
     ExpertAttributionRecord,
@@ -1377,6 +1378,72 @@ class DocumentStructureArtifactRepository(
         )
 
 
+class DocumentStructureSelectionRepository(
+    IdentityBoundRepository[DocumentStructureSelection]
+):
+    def __init__(self, knowledge_root: Path) -> None:
+        super().__init__(
+            knowledge_root / "document_structure_selections",
+            DocumentStructureSelection,
+            "selection_id",
+        )
+
+    def resolve_current(self, representation_id: str) -> DocumentStructureSelection:
+        require_safe_path_component(representation_id, field="representation_id")
+        all_records = {item.selection_id: item for item in self.list()}
+        records = tuple(
+            item
+            for item in all_records.values()
+            if item.representation_id == representation_id
+        )
+        if not records:
+            raise FileNotFoundError(
+                f"no structure selection for representation: {representation_id}"
+            )
+        successors: dict[str, str] = {}
+        for record in records:
+            predecessor_id = record.supersedes_selection_id
+            if predecessor_id is None:
+                continue
+            predecessor = all_records.get(predecessor_id)
+            if predecessor is None:
+                raise ValueError(
+                    f"missing superseded structure selection: {predecessor_id}"
+                )
+            if (
+                predecessor.representation_id != representation_id
+                or predecessor.literature_id != record.literature_id
+            ):
+                raise ValueError(
+                    "structure selection history must retain representation identity"
+                )
+            if predecessor_id in successors:
+                raise ValueError(
+                    f"structure selection has multiple successors: {predecessor_id}"
+                )
+            successors[predecessor_id] = record.selection_id
+        heads = [record for record in records if record.selection_id not in successors]
+        if len(heads) != 1:
+            raise ValueError(
+                f"expected exactly one current structure selection: {representation_id}"
+            )
+        seen: set[str] = set()
+        cursor: DocumentStructureSelection | None = heads[0]
+        while cursor is not None:
+            if cursor.selection_id in seen:
+                raise ValueError(
+                    f"cyclic structure selection history: {representation_id}"
+                )
+            seen.add(cursor.selection_id)
+            predecessor_id = cursor.supersedes_selection_id
+            cursor = all_records.get(predecessor_id) if predecessor_id else None
+        if len(seen) != len(records):
+            raise ValueError(
+                f"cyclic or disconnected structure selection history: {representation_id}"
+            )
+        return heads[0]
+
+
 class DocumentStructureBlockRepository(
     IdentityBoundRepository[DocumentStructureBlock]
 ):
@@ -1693,6 +1760,9 @@ class KnowledgeRepositories:
         self.document_structure_artifacts = DocumentStructureArtifactRepository(
             root
         )
+        self.document_structure_selections = DocumentStructureSelectionRepository(
+            root
+        )
         self.document_structure_blocks = DocumentStructureBlockRepository(root)
         self.table_structures = TableStructureRepository(root)
         self.table_cell_structures = TableCellStructureRepository(root)
@@ -1856,8 +1926,10 @@ class KnowledgeRepositories:
             and isinstance(record, SourceDocument)
         }
         from .knowledge.structure import (
-            validate_document_structure,
             verify_structured_evidence_locator,
+        )
+        from .knowledge.structure_selection import (
+            resolve_current_structure_selection,
         )
 
         trusted_representation_ids = {
@@ -1865,10 +1937,18 @@ class KnowledgeRepositories:
             for (record_type, record_id) in trusted.trusted_records
             if record_type == "literature_representation_ref"
         }
+        trusted_structure_selections: list[DocumentStructureSelection] = []
+        for representation_id in sorted(trusted_representation_ids):
+            try:
+                selection = resolve_current_structure_selection(
+                    representation_id, self, snapshot_evidence
+                )
+            except FileNotFoundError:
+                continue
+            trusted_structure_selections.append(selection)
         trusted_structures = tuple(
-            validate_document_structure(item, self, snapshot_evidence)
-            for item in self.document_structure_artifacts.list()
-            if item.representation_id in trusted_representation_ids
+            self.document_structure_artifacts.get(selection.structure_id)
+            for selection in trusted_structure_selections
         )
         trusted_structure_ids = {
             item.structure_id for item in trusted_structures
@@ -1958,6 +2038,10 @@ class KnowledgeRepositories:
             "document_structure_hashes": {
                 item.structure_id: item.content_hash for item in trusted_structures
             },
+            "document_structure_selection_hashes": {
+                item.selection_id: item.content_hash
+                for item in trusted_structure_selections
+            },
             "structured_evidence_locator_hashes": {
                 item.locator_id: item.content_hash for item in trusted_locators
             },
@@ -1970,6 +2054,10 @@ class KnowledgeRepositories:
             | {
                 f"document_structure:{item.structure_id}": item.content_hash
                 for item in trusted_structures
+            }
+            | {
+                f"document_structure_selection:{item.selection_id}": item.content_hash
+                for item in trusted_structure_selections
             }
             | {
                 f"structured_evidence_locator:{item.locator_id}": item.content_hash
@@ -1995,6 +2083,7 @@ class KnowledgeRepositories:
                 "knowledge_relation_hashes",
                 "curation_record_hashes",
                 "document_structure_hashes",
+                "document_structure_selection_hashes",
                 "structured_evidence_locator_hashes",
                 "trusted_record_hashes",
             }

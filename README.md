@@ -367,3 +367,18 @@ scientific claim. Structure and locator repositories live only under the
 shared knowledge root. Trusted snapshots include structures for the current
 accepted representation and locators for evidence that independently passes
 the existing curation and historical-evidence rules.
+
+### K1E.1 structure authority
+
+HTML tables use a deterministic rowspan/colspan occupancy grid. A table cell
+binds one or more exact canonical blocks; callers must select a region when a
+multi-paragraph cell cannot be represented by one honest `EvidenceSpan`.
+Empty cells retain topology without inventing text.
+
+Every successful `structure-literature` run creates or reuses an immutable
+`DocumentStructureSelection`. Re-running the same extractor is idempotent;
+changing its version or configuration creates a separate audit artifact and
+advances the selection chain. Trusted snapshots bind only the current selected
+structure and reject locators attached to an older structure. PDF line-only
+extraction remains explicitly partial and does not promote wrapped lines or
+weak title-case text into paragraphs or headings.

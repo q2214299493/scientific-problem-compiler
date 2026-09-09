@@ -60,6 +60,7 @@ from .models import (
     DiscoveredCollectionResource,
     DocumentStructureArtifact,
     DocumentStructureBlock,
+    DocumentStructureSelection,
     CandidatePlanDraft,
     CandidateTaskDraft,
     ComparisonBaselineDraft,
@@ -396,6 +397,7 @@ def structure_literature(
     )
     report = {
         "structure_id": result.artifact.structure_id,
+        "structure_selection_id": result.selection.selection_id,
         "representation_id": result.artifact.representation_id,
         "pages": sum(
             block.block_type.value == "page" for block in result.blocks
@@ -992,6 +994,7 @@ def schema_command(
         LiteratureRepresentationReference,
         DocumentStructureArtifact,
         DocumentStructureBlock,
+        DocumentStructureSelection,
         TableStructure,
         TableCellStructure,
         FigureStructure,

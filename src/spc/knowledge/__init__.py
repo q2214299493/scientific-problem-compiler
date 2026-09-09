@@ -60,6 +60,12 @@ from .structure import (
     validate_document_structure,
     verify_structured_evidence_locator,
 )
+from .structure_selection import (
+    DocumentStructureSelector,
+    require_current_structure,
+    resolve_current_structure_selection,
+    validate_structure_selection,
+)
 
 __all__ = [
     "AcquisitionError",
@@ -81,6 +87,7 @@ __all__ = [
     "DocumentStructureExtractor",
     "DocumentStructureInput",
     "DocumentStructureService",
+    "DocumentStructureSelector",
     "HTMLDocumentStructureExtractor",
     "PDFDocumentStructureExtractor",
     "LiteratureIngestionService",
@@ -113,5 +120,8 @@ __all__ = [
     "format_structured_evidence_locator",
     "inspect_document_structure",
     "validate_document_structure",
+    "validate_structure_selection",
     "verify_structured_evidence_locator",
+    "require_current_structure",
+    "resolve_current_structure_selection",
 ]

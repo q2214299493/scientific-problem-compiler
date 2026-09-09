@@ -2193,20 +2193,40 @@ class TableCellStructure(StrictModel):
     row_span: int = Field(default=1, ge=1)
     column_span: int = Field(default=1, ge=1)
     is_header: bool = False
-    start_offset: int = Field(ge=0)
-    end_offset: int = Field(gt=0)
-    text_hash: Sha256Str
+    canonical_block_refs: tuple[NonBlankStr, ...] = ()
+    start_offset: int | None = Field(default=None, ge=0)
+    end_offset: int | None = Field(default=None, gt=0)
+    text_hash: Sha256Str | None = None
     content_hash: Sha256Str
 
     @model_validator(mode="after")
     def validate_identity(self) -> TableCellStructure:
         from .serialization import content_hash
 
-        if self.end_offset <= self.start_offset:
+        range_binding = (self.start_offset, self.end_offset, self.text_hash)
+        if any(value is not None for value in range_binding) and not all(
+            value is not None for value in range_binding
+        ):
+            raise ValueError("table cell text range binding must be complete")
+        if (
+            self.start_offset is not None
+            and self.end_offset is not None
+            and self.end_offset <= self.start_offset
+        ):
             raise ValueError("table cell range is invalid")
+        if self.canonical_block_refs and self.start_offset is None:
+            raise ValueError("table cell canonical blocks require a text range")
+        if len(set(self.canonical_block_refs)) != len(self.canonical_block_refs):
+            raise ValueError("table cell canonical_block_refs must be unique")
         identity = self.model_dump(
-            mode="json", exclude={"cell_id", "content_hash"}
+            mode="json",
+            exclude={"cell_id", "content_hash"},
+            exclude_none=True,
         )
+        # K1E cells predate explicit canonical block ownership. Preserve their
+        # content-bound identity while all K1E.1 cells bind exact regions.
+        if not self.canonical_block_refs and self.start_offset is not None:
+            identity.pop("canonical_block_refs", None)
         expected_id = f"table-cell-{content_hash(identity)[:24]}"
         if self.cell_id != expected_id:
             raise ValueError("TableCellStructure cell_id is not content-bound")
@@ -2330,6 +2350,37 @@ class DocumentStructureArtifact(StrictModel):
         )
         if self.content_hash != content_hash(payload):
             raise ValueError("DocumentStructureArtifact content_hash is invalid")
+        return self
+
+
+class DocumentStructureSelection(StrictModel):
+    selection_id: NonBlankStr
+    literature_id: NonBlankStr
+    representation_id: NonBlankStr
+    representation_hash: Sha256Str
+    structure_id: NonBlankStr
+    structure_hash: Sha256Str
+    selected_by_policy: NonBlankStr
+    selector_version: NonBlankStr
+    rationale: NonBlankStr
+    supersedes_selection_id: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DocumentStructureSelection:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json",
+            exclude={"selection_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"document-structure-selection-{content_hash(identity)[:24]}"
+        if self.selection_id != expected_id:
+            raise ValueError("DocumentStructureSelection selection_id is not content-bound")
+        payload = {"selection_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("DocumentStructureSelection content_hash is invalid")
         return self
 
 
@@ -2936,6 +2987,9 @@ class KnowledgeSnapshot(StrictModel):
         default_factory=dict, exclude_if=lambda value: not value
     )
     document_structure_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    document_structure_selection_hashes: dict[NonBlankStr, Sha256Str] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
     structured_evidence_locator_hashes: dict[NonBlankStr, Sha256Str] = Field(
