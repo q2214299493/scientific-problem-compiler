@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 
+from click.testing import Result
 import pytest
 from typer.testing import CliRunner
 
@@ -36,6 +37,18 @@ HTML = b"""<html><head>
 <meta name="citation_publication_date" content="2026">
 <meta name="citation_doi" content="10.0000/codex.transport">
 </head><body><article><h1>Results</h1><p>Sentence A.</p></article></body></html>"""
+
+
+def _captured_cli_text(result: Result) -> str:
+    streams: list[str] = []
+    for attribute in ("output", "stdout", "stderr"):
+        try:
+            value = getattr(result, attribute)
+        except (AttributeError, ValueError):
+            continue
+        if value and value not in streams:
+            streams.append(value)
+    return "\n".join(streams)
 
 
 class StaticHTMLTransport:
@@ -418,7 +431,7 @@ def test_cli_codex_provider_requires_explicit_model() -> None:
         ],
     )
     assert result.exit_code != 0
-    assert "requires an explicit --codex-model" in result.output
+    assert "requires an explicit --codex-model" in _captured_cli_text(result)
 
 
 def test_cli_codex_preflight_diagnostic_never_runs_inference(
