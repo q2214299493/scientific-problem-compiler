@@ -46,6 +46,9 @@ from spc.knowledge.literature_knowledge import (
     validate_literature_knowledge_chunk,
     validate_literature_knowledge_input,
 )
+from spc.knowledge.literature_knowledge.materializer import (
+    _has_adjacent_numeric_unit_pair,
+)
 from spc.knowledge.structure import (
     DocumentStructureService,
     HTMLDocumentStructureExtractor,
@@ -83,7 +86,10 @@ HTML = b"""<html><head>
 <p>The model used periodic boundary conditions.</p>
 <p>The reported activation barrier was 1.25 eV.</p>
 <p>The signed energy was -1.25 eV.</p>
+<p>The Unicode signed energy was \xe2\x88\x921.25 eV.</p>
 <p>The scientific notation energy was 1e-3 eV.</p>
+<p>At 300 K, the paired activation barrier was 1.25 eV.</p>
+<p>The applied pressure was 1 MPa.</p>
 <p>The context-free value was 1.25.</p>
 <p>Performance increased substantially.</p>
 <table><caption>Table 1 Barrier</caption><tr><th>Method</th><th>Barrier (eV)</th></tr>
@@ -704,11 +710,13 @@ def test_numeric_tokens_preserve_sign_exponent_and_table_relationships(tmp_path:
     def response(chunks):
         negative = chunk_with(chunks, "signed energy")
         scientific = chunk_with(chunks, "scientific notation")
+        paired = chunk_with(chunks, "At 300 K")
         plain = chunk_with(chunks, "context-free value")
         header = next(chunk for chunk in chunks if chunk.text == "Barrier (eV)")
         quote_specs = (
             ("negative", negative),
             ("scientific", scientific),
+            ("paired", paired),
             ("plain", plain),
             ("header", header),
         )
@@ -725,12 +733,17 @@ def test_numeric_tokens_preserve_sign_exponent_and_table_relationships(tmp_path:
             claim_proposals=(
                 LiteratureClaimProposal(claim_key="negative", text=negative.text, claim_type="reported_result", quote_keys=("negative",), claim_strength="explicit", epistemic_status=EpistemicStatus.REPORTED_RESULT),
                 LiteratureClaimProposal(claim_key="scientific", text=scientific.text, claim_type="reported_result", quote_keys=("scientific",), claim_strength="explicit", epistemic_status=EpistemicStatus.REPORTED_RESULT),
+                LiteratureClaimProposal(claim_key="paired", text=paired.text, claim_type="reported_result", quote_keys=("paired",), claim_strength="explicit", epistemic_status=EpistemicStatus.REPORTED_RESULT),
                 LiteratureClaimProposal(claim_key="unrelated", text="The context-free value is a barrier in eV.", claim_type="reported_result", quote_keys=("plain", "header"), claim_strength="incomplete", epistemic_status=EpistemicStatus.REPORTED_RESULT),
             ),
             reported_result_proposals=(
                 LiteratureReportedResultProposal(result_key="wrong-sign", claim_keys=("negative",), quantity="energy", value=1.25, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
                 LiteratureReportedResultProposal(result_key="wrong-exponent", claim_keys=("scientific",), quantity="energy", value=3.0, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
                 LiteratureReportedResultProposal(result_key="scientific", claim_keys=("scientific",), quantity="energy", value=0.001, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+                LiteratureReportedResultProposal(result_key="temperature", claim_keys=("paired",), quantity="temperature", value=300.0, unit="K", system_context={}, method_context={}, result_status=ResultStatus.EXPERIMENTAL_REPORTED),
+                LiteratureReportedResultProposal(result_key="paired-barrier", claim_keys=("paired",), quantity="barrier", value=1.25, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+                LiteratureReportedResultProposal(result_key="wrong-temperature-unit", claim_keys=("paired",), quantity="energy", value=300.0, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+                LiteratureReportedResultProposal(result_key="wrong-barrier-unit", claim_keys=("paired",), quantity="temperature", value=1.25, unit="K", system_context={}, method_context={}, result_status=ResultStatus.EXPERIMENTAL_REPORTED),
                 LiteratureReportedResultProposal(result_key="unrelated", claim_keys=("unrelated",), quantity="barrier", value=1.25, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
             ),
         )
@@ -738,9 +751,14 @@ def test_numeric_tokens_preserve_sign_exponent_and_table_relationships(tmp_path:
     compiled = LiteratureKnowledgeCompiler().compile(
         outcome.literature_id or "", StaticProvider(response), repositories, store
     )
-    assert len(compiled.materialized.reported_results) == 1
-    result = compiled.materialized.reported_results[0]
-    assert result.value == 0.001
+    assert {(result.value, result.unit) for result in compiled.materialized.reported_results} == {
+        (0.001, "eV"),
+        (1.25, "eV"),
+        (300.0, "K"),
+    }
+    result = next(
+        result for result in compiled.materialized.reported_results if result.value == 0.001
+    )
     assert any(
         "1e-3 eV" in store.get_evidence(evidence_id).text
         for evidence_id in result.evidence_refs
@@ -753,8 +771,35 @@ def test_numeric_tokens_preserve_sign_exponent_and_table_relationships(tmp_path:
     assert rejected == {
         "wrong-sign": "RESULT_NOT_PRESENT_IN_SOURCE",
         "wrong-exponent": "RESULT_NOT_PRESENT_IN_SOURCE",
+        "wrong-temperature-unit": "RESULT_NOT_PRESENT_IN_SOURCE",
+        "wrong-barrier-unit": "RESULT_NOT_PRESENT_IN_SOURCE",
         "unrelated": "RESULT_NOT_PRESENT_IN_SOURCE",
     }
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "unit", "supported"),
+    (
+        ("The energy was -1.25 eV.", 1.25, "eV", False),
+        ("The energy was −1.25 eV.", 1.25, "eV", False),
+        ("The energy was −1.25 eV.", -1.25, "eV", True),
+        ("The energy was 1e-3 eV.", 3.0, "eV", False),
+        ("The energy was 1e-3 eV.", 0.001, "eV", True),
+        ("At 300 K, the activation barrier was 1.25 eV.", 300.0, "eV", False),
+        ("At 300 K, the activation barrier was 1.25 eV.", 1.25, "K", False),
+        ("At 300 K, the activation barrier was 1.25 eV.", 300.0, "K", True),
+        ("At 300 K, the activation barrier was 1.25 eV.", 1.25, "eV", True),
+        ("The pressure was 1 MPa.", 1.0, "mPa", False),
+        ("The pressure was 1 MPa.", 1.0, "MPa", True),
+    ),
+)
+def test_inline_numeric_unit_pairs_are_exact(
+    text: str,
+    value: float,
+    unit: str,
+    supported: bool,
+) -> None:
+    assert _has_adjacent_numeric_unit_pair(text, value, unit) is supported
 
 
 def test_structured_provider_retries_malformed_json_and_treats_injection_as_data(

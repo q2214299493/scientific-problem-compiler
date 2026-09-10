@@ -50,9 +50,34 @@ from .validation import ensure_machine_curation
 
 COMPILER_ID = "spc-literature-scientific-knowledge-compiler"
 COMPILER_VERSION = "1.0.0"
-NUMERIC_TOKEN = re.compile(
-    r"(?<![\w.])(?P<number>[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?)(?![\w.])"
+SUPPORTED_MINUS_TRANSLATION = str.maketrans(
+    {
+        "\N{MINUS SIGN}": "-",
+        "\N{SMALL HYPHEN-MINUS}": "-",
+        "\N{FULLWIDTH HYPHEN-MINUS}": "-",
+    }
 )
+SIGN_LIKE_CHARACTERS = frozenset(
+    "-+\N{MINUS SIGN}\N{SMALL HYPHEN-MINUS}\N{FULLWIDTH HYPHEN-MINUS}"
+    "\N{HYPHEN}\N{NON-BREAKING HYPHEN}\N{FIGURE DASH}\N{EN DASH}\N{EM DASH}"
+    "\N{HORIZONTAL BAR}\N{PLUS-MINUS SIGN}\N{MINUS-OR-PLUS SIGN}"
+)
+NUMERIC_TOKEN = re.compile(
+    r"(?<![\w.\-+\u2212\ufe63\uff0d\u2010-\u2015\u00b1\u2213\u00d7\u22c5\u00b7])"
+    r"(?P<number>[+\-\u2212\ufe63\uff0d]?"
+    r"(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+\-\u2212\ufe63\uff0d]?\d+)?)"
+    r"(?![\w.\u00d7\u22c5\u00b7])"
+)
+# Equivalent unit spellings are opt-in and exact. This intentionally starts empty.
+EXPLICIT_UNIT_EQUIVALENTS: dict[str, tuple[str, ...]] = {}
+
+
+@dataclass(frozen=True)
+class _NumericTokenMatch:
+    raw_text: str
+    start: int
+    end: int
+    value: Decimal
 
 
 @dataclass(frozen=True)
@@ -103,6 +128,53 @@ def _claim_status_compatible(claim_type: str, status: EpistemicStatus) -> bool:
     return required is None or status == required
 
 
+def _numeric_tokens(text: str) -> tuple[_NumericTokenMatch, ...]:
+    matches = []
+    for token in NUMERIC_TOKEN.finditer(text):
+        prefix = text[: token.start()].rstrip()
+        if prefix and prefix[-1] in SIGN_LIKE_CHARACTERS:
+            continue
+        raw_text = token.group("number")
+        try:
+            parsed = Decimal(raw_text.translate(SUPPORTED_MINUS_TRANSLATION))
+        except InvalidOperation:
+            continue
+        matches.append(
+            _NumericTokenMatch(
+                raw_text=raw_text,
+                start=token.start(),
+                end=token.end(),
+                value=parsed,
+            )
+        )
+    return tuple(matches)
+
+
+def _unit_spellings(unit: str) -> tuple[str, ...]:
+    return (unit, *EXPLICIT_UNIT_EQUIVALENTS.get(unit, ()))
+
+
+def _contains_unit(text: str, unit: str) -> bool:
+    alternatives = "|".join(
+        re.escape(spelling)
+        for spelling in sorted(_unit_spellings(unit), key=len, reverse=True)
+    )
+    return re.search(rf"(?<!\w)(?:{alternatives})(?![\w/\u00b7\u22c5^])", text) is not None
+
+
+def _has_adjacent_numeric_unit_pair(text: str, value: float, unit: str) -> bool:
+    expected = Decimal(str(value))
+    alternatives = "|".join(
+        re.escape(spelling)
+        for spelling in sorted(_unit_spellings(unit), key=len, reverse=True)
+    )
+    adjacent_unit = re.compile(rf"\s+(?:{alternatives})(?![\w/\u00b7\u22c5^])")
+    return any(
+        token.value == expected and adjacent_unit.match(text, token.end) is not None
+        for token in _numeric_tokens(text)
+    )
+
+
 def _matching_numeric_evidence(
     evidence_refs: tuple[str, ...],
     value: float,
@@ -112,24 +184,26 @@ def _matching_numeric_evidence(
     matches = []
     for evidence_id in evidence_refs:
         text = store.get_evidence(evidence_id).text
-        for token in NUMERIC_TOKEN.finditer(text):
-            try:
-                parsed = Decimal(token.group("number"))
-            except InvalidOperation:
-                continue
-            if parsed == expected:
-                matches.append(evidence_id)
-                break
+        if any(token.value == expected for token in _numeric_tokens(text)):
+            matches.append(evidence_id)
     return tuple(matches)
 
 
-def _contains_unit(text: str, unit: str) -> bool:
-    return re.search(rf"(?<!\w){re.escape(unit)}(?!\w)", text, flags=re.I) is not None
+def _is_exact_numeric_value(text: str, value: float) -> bool:
+    stripped = text.strip()
+    tokens = _numeric_tokens(stripped)
+    return (
+        len(tokens) == 1
+        and tokens[0].start == 0
+        and tokens[0].end == len(stripped)
+        and tokens[0].value == Decimal(str(value))
+    )
 
 
 def _table_result_supports_unit_and_context(
     numeric_evidence_ids: tuple[str, ...],
     evidence_refs: tuple[str, ...],
+    value: float,
     unit: str,
     grounding_by_evidence: dict,
     repositories: KnowledgeRepositories,
@@ -146,6 +220,10 @@ def _table_result_supports_unit_and_context(
     for numeric_evidence_id in numeric_evidence_ids:
         value_locator = located.get(numeric_evidence_id)
         if value_locator is None or value_locator.table_cell_id is None:
+            continue
+        if not _is_exact_numeric_value(
+            store.get_evidence(numeric_evidence_id).text, value
+        ):
             continue
         value_cell = repositories.table_cell_structures.get(
             value_locator.table_cell_id
@@ -188,17 +266,20 @@ def _result_is_explicitly_supported(
     repositories: KnowledgeRepositories,
     store: EvidenceStore,
 ) -> bool:
+    if any(
+        _has_adjacent_numeric_unit_pair(
+            store.get_evidence(evidence_id).text, value, unit
+        )
+        for evidence_id in evidence_refs
+    ):
+        return True
     numeric_evidence_ids = _matching_numeric_evidence(evidence_refs, value, store)
     if not numeric_evidence_ids:
         return False
-    if any(
-        _contains_unit(store.get_evidence(evidence_id).text, unit)
-        for evidence_id in numeric_evidence_ids
-    ):
-        return True
     return _table_result_supports_unit_and_context(
         numeric_evidence_ids,
         evidence_refs,
+        value,
         unit,
         grounding_by_evidence,
         repositories,
