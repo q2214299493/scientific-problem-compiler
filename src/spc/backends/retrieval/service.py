@@ -6,6 +6,7 @@ from pathlib import Path
 from ..contracts import (
     BackendCapability,
     BackendInputBinding,
+    BackendOutputType,
     BackendRunStatus,
     ExternalLiteratureRetrievalQuery,
     ExternalLiteratureRetrievalResult,
@@ -106,6 +107,8 @@ class ExternalLiteratureRetrievalService:
             input_bindings=input_bindings,
             config_hash=config_hash,
             output_hash=result.content_hash,
+            output_id=result.result_id,
+            output_type=BackendOutputType.EXTERNAL_LITERATURE_RETRIEVAL_RESULT,
             status=BackendRunStatus.SUCCEEDED,
             warnings=result.warnings,
             candidate_count=len(result.hits),

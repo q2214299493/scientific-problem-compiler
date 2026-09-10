@@ -437,7 +437,8 @@ License declarations and redistribution-review state are recorded in
 
 ```powershell
 spc backends
-spc backend-info docling
+spc backends --docling-artifacts-path C:\models\docling
+spc backend-info docling --docling-artifacts-path C:\models\docling
 spc inspect-backend-run backend-run-... --knowledge-dir knowledge
 
 spc structure-literature `
@@ -461,7 +462,10 @@ topology are normalized into an external proposal; proposed content regions
 remain untrusted until SPC performs exact canonical-text rebinding. The result
 is audit-only by default. `--promote-external` explicitly submits an exactly
 rebound result to the existing deterministic, anti-downgrade structure
-selection policy.
+selection policy. For HTML, external structures remain audit-only and cannot
+replace the built-in deterministic content-region authority; automatic external
+promotion is limited to PDF until a deterministic HTML reconciliation contract
+exists.
 
 K1F0.1 persists the exact `BackendDescriptor` and content-bound
 `BackendRuntimeIdentity` used for each invocation under the knowledge root. A
@@ -473,3 +477,15 @@ batches additionally bind the current accepted representation and selected
 structure; stale authority is rejected. Availability, invocation, and
 downstream normalization failures are stored as sanitized audit records without
 API keys, credentials, raw third-party payloads, or local model paths.
+
+K1F0.2 closes the remaining backend trust bindings. Resolved retrieval records
+bind the exact `EvidenceSpan` and `StructuredEvidenceLocator` hashes and reopen
+both records during batch validation. Successful or partial backend runs carry
+an explicit output type and ID, so inspection deterministically reopens and
+validates the exact document proposal, retrieval result, or metadata proposal.
+Docling compatibility matches the declared `>=2.65,<3` range. Its runtime
+identity binds deterministic installed-component versions plus a content-bound
+manifest of local model files; symlinks, escaping paths, incomplete scans, and
+changed model bytes fail closed or produce a different runtime identity. The
+configured absolute model path is operational metadata, not scientific
+identity.

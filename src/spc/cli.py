@@ -10,14 +10,12 @@ import typer
 
 from .backends import (
     BackendCapability,
-    BackendDescriptorRepository,
     BackendInvocationError,
     BackendRegistryError,
     BackendRunRecord,
-    BackendRunRepository,
     BackendRuntimeAvailability,
+    BackendRuntimeArtifactManifest,
     BackendRuntimeIdentity,
-    BackendRuntimeIdentityRepository,
     BackendUnavailableError,
     ExternalBackendDescriptor,
     ExternalDocumentElement,
@@ -34,6 +32,7 @@ from .backends import (
     ReboundDocumentElement,
     ScholarlyMetadataProposal,
     default_backend_registry,
+    validate_backend_run,
 )
 from .adapters.ft_agent import FTAgentAdapter
 from .approval import (
@@ -415,6 +414,7 @@ def structure_literature(
     backend_run_id = None
     external_proposal_id = None
     external_promotion_id = None
+    external_promotion_policy_reason = None
     registry = default_backend_registry(docling_artifacts_path=docling_artifacts_path)
     if backend == "builtin":
         adapter = registry.resolve_capability(
@@ -451,6 +451,7 @@ def structure_literature(
         backend_run_id = external.run_record.run_id
         external_proposal_id = external.proposal.proposal_id
         external_promotion_id = external.promotion.promotion_id if external.promotion is not None else None
+        external_promotion_policy_reason = external.promotion_policy_reason
     report = {
         "structure_id": result.artifact.structure_id,
         "structure_selection_id": (selection.selection_id if selection is not None else None),
@@ -459,6 +460,7 @@ def structure_literature(
         "backend_run_id": backend_run_id,
         "external_proposal_id": external_proposal_id,
         "external_promotion_id": external_promotion_id,
+        "external_promotion_policy_reason": external_promotion_policy_reason,
         "representation_id": result.artifact.representation_id,
         "pages": sum(block.block_type.value == "page" for block in result.blocks),
         "headings": sum(block.block_type.value == "heading" for block in result.blocks),
@@ -472,9 +474,14 @@ def structure_literature(
 
 
 @app.command("backends")
-def list_backends() -> None:
+def list_backends(
+    docling_artifacts_path: Annotated[
+        Path | None,
+        typer.Option("--docling-artifacts-path"),
+    ] = None,
+) -> None:
     """List registered backend adapters and current runtime availability."""
-    registry = default_backend_registry()
+    registry = default_backend_registry(docling_artifacts_path=docling_artifacts_path)
     rows = []
     for descriptor in registry.list_descriptors():
         availability = registry.inspect_runtime(descriptor.backend_id)
@@ -495,9 +502,13 @@ def list_backends() -> None:
 @app.command("backend-info")
 def backend_info(
     backend_id: Annotated[str, typer.Argument()],
+    docling_artifacts_path: Annotated[
+        Path | None,
+        typer.Option("--docling-artifacts-path"),
+    ] = None,
 ) -> None:
     """Inspect one backend descriptor without importing optional engines."""
-    registry = default_backend_registry()
+    registry = default_backend_registry(docling_artifacts_path=docling_artifacts_path)
     try:
         backend = registry.resolve(backend_id)
     except BackendRegistryError as error:
@@ -521,15 +532,20 @@ def inspect_backend_run(
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
 ) -> None:
     """Inspect immutable backend invocation provenance."""
-    record = BackendRunRepository(knowledge_dir).get(run_id)
-    descriptor = BackendDescriptorRepository(knowledge_dir).get(record.backend_descriptor_hash)
-    runtime = BackendRuntimeIdentityRepository(knowledge_dir).get(record.runtime_identity_id)
+    validated = validate_backend_run(run_id, knowledge_dir)
+    output = validated.output
     typer.echo(
         json.dumps(
             {
-                "run": record.model_dump(mode="json"),
-                "descriptor": descriptor.model_dump(mode="json"),
-                "runtime_identity": runtime.model_dump(mode="json"),
+                "run": validated.run.model_dump(mode="json"),
+                "descriptor": validated.descriptor.model_dump(mode="json"),
+                "runtime_identity": validated.runtime_identity.model_dump(mode="json"),
+                "runtime_artifact_manifest": (
+                    validated.runtime_artifact_manifest.model_dump(mode="json")
+                    if validated.runtime_artifact_manifest is not None
+                    else None
+                ),
+                "output": output.model_dump(mode="json") if output is not None else None,
             },
             indent=2,
             ensure_ascii=False,
@@ -1047,6 +1063,7 @@ def schema_command(
     models = (
         ExternalBackendDescriptor,
         BackendRuntimeAvailability,
+        BackendRuntimeArtifactManifest,
         BackendRuntimeIdentity,
         ExternalDocumentParseInput,
         ExternalDocumentElement,

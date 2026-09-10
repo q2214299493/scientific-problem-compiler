@@ -9,6 +9,7 @@ description = "Evidence-grounded scientific question planning without executing 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "packaging>=24,<27",
   "pydantic>=2.12,<3",
   "pypdf>=6,<7",
   "PyYAML>=6,<7",

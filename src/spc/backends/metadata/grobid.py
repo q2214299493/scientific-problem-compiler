@@ -9,6 +9,7 @@ from ..contracts import (
     BackendCapability,
     BackendIntegrationMode,
     BackendLicenseStatus,
+    BackendOutputType,
     BackendInputBinding,
     BackendRunStatus,
     BackendRuntimeAvailability,
@@ -223,6 +224,8 @@ class ScholarlyMetadataService:
             input_bindings=inputs,
             config_hash=config_hash,
             output_hash=proposal.content_hash,
+            output_id=proposal.proposal_id,
+            output_type=BackendOutputType.SCHOLARLY_METADATA_PROPOSAL,
             status=BackendRunStatus.SUCCEEDED,
             output_count=1,
         )

@@ -15,7 +15,11 @@ from ...knowledge.ingestion import (
     LiteratureRepresentationSelector,
     create_evidence_span_from_canonical_text,
 )
-from ...knowledge.structure import _create_locator, validate_document_structure
+from ...knowledge.structure import (
+    _create_locator,
+    validate_document_structure,
+    verify_structured_evidence_locator,
+)
 from ...knowledge.structure_selection import resolve_current_structure_selection
 from ...knowledge.trust import TrustedKnowledgeValidator
 from ...models import CurationStatus, DocumentBlockType
@@ -40,7 +44,9 @@ def _resolution(
     representation_id: str | None = None,
     structure_id: str | None = None,
     evidence_id: str | None = None,
+    evidence_hash: str | None = None,
     locator_id: str | None = None,
+    locator_hash: str | None = None,
     reason: str | None = None,
 ) -> ExternalRetrievalResolution:
     identity = {
@@ -50,7 +56,9 @@ def _resolution(
         "representation_id": representation_id,
         "structure_id": structure_id,
         "evidence_id": evidence_id,
+        "evidence_hash": evidence_hash,
         "locator_id": locator_id,
+        "locator_hash": locator_hash,
         "reason": reason,
     }
     identity = {key: value for key, value in identity.items() if value is not None}
@@ -68,7 +76,7 @@ def _unresolved(hit: ExternalLiteratureRetrievalHit, reason: str) -> ExternalRet
 
 class ExternalRetrievalEvidenceResolver:
     resolver_id = "spc-external-retrieval-evidence-resolver"
-    resolver_version = "1.1.0"
+    resolver_version = "1.2.0"
 
     def resolve(
         self,
@@ -190,7 +198,9 @@ class ExternalRetrievalEvidenceResolver:
             representation_id=representation.representation_id,
             structure_id=structure.structure_id,
             evidence_id=evidence.evidence_id,
+            evidence_hash=content_hash(evidence),
             locator_id=locator.locator_id,
+            locator_hash=locator.content_hash,
         )
 
     def resolve_batch(
@@ -281,6 +291,20 @@ def validate_resolution_batch_current(
             or resolution.structure_id != authority.structure_id
         ):
             raise ValueError("retrieval resolution batch authority coverage is invalid")
+        evidence = store.get_evidence(resolution.evidence_id or "")
+        store.verify_evidence_integrity(evidence)
+        if content_hash(evidence) != resolution.evidence_hash:
+            raise ValueError("retrieval resolution batch evidence hash is invalid")
+        locator = repositories.structured_evidence_locators.get(resolution.locator_id or "")
+        verify_structured_evidence_locator(locator, repositories, store)
+        if locator.content_hash != resolution.locator_hash:
+            raise ValueError("retrieval resolution batch locator hash is invalid")
+        if (
+            locator.evidence_id != evidence.evidence_id
+            or locator.representation_id != resolution.representation_id
+            or locator.structure_id != resolution.structure_id
+        ):
+            raise ValueError("retrieval resolution batch locator binding is invalid")
         resolved_literature_ids.add(resolution.literature_id)
     if resolved_literature_ids != set(authority_by_literature):
         raise ValueError("retrieval resolution batch has unused authority bindings")

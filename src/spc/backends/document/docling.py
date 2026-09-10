@@ -4,6 +4,8 @@ from importlib import metadata, util
 from pathlib import Path
 from typing import Any, Iterable
 
+from packaging.version import InvalidVersion, Version
+
 from ..builders import (
     build_external_document_element,
     build_external_document_parse_proposal,
@@ -21,12 +23,16 @@ from ..contracts import (
     ExternalDocumentParseProposal,
     ExternalProposalStatus,
 )
-from ..provenance import build_backend_runtime_identity
+from ..provenance import (
+    build_backend_runtime_artifact_manifest,
+    build_backend_runtime_identity,
+)
 from ...models import DocumentContentRegion
 from ...serialization import content_hash, file_sha256
 
 
 SUPPORTED_DOCLING_MAJOR = 2
+SUPPORTED_DOCLING_MIN_MINOR = 65
 
 
 def _descriptor() -> ExternalBackendDescriptor:
@@ -52,9 +58,16 @@ def _descriptor() -> ExternalBackendDescriptor:
 
 def _version_is_supported(version: str) -> bool:
     try:
-        return int(version.split(".", 1)[0]) == SUPPORTED_DOCLING_MAJOR
-    except ValueError:
+        parsed = Version(version)
+    except InvalidVersion:
         return False
+    return (
+        not parsed.is_prerelease
+        and not parsed.is_devrelease
+        and Version(f"{SUPPORTED_DOCLING_MAJOR}.{SUPPORTED_DOCLING_MIN_MINOR}")
+        <= parsed
+        < Version(str(SUPPORTED_DOCLING_MAJOR + 1))
+    )
 
 
 def _value(value: object) -> str:
@@ -306,6 +319,28 @@ class DoclingDocumentParsingBackend:
         ):
             return None
 
+    def _installed_component_versions(self) -> dict[str, str]:
+        components = {"docling": self._installed_version()}
+        for distribution in ("docling-core", "docling-parse"):
+            try:
+                components[distribution] = metadata.version(distribution)
+            except (metadata.PackageNotFoundError, ValueError):
+                continue
+        return {
+            component: version
+            for component, version in components.items()
+            if version is not None
+        }
+
+    def build_runtime_artifact_manifest(self):
+        if self.artifacts_path is None:
+            raise ValueError("an explicit local Docling artifacts path is required")
+        return build_backend_runtime_artifact_manifest(
+            self.artifacts_path,
+            backend_id=self.descriptor.backend_id,
+            artifact_role="docling-model-artifacts",
+        )
+
     def inspect_availability(self) -> BackendRuntimeAvailability:
         version = self._installed_version()
         if version is None:
@@ -319,7 +354,7 @@ class DoclingDocumentParsingBackend:
                 backend_id=self.descriptor.backend_id,
                 available=False,
                 detected_version=version,
-                reason=(f"Docling major version {version} is outside the tested 2.x API range"),
+                reason=(f"Docling version {version} is outside the supported >=2.65,<3 range"),
             )
         if self.artifacts_path is None:
             return BackendRuntimeAvailability(
@@ -339,6 +374,15 @@ class DoclingDocumentParsingBackend:
                 detected_version=version,
                 reason=("the configured Docling artifacts path is not a regular absolute directory"),
             )
+        try:
+            self.build_runtime_artifact_manifest()
+        except (OSError, ValueError):
+            return BackendRuntimeAvailability(
+                backend_id=self.descriptor.backend_id,
+                available=False,
+                detected_version=version,
+                reason="the configured Docling artifact tree failed integrity inspection",
+            )
         return BackendRuntimeAvailability(
             backend_id=self.descriptor.backend_id,
             available=True,
@@ -349,11 +393,22 @@ class DoclingDocumentParsingBackend:
         availability = self.inspect_availability()
         if not availability.available or availability.detected_version is None:
             raise RuntimeError(availability.reason or "Docling runtime is unavailable")
+        manifest = self.build_runtime_artifact_manifest()
+        components = self._installed_component_versions()
+        components["docling"] = availability.detected_version
         return build_backend_runtime_identity(
             self.descriptor,
             resolved_backend_version=availability.detected_version,
             runtime_provider="python-package:docling",
-            runtime_config_hash=content_hash({"offline_artifacts_path": str(self.artifacts_path.resolve())}),
+            runtime_config_hash=content_hash(
+                {
+                    "offline_artifact_manifest_hash": manifest.content_hash,
+                    "enable_remote_services": False,
+                    "allow_external_plugins": False,
+                }
+            ),
+            runtime_components=components,
+            runtime_artifact_manifest_hash=manifest.content_hash,
         )
 
     def _convert_document(self, path: Path) -> object:

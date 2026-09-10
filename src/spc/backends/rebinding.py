@@ -8,6 +8,7 @@ import unicodedata
 from .contracts import (
     BackendCapability,
     BackendInputBinding,
+    BackendOutputType,
     BackendRunStatus,
     DocumentParsingBackend,
     ExternalBindingStatus,
@@ -26,6 +27,7 @@ from .provenance import (
     BackendRunRepository,
     create_backend_run_record,
     probe_backend_runtime,
+    validate_backend_run,
 )
 from ..knowledge.acquisition import validate_literature_representation
 from ..knowledge.structure import (
@@ -33,12 +35,16 @@ from ..knowledge.structure import (
     DocumentStructureInput,
     DocumentStructureService,
     ExtractedDocumentStructure,
+    validate_document_structure,
     _make_block,
     _make_cell,
     _make_figure,
     _make_table,
 )
-from ..knowledge.structure_selection import DocumentStructureSelector
+from ..knowledge.structure_selection import (
+    DocumentStructureSelector,
+    validate_structure_selection,
+)
 from ..models import (
     CanonicalHTMLTextArtifact,
     CanonicalTextArtifact,
@@ -85,12 +91,12 @@ class ExternalStructurePromotionRepository(IdentityBoundRepository[ExternalStruc
 
     def get(self, key: str) -> ExternalStructurePromotionRecord:
         record = super().get(key)
-        run = BackendRunRepository(self.knowledge_root).get(record.backend_run_id)
+        run = validate_backend_run(record.backend_run_id, self.knowledge_root).run
         proposal = ExternalDocumentProposalRepository(self.knowledge_root).get(record.proposal_id)
         rebinding = ExternalStructureRebindingRepository(self.knowledge_root).get(record.rebinding_id)
         repositories = KnowledgeRepositories(self.knowledge_root)
-        structure = repositories.document_structure_artifacts.get(record.structure_id)
-        selection = repositories.document_structure_selections.get(record.selection_id)
+        structure = validate_document_structure(record.structure_id, repositories)
+        selection = validate_structure_selection(record.selection_id, repositories)
         actual = (
             run.content_hash,
             proposal.content_hash,
@@ -467,6 +473,7 @@ class ExternalDocumentStructureOutcome:
     run_record: BackendRunRecord
     selection: DocumentStructureSelection | None
     promotion: ExternalStructurePromotionRecord | None
+    promotion_policy_reason: str | None
 
 
 class ExternalDocumentStructureService:
@@ -587,6 +594,8 @@ class ExternalDocumentStructureService:
                 input_bindings=input_bindings,
                 config_hash=config_hash,
                 output_hash=proposal.content_hash,
+                output_id=proposal.proposal_id,
+                output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
                 status=BackendRunStatus.FAILED,
                 warnings=("spc_exact_rebinding_or_structure_validation_failed",),
                 output_count=len(proposal.elements),
@@ -605,6 +614,8 @@ class ExternalDocumentStructureService:
             input_bindings=input_bindings,
             config_hash=config_hash,
             output_hash=proposal.content_hash,
+            output_id=proposal.proposal_id,
+            output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
             status=run_status,
             warnings=proposal.warnings,
             output_count=len(proposal.elements),
@@ -614,44 +625,56 @@ class ExternalDocumentStructureService:
         run_repository.put(run.run_id, run)
         selection = None
         promotion = None
+        promotion_policy_reason = None
         if promote:
-            selected = DocumentStructureSelector().consider_auto_promotion(
-                literature_id,
-                representation_id,
-                structure.artifact.structure_id,
-                repositories,
-                store,
-                rationale="external_exact_rebinding_promotion",
-            )
-            if (
-                selected is not None
-                and selected.structure_id == structure.artifact.structure_id
-                and selected.structure_hash == structure.artifact.content_hash
-            ):
-                selection = selected
-                promotion_identity = {
-                    "backend_run_id": run.run_id,
-                    "backend_run_hash": run.content_hash,
-                    "proposal_id": proposal.proposal_id,
-                    "proposal_hash": proposal.content_hash,
-                    "rebinding_id": rebinding.rebinding_id,
-                    "rebinding_hash": rebinding.content_hash,
-                    "structure_id": structure.artifact.structure_id,
-                    "structure_hash": structure.artifact.content_hash,
-                    "selection_id": selection.selection_id,
-                    "selection_hash": selection.content_hash,
-                    "promotion_policy": "external_exact_rebinding_promotion",
-                }
-                promotion_id = f"external-structure-promotion-{content_hash(promotion_identity)[:24]}"
-                promotion_payload = {
-                    "promotion_id": promotion_id,
-                    **promotion_identity,
-                }
-                promotion = ExternalStructurePromotionRecord(
-                    **promotion_payload,
-                    content_hash=content_hash(promotion_payload),
+            if representation.representation_kind == LiteratureRepresentationKind.HTML:
+                promotion_policy_reason = (
+                    "external_html_promotion_requires_deterministic_content_region_reconciliation"
                 )
-                ExternalStructurePromotionRepository(repositories.root).put(promotion.promotion_id, promotion)
+            else:
+                selected = DocumentStructureSelector().consider_auto_promotion(
+                    literature_id,
+                    representation_id,
+                    structure.artifact.structure_id,
+                    repositories,
+                    store,
+                    rationale="external_exact_rebinding_promotion",
+                )
+                if (
+                    selected is not None
+                    and selected.structure_id == structure.artifact.structure_id
+                    and selected.structure_hash == structure.artifact.content_hash
+                ):
+                    selection = selected
+                    promotion_identity = {
+                        "backend_run_id": run.run_id,
+                        "backend_run_hash": run.content_hash,
+                        "proposal_id": proposal.proposal_id,
+                        "proposal_hash": proposal.content_hash,
+                        "rebinding_id": rebinding.rebinding_id,
+                        "rebinding_hash": rebinding.content_hash,
+                        "structure_id": structure.artifact.structure_id,
+                        "structure_hash": structure.artifact.content_hash,
+                        "selection_id": selection.selection_id,
+                        "selection_hash": selection.content_hash,
+                        "promotion_policy": "external_exact_rebinding_promotion",
+                    }
+                    promotion_id = f"external-structure-promotion-{content_hash(promotion_identity)[:24]}"
+                    promotion_payload = {
+                        "promotion_id": promotion_id,
+                        **promotion_identity,
+                    }
+                    promotion = ExternalStructurePromotionRecord(
+                        **promotion_payload,
+                        content_hash=content_hash(promotion_payload),
+                    )
+                    ExternalStructurePromotionRepository(repositories.root).put(
+                        promotion.promotion_id, promotion
+                    )
+                else:
+                    promotion_policy_reason = (
+                        "external_structure_promotion_declined_by_anti_downgrade_policy"
+                    )
         return ExternalDocumentStructureOutcome(
             proposal=proposal,
             rebinding=rebinding,
@@ -659,4 +682,5 @@ class ExternalDocumentStructureService:
             run_record=run,
             selection=selection,
             promotion=promotion,
+            promotion_policy_reason=promotion_policy_reason,
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, Mapping, Protocol
 
 from pydantic import Field, model_validator
@@ -96,6 +97,12 @@ class BackendRunStatus(StrEnum):
     FAILED = "failed"
 
 
+class BackendOutputType(StrEnum):
+    EXTERNAL_DOCUMENT_PARSE_PROPOSAL = "external_document_parse_proposal"
+    EXTERNAL_LITERATURE_RETRIEVAL_RESULT = "external_literature_retrieval_result"
+    SCHOLARLY_METADATA_PROPOSAL = "scholarly_metadata_proposal"
+
+
 class ExternalBackendDescriptor(StrictModel):
     backend_id: NonBlankStr
     backend_name: NonBlankStr
@@ -129,6 +136,59 @@ class ExternalBackendDescriptor(StrictModel):
         return self
 
 
+class BackendRuntimeArtifactEntry(StrictModel):
+    relative_path: NonBlankStr
+    file_sha256: Sha256Str
+    file_size: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_path(self) -> BackendRuntimeArtifactEntry:
+        path = PurePosixPath(self.relative_path)
+        if (
+            "\\" in self.relative_path
+            or path.is_absolute()
+            or self.relative_path != path.as_posix()
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("runtime artifact relative_path is unsafe")
+        return self
+
+
+class BackendRuntimeArtifactManifest(StrictModel):
+    manifest_id: NonBlankStr
+    backend_id: NonBlankStr
+    artifact_role: NonBlankStr
+    root_identity: NonBlankStr
+    entries: tuple[BackendRuntimeArtifactEntry, ...]
+    aggregate_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> BackendRuntimeArtifactManifest:
+        paths = tuple(item.relative_path for item in self.entries)
+        if paths != tuple(sorted(set(paths))):
+            raise ValueError("runtime artifact entries must be unique and sorted")
+        entry_payload = [item.model_dump(mode="json") for item in self.entries]
+        if self.aggregate_hash != content_hash(entry_payload):
+            raise ValueError("runtime artifact aggregate_hash is invalid")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"manifest_id", "content_hash"},
+        )
+        expected_id = f"backend-runtime-artifacts-{content_hash(identity)[:24]}"
+        if self.manifest_id != expected_id:
+            raise ValueError("BackendRuntimeArtifactManifest ID is not content-bound")
+        payload = {"manifest_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("BackendRuntimeArtifactManifest content_hash is invalid")
+        return self
+
+
+class BackendRuntimeComponentVersion(StrictModel):
+    component: NonBlankStr
+    version: NonBlankStr
+
+
 class BackendRuntimeIdentity(StrictModel):
     runtime_identity_id: NonBlankStr
     backend_id: NonBlankStr
@@ -138,13 +198,23 @@ class BackendRuntimeIdentity(StrictModel):
     integration_mode: BackendIntegrationMode
     runtime_provider: NonBlankStr
     runtime_config_hash: Sha256Str
+    runtime_components: tuple[BackendRuntimeComponentVersion, ...] = ()
+    runtime_components_hash: Sha256Str = content_hash([])
+    runtime_artifact_manifest_hash: Sha256Str | None = None
     content_hash: Sha256Str
 
     @model_validator(mode="after")
     def validate_identity(self) -> BackendRuntimeIdentity:
+        component_names = tuple(item.component for item in self.runtime_components)
+        if component_names != tuple(sorted(set(component_names))):
+            raise ValueError("backend runtime components must be unique and sorted")
+        component_payload = [item.model_dump(mode="json") for item in self.runtime_components]
+        if self.runtime_components_hash != content_hash(component_payload):
+            raise ValueError("backend runtime component hash is invalid")
         identity = self.model_dump(
             mode="json",
             exclude={"runtime_identity_id", "content_hash"},
+            exclude_none=True,
         )
         expected_id = f"backend-runtime-{content_hash(identity)[:24]}"
         if self.runtime_identity_id != expected_id:
@@ -436,7 +506,9 @@ class ExternalRetrievalResolution(StrictModel):
     representation_id: NonBlankStr | None = None
     structure_id: NonBlankStr | None = None
     evidence_id: NonBlankStr | None = None
+    evidence_hash: Sha256Str | None = None
     locator_id: NonBlankStr | None = None
+    locator_hash: Sha256Str | None = None
     reason: NonBlankStr | None = None
     content_hash: Sha256Str
 
@@ -447,7 +519,9 @@ class ExternalRetrievalResolution(StrictModel):
             self.representation_id,
             self.structure_id,
             self.evidence_id,
+            self.evidence_hash,
             self.locator_id,
+            self.locator_hash,
         )
         if self.resolved:
             if any(value is None for value in bindings) or self.reason is not None:
@@ -556,6 +630,8 @@ class BackendRunRecord(StrictModel):
     capability: BackendCapability
     input_bindings: tuple[BackendInputBinding, ...]
     config_hash: Sha256Str
+    output_id: NonBlankStr | None = None
+    output_type: BackendOutputType | None = None
     output_hash: Sha256Str | None = None
     status: BackendRunStatus
     warnings: tuple[NonBlankStr, ...] = ()
@@ -574,8 +650,12 @@ class BackendRunRecord(StrictModel):
         if input_ids != tuple(sorted(input_ids)):
             raise ValueError("backend run inputs must be deterministically sorted")
         if self.status in {BackendRunStatus.SUCCEEDED, BackendRunStatus.PARTIAL}:
-            if self.output_hash is None:
-                raise ValueError("successful backend run requires output_hash")
+            if any(value is None for value in (self.output_id, self.output_type, self.output_hash)):
+                raise ValueError("successful backend run requires complete output identity")
+        elif any(value is not None for value in (self.output_id, self.output_type, self.output_hash)) and not all(
+            value is not None for value in (self.output_id, self.output_type, self.output_hash)
+        ):
+            raise ValueError("backend run output identity must be complete")
         identity = self.model_dump(mode="json", exclude={"run_id", "content_hash"}, exclude_none=True)
         expected_id = f"backend-run-{content_hash(identity)[:24]}"
         if self.run_id != expected_id:

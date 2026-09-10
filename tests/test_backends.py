@@ -15,11 +15,13 @@ from spc.backends import (
     BackendDescriptorRepository,
     BackendInvocationError,
     BackendInputBinding,
+    BackendOutputType,
     BackendRegistry,
     BackendRegistryError,
     BackendRunRepository,
     BackendRunStatus,
     BackendRuntimeAvailability,
+    BackendRuntimeArtifactManifestRepository,
     BackendRuntimeIdentityRepository,
     BackendUnavailableError,
     DoclingDocumentParsingBackend,
@@ -34,6 +36,7 @@ from spc.backends import (
     ExternalStructureRebindingRepository,
     GROBIDScholarlyMetadataBackend,
     ScholarlyMetadataService,
+    build_backend_runtime_artifact_manifest,
     build_external_document_element,
     build_external_document_parse_proposal,
     build_external_retrieval_hit,
@@ -41,6 +44,7 @@ from spc.backends import (
     create_backend_run_record,
     default_backend_registry,
     load_backend_license_manifest,
+    validate_backend_run,
 )
 from spc.backends.provenance import persist_backend_identity
 from spc.backends.contracts import (
@@ -48,6 +52,8 @@ from spc.backends.contracts import (
     BackendLicenseStatus,
     ExternalDocumentParseInput,
     ExternalLiteratureRetrievalQuery,
+    ExternalRetrievalResolution,
+    ExternalRetrievalResolutionBatch,
 )
 from spc.backends.retrieval import (
     ExternalRetrievalEvidenceResolver,
@@ -62,7 +68,11 @@ from spc.knowledge.acquisition import (
     LiteratureAcquisitionService,
     SafeHTTPFetcher,
 )
-from spc.knowledge.ingestion import LiteratureRepresentationSelector
+from spc.knowledge.ingestion import (
+    LiteratureIngestionService,
+    LiteratureRepresentationSelector,
+    PypdfLiteratureTextExtractor,
+)
 from spc.knowledge.structure import (
     DocumentStructureService,
     validate_document_structure,
@@ -74,6 +84,7 @@ from spc.serialization import content_hash, file_sha256
 
 
 ARTICLE_URL = "https://journal.example/backend-paper"
+PDF = Path(__file__).parent / "fixtures" / "generic-born-digital.pdf"
 HTML = b"""<html><head>
 <meta name="citation_title" content="Backend Boundary Paper">
 <meta name="citation_author" content="A. Author">
@@ -84,6 +95,7 @@ HTML = b"""<html><head>
 <p>Repeated passage.</p><p>Repeated passage.</p>
 <table><caption>Table 1 Values</caption><tr><td>Unique cell value</td></tr></table>
 <figure><figcaption>Figure 1 unique caption.</figcaption></figure>
+<nav><p>Navigation-only statement.</p></nav>
 <div class="references"><p>Reference-only statement.</p></div>
 </article></body></html>"""
 
@@ -153,7 +165,6 @@ class FakeDocumentBackend:
             available=True,
             detected_version=self.descriptor.backend_version,
         )
-
     def resolve_runtime_identity(self):
         return runtime_identity(self.descriptor)
 
@@ -216,6 +227,24 @@ class FakeDocumentBackend:
         )
 
 
+class FakePDFDocumentBackend(FakeDocumentBackend):
+    def parse(self, request: ExternalDocumentParseInput):
+        elements = (
+            build_external_document_element(
+                kind=ExternalDocumentElementKind.PARAGRAPH,
+                text="Generic pathway evidence on page one.",
+                reading_order=0,
+            ),
+        )
+        return build_external_document_parse_proposal(
+            descriptor=self.descriptor,
+            runtime_identity=self.resolve_runtime_identity(),
+            request=request,
+            elements=elements,
+            status=ExternalProposalStatus.COMPLETE,
+        )
+
+
 class MalformedDocumentBackend(FakeDocumentBackend):
     def parse(self, request: ExternalDocumentParseInput):
         return {"backend_id": self.descriptor.backend_id, "untrusted": "not a proposal"}
@@ -258,6 +287,37 @@ def setup_literature(tmp_path: Path):
     return repositories, store, outcome
 
 
+def setup_pdf_literature(tmp_path: Path):
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = KnowledgeEvidenceStore(tmp_path / "knowledge")
+    outcome = LiteratureIngestionService(PypdfLiteratureTextExtractor()).ingest(
+        PDF,
+        {
+            "title": "Backend PDF Fixture",
+            "authors": ["A. Author"],
+            "year": 2026,
+            "doi": "10.0000/backend.pdf",
+            "domain": "base",
+        },
+        repositories,
+        store,
+    )
+    representation = LiteratureRepresentationSelector.resolve_reference(
+        outcome.ingestion_id,
+        repositories,
+        store,
+    )
+    LiteratureRepresentationSelector().select(
+        outcome.literature_id,
+        representation.representation_id,
+        "backend-test",
+        "Select exact PDF representation.",
+        repositories,
+        store,
+    )
+    return repositories, store, outcome, representation
+
+
 def accept(
     repositories: KnowledgeRepositories,
     target_type: str,
@@ -278,6 +338,81 @@ def accept(
     record = KnowledgeCurationRecord(**payload, content_hash=content_hash(payload))
     repositories.curations.put(record.curation_id, record)
     return record
+
+
+def setup_resolution_batch(tmp_path: Path):
+    repositories, store, outcome = setup_literature(tmp_path)
+    structure = DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+    )
+    document = repositories.literature_documents.get(outcome.literature_id or "")
+    representation_selection = repositories.literature_representation_selections.resolve_current(
+        document.literature_id
+    )
+    accept(repositories, "literature_document", document.literature_id, document.content_hash)
+    accept(
+        repositories,
+        "literature_representation_selection",
+        representation_selection.selection_id,
+        representation_selection.content_hash,
+    )
+    backend = PaperQALiteratureRetrievalBackend(
+        lambda _query: (
+            {
+                "doi": document.doi,
+                "text_snippet": "Unique scientific paragraph.",
+            },
+        ),
+        runner_id="paperqa-binding-test",
+        runner_version="1.0.0",
+    )
+    retrieval = ExternalLiteratureRetrievalService().retrieve(
+        backend,
+        ExternalLiteratureRetrievalQuery(query="Find exact evidence"),
+        repositories.root,
+    )
+    batch = ExternalRetrievalEvidenceResolver().resolve_batch(
+        retrieval.result,
+        repositories,
+        store,
+    )
+    resolution = batch.resolutions[0]
+    assert resolution.resolved
+    return repositories, store, outcome, structure, retrieval, batch, resolution
+
+
+def rebuild_resolution(
+    resolution: ExternalRetrievalResolution,
+    **changes: object,
+) -> ExternalRetrievalResolution:
+    identity = resolution.model_dump(
+        mode="json",
+        exclude={"resolution_id", "content_hash"},
+        exclude_none=True,
+    )
+    identity.update(changes)
+    resolution_id = f"external-retrieval-resolution-{content_hash(identity)[:24]}"
+    payload = {"resolution_id": resolution_id, **identity}
+    return ExternalRetrievalResolution(**payload, content_hash=content_hash(payload))
+
+
+def rebuild_batch(
+    batch: ExternalRetrievalResolutionBatch,
+    resolutions: tuple[ExternalRetrievalResolution, ...],
+) -> ExternalRetrievalResolutionBatch:
+    identity = batch.model_dump(
+        mode="json",
+        exclude={"batch_id", "content_hash"},
+    )
+    identity["resolutions"] = [item.model_dump(mode="json") for item in resolutions]
+    identity["resolved_count"] = sum(item.resolved for item in resolutions)
+    identity["unresolved_count"] = len(resolutions) - identity["resolved_count"]
+    batch_id = f"external-retrieval-resolution-batch-{content_hash(identity)[:24]}"
+    payload = {"batch_id": batch_id, **identity}
+    return ExternalRetrievalResolutionBatch(**payload, content_hash=content_hash(payload))
 
 
 def test_base_import_registry_and_license_manifest_are_optional_safe() -> None:
@@ -366,6 +501,10 @@ def test_external_document_backend_materializes_valid_audit_structure(
         ExternalStructureRebindingRepository(repositories.root).get(external.rebinding.rebinding_id)
         == external.rebinding
     )
+    validated = validate_backend_run(external.run_record.run_id, repositories.root)
+    assert validated.output == external.proposal
+    assert validated.run.output_type == BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL
+    assert validated.run.output_id == external.proposal.proposal_id
 
 
 def test_malformed_external_document_output_fails_with_audit_record(tmp_path: Path) -> None:
@@ -430,6 +569,10 @@ def test_retrieval_service_persists_result_and_backend_run(tmp_path: Path) -> No
     assert outcome.run_record.resolved_count == 0
     assert outcome.result.runtime_identity_hash == outcome.run_record.runtime_identity_hash
     assert BackendRunRepository(tmp_path / "knowledge").get(outcome.run_record.run_id) == outcome.run_record
+    validated = validate_backend_run(outcome.run_record.run_id, tmp_path / "knowledge")
+    assert validated.output == outcome.result
+    assert validated.run.output_type == BackendOutputType.EXTERNAL_LITERATURE_RETRIEVAL_RESULT
+    assert validated.run.output_id == outcome.result.result_id
 
 
 def test_grobid_metadata_remains_untrusted_and_run_bound(tmp_path: Path) -> None:
@@ -458,6 +601,10 @@ def test_grobid_metadata_remains_untrusted_and_run_bound(tmp_path: Path) -> None
     assert outcome.proposal.runtime_identity_hash == outcome.run_record.runtime_identity_hash
     assert outcome.run_record.output_hash == outcome.proposal.content_hash
     assert KnowledgeRepositories(tmp_path / "knowledge").literature_documents.list() == ()
+    validated = validate_backend_run(outcome.run_record.run_id, tmp_path / "knowledge")
+    assert validated.output == outcome.proposal
+    assert validated.run.output_type == BackendOutputType.SCHOLARLY_METADATA_PROPOSAL
+    assert validated.run.output_id == outcome.proposal.proposal_id
 
 
 def test_retrieval_hit_rebinds_only_to_current_accepted_spc_evidence(
@@ -631,6 +778,8 @@ def test_backend_run_provenance_is_content_bound_secret_free_and_tamper_evident(
         capability=BackendCapability.DOCUMENT_PARSING,
         input_bindings=bindings,
         config_hash=content_hash({"api_key": "not-persisted"}),
+        output_id="proposal-1",
+        output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
         output_hash="2" * 64,
         status=BackendRunStatus.SUCCEEDED,
         resolved_count=1,
@@ -641,6 +790,8 @@ def test_backend_run_provenance_is_content_bound_secret_free_and_tamper_evident(
         capability=BackendCapability.DOCUMENT_PARSING,
         input_bindings=bindings,
         config_hash=content_hash({"mode": "other"}),
+        output_id="proposal-1",
+        output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
         output_hash="2" * 64,
         status=BackendRunStatus.SUCCEEDED,
         resolved_count=1,
@@ -652,6 +803,8 @@ def test_backend_run_provenance_is_content_bound_secret_free_and_tamper_evident(
         capability=BackendCapability.DOCUMENT_PARSING,
         input_bindings=bindings,
         config_hash=first.config_hash,
+        output_id="proposal-1",
+        output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
         output_hash="2" * 64,
         status=BackendRunStatus.SUCCEEDED,
         resolved_count=1,
@@ -687,30 +840,77 @@ def test_backend_cli_lists_and_inspects_run(tmp_path: Path) -> None:
     rows = json.loads(command.output)
     assert any(item["backend_id"] == "builtin-document-parser" for item in rows)
 
-    record_descriptor = descriptor()
-    record_runtime = runtime_identity(record_descriptor)
-    persist_backend_identity(tmp_path / "knowledge", record_descriptor, record_runtime)
-    run = create_backend_run_record(
-        descriptor=record_descriptor,
-        runtime_identity=record_runtime,
-        capability=BackendCapability.DOCUMENT_PARSING,
-        input_bindings=(BackendInputBinding(input_id="artifact-cli", input_hash="4" * 64),),
-        config_hash="5" * 64,
-        output_hash="6" * 64,
-        status=BackendRunStatus.SUCCEEDED,
+    repositories, store, outcome = setup_literature(tmp_path)
+    external = ExternalDocumentStructureService().structure(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        FakeDocumentBackend(),
+        repositories,
+        store,
     )
-    BackendRunRepository(tmp_path / "knowledge").put(run.run_id, run)
+    run = external.run_record
     inspected = CliRunner().invoke(
         app,
         [
             "inspect-backend-run",
             run.run_id,
             "--knowledge-dir",
-            str(tmp_path / "knowledge"),
+            str(repositories.root),
         ],
     )
     assert inspected.exit_code == 0, inspected.output
-    assert json.loads(inspected.output)["run"]["run_id"] == run.run_id
+    inspection = json.loads(inspected.output)
+    assert inspection["run"]["run_id"] == run.run_id
+    assert inspection["output"]["proposal_id"] == external.proposal.proposal_id
+
+
+@pytest.mark.parametrize("mutation", ("delete", "tamper"))
+def test_backend_run_validation_fails_for_missing_or_tampered_output(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repositories, store, outcome = setup_literature(tmp_path)
+    external = ExternalDocumentStructureService().structure(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        FakeDocumentBackend(),
+        repositories,
+        store,
+    )
+    repository = ExternalDocumentProposalRepository(repositories.root)
+    path = repository.root / f"{external.proposal.proposal_id}.json"
+    if mutation == "delete":
+        path.unlink()
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["warnings"] = ["tampered output"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        validate_backend_run(external.run_record.run_id, repositories.root)
+
+
+@pytest.mark.parametrize("field", ("runtime_identity_hash", "backend_descriptor_hash"))
+def test_backend_run_validation_fails_for_runtime_or_descriptor_hash_mismatch(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    repositories, store, outcome = setup_literature(tmp_path)
+    external = ExternalDocumentStructureService().structure(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        FakeDocumentBackend(),
+        repositories,
+        store,
+    )
+    repository = BackendRunRepository(repositories.root)
+    path = repository.root / f"{external.run_record.run_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[field] = "f" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        validate_backend_run(external.run_record.run_id, repositories.root)
 
 
 def test_runtime_versions_change_docling_and_paperqa_provenance(
@@ -730,6 +930,8 @@ def test_runtime_versions_change_docling_and_paperqa_provenance(
         capability=BackendCapability.DOCUMENT_PARSING,
         input_bindings=(),
         config_hash=content_hash({}),
+        output_id="docling-proposal",
+        output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
         output_hash=content_hash({"output": "docling"}),
         status=BackendRunStatus.SUCCEEDED,
     )
@@ -739,6 +941,8 @@ def test_runtime_versions_change_docling_and_paperqa_provenance(
         capability=BackendCapability.DOCUMENT_PARSING,
         input_bindings=(),
         config_hash=content_hash({}),
+        output_id="docling-proposal",
+        output_type=BackendOutputType.EXTERNAL_DOCUMENT_PARSE_PROPOSAL,
         output_hash=content_hash({"output": "docling"}),
         status=BackendRunStatus.SUCCEEDED,
     )
@@ -768,6 +972,8 @@ def test_runtime_versions_change_docling_and_paperqa_provenance(
         capability=BackendCapability.LITERATURE_RETRIEVAL,
         input_bindings=(),
         config_hash=content_hash({}),
+        output_id="paperqa-result",
+        output_type=BackendOutputType.EXTERNAL_LITERATURE_RETRIEVAL_RESULT,
         output_hash=content_hash({"output": "paperqa"}),
         status=BackendRunStatus.SUCCEEDED,
     )
@@ -777,6 +983,8 @@ def test_runtime_versions_change_docling_and_paperqa_provenance(
         capability=BackendCapability.LITERATURE_RETRIEVAL,
         input_bindings=(),
         config_hash=content_hash({}),
+        output_id="paperqa-result",
+        output_type=BackendOutputType.EXTERNAL_LITERATURE_RETRIEVAL_RESULT,
         output_hash=content_hash({"output": "paperqa"}),
         status=BackendRunStatus.SUCCEEDED,
     )
@@ -831,6 +1039,138 @@ def test_docling_requires_local_artifacts_and_audits_unavailable_runtime(
     run = BackendRunRepository(repositories.root).list()[0]
     assert run.status == BackendRunStatus.UNAVAILABLE
     assert run.warnings == ("runtime_unavailable",)
+
+
+@pytest.mark.parametrize(
+    ("version", "available"),
+    (
+        ("2.20.0", False),
+        ("2.64.9", False),
+        ("2.65.0rc1", False),
+        ("2.65.0", True),
+        ("2.126.3", True),
+        ("3.0.0", False),
+        ("not-a-version", False),
+    ),
+)
+def test_docling_enforces_declared_runtime_version_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    available: bool,
+) -> None:
+    artifacts = tmp_path / "docling-models"
+    artifacts.mkdir()
+    (artifacts / "model.bin").write_bytes(b"model")
+    backend = DoclingDocumentParsingBackend(artifacts)
+    monkeypatch.setattr(backend, "_installed_version", lambda: version)
+
+    outcome = backend.inspect_availability()
+
+    assert outcome.available is available
+    assert outcome.detected_version == version
+
+
+def test_docling_runtime_identity_is_bound_to_component_and_model_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "docling-models"
+    artifacts.mkdir()
+    model = artifacts / "model.bin"
+    model.write_bytes(b"model-v1")
+    backend = DoclingDocumentParsingBackend(artifacts)
+    monkeypatch.setattr(backend, "_installed_version", lambda: "2.65.0")
+    monkeypatch.setattr(
+        backend,
+        "_installed_component_versions",
+        lambda: {
+            "docling": "2.65.0",
+            "docling-core": "2.55.0",
+            "docling-parse": "4.7.0",
+        },
+    )
+
+    first = backend.resolve_runtime_identity()
+    identical = backend.resolve_runtime_identity()
+    first_manifest = backend.build_runtime_artifact_manifest()
+    model.write_bytes(b"model-v2")
+    changed = backend.resolve_runtime_identity()
+    changed_manifest = backend.build_runtime_artifact_manifest()
+
+    assert first == identical
+    assert first.runtime_identity_id != changed.runtime_identity_id
+    assert first.runtime_artifact_manifest_hash == first_manifest.content_hash
+    assert changed.runtime_artifact_manifest_hash == changed_manifest.content_hash
+    assert first_manifest.content_hash != changed_manifest.content_hash
+    assert tuple(item.component for item in first.runtime_components) == (
+        "docling",
+        "docling-core",
+        "docling-parse",
+    )
+    assert str(artifacts) not in first.model_dump_json()
+
+
+def test_runtime_artifact_manifest_rejects_symlinks_and_detects_tampering(
+    tmp_path: Path,
+) -> None:
+    artifacts = (tmp_path / "docling-models").resolve()
+    artifacts.mkdir()
+    target = artifacts / "model.bin"
+    target.write_bytes(b"model")
+    link = artifacts / "linked-model.bin"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("filesystem does not permit creating symlinks")
+
+    with pytest.raises(ValueError, match="symlink"):
+        build_backend_runtime_artifact_manifest(
+            artifacts,
+            backend_id="docling",
+            artifact_role="docling-model-artifacts",
+        )
+
+    link.unlink()
+    manifest = build_backend_runtime_artifact_manifest(
+        artifacts,
+        backend_id="docling",
+        artifact_role="docling-model-artifacts",
+    )
+    repository = BackendRuntimeArtifactManifestRepository(tmp_path / "knowledge")
+    repository.put(manifest.manifest_id, manifest)
+    path = repository.root / f"{manifest.manifest_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["entries"][0]["file_size"] += 1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        repository.get(manifest.manifest_id)
+
+
+def test_backend_inspection_accepts_explicit_docling_artifacts_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "docling-models"
+    artifacts.mkdir()
+    (artifacts / "model.bin").write_bytes(b"model")
+    monkeypatch.setattr(DoclingDocumentParsingBackend, "_installed_version", lambda _self: "2.65.0")
+
+    info = CliRunner().invoke(
+        app,
+        ["backend-info", "docling", "--docling-artifacts-path", str(artifacts)],
+    )
+    listing = CliRunner().invoke(
+        app,
+        ["backends", "--docling-artifacts-path", str(artifacts)],
+    )
+
+    assert info.exit_code == 0, info.output
+    assert json.loads(info.output)["runtime"]["available"] is True
+    assert listing.exit_code == 0, listing.output
+    docling_row = next(item for item in json.loads(listing.output) if item["backend_id"] == "docling")
+    assert docling_row["available"] is True
 
 
 def test_docling_converter_is_configured_for_offline_local_artifacts(
@@ -1140,14 +1480,137 @@ def test_resolution_batch_uses_true_spc_resolution_counts_and_current_authority(
         validate_resolution_batch_current(batch, repositories, store)
 
 
-def test_external_structure_promotion_preserves_full_external_chain(
+@pytest.mark.parametrize(
+    ("record_kind", "mutation"),
+    (
+        ("evidence", "delete"),
+        ("evidence", "tamper"),
+        ("locator", "delete"),
+        ("locator", "tamper"),
+    ),
+)
+def test_resolution_batch_reopens_and_verifies_bound_records(
     tmp_path: Path,
+    record_kind: str,
+    mutation: str,
 ) -> None:
-    repositories, store, outcome = setup_literature(tmp_path)
+    repositories, store, _outcome, _structure, _retrieval, batch, resolution = setup_resolution_batch(
+        tmp_path
+    )
+    if record_kind == "evidence":
+        path = store.evidence_records.root / f"{resolution.evidence_id}.json"
+    else:
+        path = repositories.structured_evidence_locators.root / f"{resolution.locator_id}.json"
+    if mutation == "delete":
+        path.unlink()
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if record_kind == "evidence":
+            payload["text"] = "Tampered evidence text."
+        else:
+            payload["evidence_id"] = "evidence-tampered"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        validate_resolution_batch_current(batch, repositories, store)
+
+
+@pytest.mark.parametrize("hash_field", ("evidence_hash", "locator_hash"))
+def test_resolution_batch_rejects_bound_hash_tampering(
+    tmp_path: Path,
+    hash_field: str,
+) -> None:
+    repositories, store, _outcome, _structure, _retrieval, batch, resolution = setup_resolution_batch(
+        tmp_path
+    )
+    changed_resolution = rebuild_resolution(resolution, **{hash_field: "f" * 64})
+    changed_batch = rebuild_batch(batch, (changed_resolution,))
+    ExternalRetrievalResolutionBatchRepository(repositories.root).put(
+        changed_batch.batch_id,
+        changed_batch,
+    )
+
+    with pytest.raises(ValueError, match="hash"):
+        validate_resolution_batch_current(changed_batch, repositories, store)
+
+
+def test_resolution_batch_rejects_locator_for_another_evidence(tmp_path: Path) -> None:
+    repositories, store, _outcome, _structure, _retrieval, batch, resolution = setup_resolution_batch(
+        tmp_path
+    )
+    other = ExternalRetrievalEvidenceResolver().resolve(
+        build_external_retrieval_hit(
+            doi="10.0000/backend.1",
+            text_snippet="Reference-only statement.",
+        ),
+        repositories,
+        store,
+    )
+    assert other.resolved
+    changed_resolution = rebuild_resolution(
+        resolution,
+        locator_id=other.locator_id,
+        locator_hash=other.locator_hash,
+    )
+    changed_batch = rebuild_batch(batch, (changed_resolution,))
+    ExternalRetrievalResolutionBatchRepository(repositories.root).put(
+        changed_batch.batch_id,
+        changed_batch,
+    )
+
+    with pytest.raises(ValueError, match="locator binding"):
+        validate_resolution_batch_current(changed_batch, repositories, store)
+
+
+def test_resolution_batch_rejects_locator_for_another_structure(tmp_path: Path) -> None:
+    repositories, store, outcome, _structure, _retrieval, batch, resolution = setup_resolution_batch(
+        tmp_path
+    )
     external = ExternalDocumentStructureService().structure(
         outcome.literature_id or "",
         outcome.representation_id or "",
         FakeDocumentBackend(),
+        repositories,
+        store,
+    )
+    evidence = store.get_evidence(resolution.evidence_id or "")
+    alternate_block = next(
+        block
+        for block in external.structure.blocks
+        if block.start_offset <= evidence.start_offset and block.end_offset >= evidence.end_offset
+    )
+    from spc.knowledge.structure import _create_locator
+
+    _evidence, alternate_locator = _create_locator(
+        evidence=evidence,
+        artifact=external.structure.artifact,
+        block=alternate_block,
+        repositories=repositories,
+        evidence_store=store,
+    )
+    changed_resolution = rebuild_resolution(
+        resolution,
+        locator_id=alternate_locator.locator_id,
+        locator_hash=alternate_locator.content_hash,
+    )
+    changed_batch = rebuild_batch(batch, (changed_resolution,))
+    ExternalRetrievalResolutionBatchRepository(repositories.root).put(
+        changed_batch.batch_id,
+        changed_batch,
+    )
+
+    with pytest.raises(ValueError, match="locator binding"):
+        validate_resolution_batch_current(changed_batch, repositories, store)
+
+
+def test_external_structure_promotion_preserves_full_external_chain(
+    tmp_path: Path,
+) -> None:
+    repositories, store, outcome, representation = setup_pdf_literature(tmp_path)
+    external = ExternalDocumentStructureService().structure(
+        outcome.literature_id,
+        representation.representation_id,
+        FakePDFDocumentBackend(),
         repositories,
         store,
         promote=True,
@@ -1166,7 +1629,7 @@ def test_external_structure_promotion_preserves_full_external_chain(
     )
 
 
-def test_external_structure_downgrade_is_not_recorded_as_promotion(tmp_path: Path) -> None:
+def test_external_html_audit_cannot_replace_builtin_region_authority(tmp_path: Path) -> None:
     repositories, store, outcome = setup_literature(tmp_path)
     current = DocumentStructureService().extract(
         outcome.literature_id or "",
@@ -1187,6 +1650,14 @@ def test_external_structure_downgrade_is_not_recorded_as_promotion(tmp_path: Pat
     assert external.structure.artifact.extraction_status.value == "partial"
     assert external.selection is None
     assert external.promotion is None
+    assert external.promotion_policy_reason == (
+        "external_html_promotion_requires_deterministic_content_region_reconciliation"
+    )
+    assert external.rebinding.bindings[0].proposed_content_region == DocumentContentRegion.REFERENCES
+    assert external.rebinding.bindings[0].content_region == DocumentContentRegion.UNKNOWN
+    assert all(block.content_region == DocumentContentRegion.UNKNOWN for block in external.structure.blocks)
+    assert DocumentContentRegion.REFERENCES in {block.content_region for block in current.blocks}
+    assert DocumentContentRegion.NAVIGATION in {block.content_region for block in current.blocks}
     selected = repositories.document_structure_selections.resolve_current(outcome.representation_id or "")
     assert selected.structure_id == current.artifact.structure_id
 
