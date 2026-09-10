@@ -579,6 +579,37 @@ def inspect_backend_run(
     )
 
 
+@app.command("check-codex-provider")
+def check_codex_provider(
+    codex_model: Annotated[str, typer.Option("--codex-model")],
+    codex_executable: Annotated[str, typer.Option("--codex-executable")] = "codex",
+) -> None:
+    """Check Codex CLI K1F compatibility without running model inference."""
+    try:
+        runtime = CodexCLILLMTransport(
+            codex_executable,
+            model=codex_model,
+        ).inspect_runtime()
+    except (CodexCLIUnavailableError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(
+        json.dumps(
+            {
+                "executable": runtime.executable,
+                "cli_version": runtime.cli_version,
+                "selected_model": runtime.selected_model,
+                "authentication_status": runtime.authentication_status,
+                "required_flags_accepted": True,
+                "disabled_features": runtime.disabled_features,
+                "model_inference_performed": False,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
 @app.command("extract-literature-knowledge")
 def extract_literature_knowledge(
     literature_id: Annotated[str, typer.Option("--literature-id")],
@@ -621,6 +652,10 @@ def extract_literature_knowledge(
         )
         provider_notice = "structured proposal provider; explicit human curation remains required"
     elif provider == "codex":
+        if codex_model is None:
+            raise typer.BadParameter(
+                "--provider codex requires an explicit --codex-model"
+            )
         transport = CodexCLILLMTransport(
             codex_executable,
             model=codex_model,

@@ -541,21 +541,36 @@ API key. Sign in through the supported ChatGPT flow first, then opt in explicitl
 ```powershell
 codex login
 codex login status
+spc check-codex-provider --codex-model your-explicit-model
 spc extract-literature-knowledge `
   --literature-id literature-... `
   --knowledge-dir knowledge `
-  --provider codex
+  --provider codex `
+  --codex-model your-explicit-model
 ```
 
 The Codex transport uses `codex exec` in an isolated temporary directory with a
 read-only sandbox, approval disabled, user configuration and repository rules
-ignored, web search omitted, and ephemeral session storage. It removes API-key
-and transient token environment variables from the child process. The only
-scientific payload is the bounded K1F compilation input and chunks; the strict
+ignored, web search omitted, and ephemeral session storage. It explicitly sets
+`features.shell_tool=false`, `features.shell_snapshot=false`, and
+`features.standalone_web_search=false`; the JSONL event audit independently rejects
+any tool, command, file, web, or MCP activity.
+
+The child environment is rebuilt from a documented allowlist: `PATH`; Unix home,
+user, XDG, locale, temporary-directory, and TLS certificate variables; Windows
+`USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`,
+`WINDIR`, `COMSPEC`, `PATHEXT`, `TEMP`, and `TMP`; plus `CODEX_HOME` when explicitly
+set. API keys, access tokens, cloud/database credentials, and unrelated parent
+environment variables are not forwarded. Authentication files are neither copied
+nor persisted by SPC.
+
+The only scientific payload is the bounded K1F compilation input and chunks; the strict
 `LiteratureKnowledgeLLMResponse` schema is supplied separately. The persisted
-proposal records the Codex CLI version, explicitly selected model when provided,
+proposal records the Codex CLI version, required explicit model,
 configuration hash, input hash, and output hash, never authentication material.
-Use `--codex-model` only when an explicit model override is required.
+`spc check-codex-provider` validates the ChatGPT login, feature overrides, and all
+non-interactive flags through version/status, `features list`, and `exec --help`
+commands only; it performs no model inference.
 
 Real structured-model extraction is opt-in and uses the same vendor-neutral HTTP
 transport as planning and approval:
