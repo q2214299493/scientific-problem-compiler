@@ -25,6 +25,22 @@ class KnowledgeGraphError(ValueError):
     pass
 
 
+SCIENTIFIC_NODE_TYPES = frozenset(
+    {
+        "literature_document",
+        "source_claim",
+        "method_fact",
+        "model_fact",
+        "reported_result",
+        "expert_profile",
+        "expert_opinion",
+        "expert_case",
+        "workflow_pattern",
+        "scientific_capability",
+    }
+)
+
+
 class KnowledgeGraphBuilder:
     def build(
         self,
@@ -44,11 +60,15 @@ class KnowledgeGraphBuilder:
 
         if mode == KnowledgeViewMode.TRUSTED:
             trusted = validator.validate()
-            relations = trusted.relations
+            relations = self._scientific_relations(trusted.relations)
             allowed_keys = self._trusted_record_keys(trusted)
         else:
             allowed_keys = set(all_records)
-            relations = repositories.relations.list()
+            relations = self._scientific_relations(repositories.relations.list())
+
+        allowed_keys &= {
+            key for key in all_records if key[0] in SCIENTIFIC_NODE_TYPES
+        }
 
         records = {
             key: record
@@ -124,6 +144,15 @@ class KnowledgeGraphBuilder:
         graph_id = f"knowledge-graph-{content_hash(identity)[:24]}"
         payload = {"graph_id": graph_id, **identity}
         return KnowledgeGraph(**payload, content_hash=content_hash(payload))
+
+    @staticmethod
+    def _scientific_relations(relations: tuple[BaseModel, ...]) -> tuple[BaseModel, ...]:
+        return tuple(
+            relation
+            for relation in relations
+            if getattr(relation, "subject_type") in SCIENTIFIC_NODE_TYPES
+            and getattr(relation, "object_type") in SCIENTIFIC_NODE_TYPES
+        )
 
     @staticmethod
     def _trusted_record_keys(

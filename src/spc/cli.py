@@ -93,6 +93,7 @@ from .models import (
     ComparisonConstraint,
     ConflictSet,
     CriterionDraft,
+    CurationStatus,
     DAGTask,
     DomainProfile,
     EvidenceReference,
@@ -185,6 +186,25 @@ from .knowledge.collection import (
     make_collection_scope_policy,
 )
 from .knowledge.evidence_migration import migrate_knowledge_evidence
+from .knowledge.literature_knowledge import (
+    LiteratureClaimProposal,
+    LiteratureKnowledgeChunk,
+    LiteratureKnowledgeCompilationInput,
+    LiteratureKnowledgeCompilationRecord,
+    LiteratureKnowledgeCompiler,
+    LiteratureKnowledgeGroundingRecord,
+    LiteratureKnowledgeLLMResponse,
+    LiteratureKnowledgeProposalSet,
+    LiteratureMethodFactProposal,
+    LiteratureModelFactProposal,
+    LiteratureQuoteProposal,
+    LiteratureRelationProposal,
+    LiteratureReportedResultProposal,
+    LiteratureScientificKnowledgeView,
+    LiteratureScientificKnowledgeViewBuilder,
+    MockLiteratureKnowledgeProvider,
+    curate_knowledge_record,
+)
 from .knowledge.structure import inspect_document_structure
 from .knowledge.structure_selection import DocumentStructureSelector
 from .providers import MockProvider
@@ -551,6 +571,94 @@ def inspect_backend_run(
             ensure_ascii=False,
         )
     )
+
+
+@app.command("extract-literature-knowledge")
+def extract_literature_knowledge(
+    literature_id: Annotated[str, typer.Option("--literature-id")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    provider: Annotated[str, typer.Option("--provider")] = "mock",
+    include_supplementary: Annotated[bool, typer.Option("--include-supplementary")] = False,
+) -> None:
+    """Compile untrusted, exactly grounded literature knowledge proposals."""
+    if provider != "mock":
+        raise typer.BadParameter("only the offline mock provider is configured by this command")
+    repositories = KnowledgeRepositories(knowledge_dir)
+    outcome = LiteratureKnowledgeCompiler().compile(
+        literature_id,
+        MockLiteratureKnowledgeProvider(),
+        repositories,
+        KnowledgeEvidenceStore(knowledge_dir),
+        include_supplementary=include_supplementary,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "compilation_id": outcome.materialized.record.compilation_id,
+                "compilation_input_id": outcome.compilation_input.compilation_input_id,
+                "proposal_set_id": outcome.proposal_set.proposal_set_id,
+                "chunk_count": len(outcome.chunks),
+                "region_uncertain_chunk_count": sum(chunk.region_uncertain for chunk in outcome.chunks),
+                "source_quote_ids": outcome.materialized.record.source_quote_ids,
+                "source_claim_ids": outcome.materialized.record.source_claim_ids,
+                "method_fact_ids": outcome.materialized.record.method_fact_ids,
+                "model_fact_ids": outcome.materialized.record.model_fact_ids,
+                "reported_result_ids": outcome.materialized.record.reported_result_ids,
+                "knowledge_relation_ids": outcome.materialized.record.knowledge_relation_ids,
+                "rejected_proposals": [
+                    item.model_dump(mode="json") for item in outcome.materialized.record.rejected_proposals
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+@app.command("inspect-literature-knowledge")
+def inspect_literature_knowledge(
+    literature_id: Annotated[str, typer.Option("--literature-id")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    view: Annotated[str, typer.Option("--view")] = "audit",
+    record_type: Annotated[str | None, typer.Option("--record-type")] = None,
+    curation_status: Annotated[str | None, typer.Option("--curation-status")] = None,
+    content_region: Annotated[str | None, typer.Option("--content-region")] = None,
+    section: Annotated[str | None, typer.Option("--section")] = None,
+) -> None:
+    """Inspect deterministic K1F records and their grounding provenance."""
+    repositories = KnowledgeRepositories(knowledge_dir)
+    result = LiteratureScientificKnowledgeViewBuilder().build(
+        literature_id,
+        repositories,
+        KnowledgeEvidenceStore(knowledge_dir),
+        view_mode=view,
+        record_type=record_type,
+        curation_status=curation_status,
+        content_region=content_region,
+        section=section,
+    )
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("curate-knowledge")
+def curate_knowledge(
+    target_type: Annotated[str, typer.Option("--target-type")],
+    target_id: Annotated[str, typer.Option("--target-id")],
+    status: Annotated[CurationStatus, typer.Option("--status")],
+    curator_id: Annotated[str, typer.Option("--curator-id")],
+    rationale: Annotated[str, typer.Option("--rationale")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+) -> None:
+    """Append one immutable transition to the existing knowledge curation chain."""
+    record = curate_knowledge_record(
+        KnowledgeRepositories(knowledge_dir),
+        target_type=target_type,
+        target_id=target_id,
+        status=status,
+        curator_id=curator_id,
+        rationale=rationale,
+    )
+    typer.echo(record.model_dump_json(indent=2))
 
 
 @app.command("select-document-structure")
@@ -1183,6 +1291,19 @@ def schema_command(
         CandidateTaskDraft,
         CandidatePlanDraft,
         PlanningProposalSet,
+        LiteratureKnowledgeCompilationInput,
+        LiteratureKnowledgeChunk,
+        LiteratureQuoteProposal,
+        LiteratureClaimProposal,
+        LiteratureMethodFactProposal,
+        LiteratureModelFactProposal,
+        LiteratureReportedResultProposal,
+        LiteratureRelationProposal,
+        LiteratureKnowledgeLLMResponse,
+        LiteratureKnowledgeProposalSet,
+        LiteratureKnowledgeGroundingRecord,
+        LiteratureKnowledgeCompilationRecord,
+        LiteratureScientificKnowledgeView,
     )
     for path in export_json_schemas(output_dir, models):
         typer.echo(str(path))

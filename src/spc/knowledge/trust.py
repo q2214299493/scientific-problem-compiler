@@ -103,6 +103,10 @@ CURATION_REQUIRED_TYPES = frozenset(
         "literature_document",
         "literature_representation_selection",
         "expert_opinion",
+        "source_claim",
+        "method_fact",
+        "model_fact",
+        "reported_result",
         "knowledge_relation",
     }
 )

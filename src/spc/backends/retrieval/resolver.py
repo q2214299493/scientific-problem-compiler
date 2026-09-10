@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import unicodedata
 
 from ..contracts import (
     ExternalLiteratureRetrievalHit,
@@ -34,6 +35,10 @@ class ExternalRetrievalResolutionBatchRepository(IdentityBoundRepository[Externa
             ExternalRetrievalResolutionBatch,
             "batch_id",
         )
+
+
+def _normalized_exact_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split())
 
 
 def _resolution(
@@ -277,6 +282,7 @@ def validate_resolution_batch_current(
         raise ValueError("retrieval resolution batch result binding is stale")
     if tuple(item.hit_id for item in batch.resolutions) != tuple(item.hit_id for item in result.hits):
         raise ValueError("retrieval resolution batch does not match the external result hits")
+    hits_by_id = {item.hit_id: item for item in result.hits}
     store = evidence_store or repositories.evidence_store
     current_curations = TrustedKnowledgeValidator(repositories, store).resolve_current_curations()
     authority_by_literature = {item.literature_id: item for item in batch.authority_bindings}
@@ -295,6 +301,27 @@ def validate_resolution_batch_current(
         store.verify_evidence_integrity(evidence)
         if content_hash(evidence) != resolution.evidence_hash:
             raise ValueError("retrieval resolution batch evidence hash is invalid")
+        hit = hits_by_id[resolution.hit_id]
+        if hit.text_snippet is None:
+            raise ValueError("resolved retrieval hit requires an exact text snippet")
+        representation = repositories.literature_representation_refs.get(
+            resolution.representation_id or ""
+        )
+        if representation.representation_kind.value == "pdf":
+            canonical_text = repositories.canonical_text_artifacts.read_text(
+                representation.canonical_text_id
+            )
+        else:
+            canonical_text = repositories.canonical_html_text_artifacts.read_text(
+                representation.canonical_text_id
+            )
+        matches = exact_normalized_matches(hit.text_snippet, canonical_text)
+        if (
+            len(matches) != 1
+            or matches[0] != (evidence.start_offset, evidence.end_offset)
+            or _normalized_exact_text(evidence.text) != _normalized_exact_text(hit.text_snippet)
+        ):
+            raise ValueError("retrieval resolution evidence does not match the original hit snippet")
         locator = repositories.structured_evidence_locators.get(resolution.locator_id or "")
         verify_structured_evidence_locator(locator, repositories, store)
         if locator.content_hash != resolution.locator_hash:

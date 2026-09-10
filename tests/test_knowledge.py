@@ -177,6 +177,10 @@ def make_curation(
         "expert_opinion": "opinion_id",
         "knowledge_relation": "relation_id",
         "expert_profile": "expert_id",
+        "source_claim": "claim_id",
+        "method_fact": "fact_id",
+        "model_fact": "fact_id",
+        "reported_result": "result_id",
     }[target_type]
     identity = {
         "target_type": target_type,
@@ -319,6 +323,7 @@ def populate_generic_knowledge(
     curations = (
         make_curation("literature_document", literature, literature_status),
         make_curation("expert_opinion", opinion, opinion_status),
+        make_curation("source_claim", claim, CurationStatus.ACCEPTED),
         *(make_curation("knowledge_relation", relation, relation_status) for relation in relations),
     )
     repositories.load_curations(curations)
@@ -353,6 +358,20 @@ def trust_relation_endpoint(
             "literature_document", literature, CurationStatus.ACCEPTED
         )
         repositories.curations.put(curation.curation_id, curation)
+    repository_name = {
+        "source_claim": "source_claims",
+        "method_fact": "method_facts",
+        "model_fact": "model_facts",
+        "reported_result": "reported_results",
+    }.get(record_type)
+    if repository_name is not None:
+        target = getattr(repositories, repository_name).get(record_id)
+        endpoint_curation = make_curation(
+            record_type, target, CurationStatus.ACCEPTED
+        )
+        repositories.curations.put(
+            endpoint_curation.curation_id, endpoint_curation
+        )
     relation = make_relation(
         object_type=record_type,
         object_id=record_id,
@@ -492,7 +511,7 @@ def test_snapshot_binds_valid_accepted_knowledge_and_curations(tmp_path) -> None
     assert set(snapshot.knowledge_relation_hashes) == {
         relation.relation_id for relation in relations
     }
-    assert len(snapshot.curation_record_hashes) == 5
+    assert len(snapshot.curation_record_hashes) == 6
 
 
 def test_accepted_opinion_with_missing_evidence_is_rejected(tmp_path) -> None:

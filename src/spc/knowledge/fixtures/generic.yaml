@@ -153,6 +153,15 @@ curations:
     target_hash: 8ae5d8c942c3e241c3923b73c7b96d5500883da19189535ce4b5e830c0543e6a
     target_id: expert-opinion-1744bf37d296a3bb6f08f516
     target_type: expert_opinion
+  - content_hash: 33adf8b262b567fc6fa367c9347285e31083255de6e307d72c1911c7e0bacd7c
+    curation_id: knowledge-curation-64c0409a0477e19adf3c837f
+    curator_id: curator-k1a1
+    evidence_refs: []
+    rationale: "Curation decision: accepted"
+    status: accepted
+    target_hash: 5bbdde053ce3998a5429641c46b28b8ed366ea87aeb1f3a1636aa86fdf56f04d
+    target_id: claim-connectivity-001
+    target_type: source_claim
   - content_hash: c9d6c98fc5a02282fcd81bc518082506c5eac4fd839b02435ba384b5b04e104b
     curation_id: knowledge-curation-32fb4af74f54a9cee317cf64
     curator_id: curator-k1a1

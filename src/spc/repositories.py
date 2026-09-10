@@ -1723,6 +1723,14 @@ class CollectionDiffRepository(IdentityBoundRepository[CollectionDiff]):
 
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
+        from .knowledge.literature_knowledge.repositories import (
+            LiteratureKnowledgeChunkRepository,
+            LiteratureKnowledgeCompilationInputRepository,
+            LiteratureKnowledgeCompilationRepository,
+            LiteratureKnowledgeGroundingRepository,
+            LiteratureKnowledgeProposalSetRepository,
+        )
+
         self.root = root
         self.evidence_store = KnowledgeEvidenceStore(root)
         self.expert_cases = ExpertCaseRepository(root)
@@ -1805,6 +1813,11 @@ class KnowledgeRepositories:
         self.model_facts = IdentityBoundRepository(
             root / "model_facts", ModelFact, "fact_id"
         )
+        self.literature_knowledge_inputs = LiteratureKnowledgeCompilationInputRepository(root)
+        self.literature_knowledge_chunks = LiteratureKnowledgeChunkRepository(root)
+        self.literature_knowledge_proposals = LiteratureKnowledgeProposalSetRepository(root)
+        self.literature_knowledge_groundings = LiteratureKnowledgeGroundingRepository(root)
+        self.literature_knowledge_compilations = LiteratureKnowledgeCompilationRepository(root)
 
     def load_expert_cases(self, records: Iterable[ExpertCase]) -> None:
         for record in records:

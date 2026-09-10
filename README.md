@@ -489,3 +489,26 @@ manifest of local model files; symlinks, escaping paths, incomplete scans, and
 changed model bytes fail closed or produce a different runtime identity. The
 configured absolute model path is operational metadata, not scientific
 identity.
+
+## Knowledge Layer K1F scientific knowledge compiler
+
+K1F compiles the accepted current literature representation and current selected
+document structure into evidence-grounded scientific proposals. Deterministic
+materialization reopens canonical text, locates each exact quote within its allowed
+structure block, and binds `EvidenceSpan`, `StructuredEvidenceLocator`,
+`SourceQuote`, scientific records, grounding records, and immutable compilation
+provenance. Provider output supplies proposal-local keys only; it cannot assign SPC
+record IDs or offsets, access tools, or mark knowledge trusted.
+
+New scientific records are curated as `machine_extracted`. They appear in the audit
+view but enter the trusted-current view only after explicit acceptance and only while
+their representation and structure remain current. HTML extraction defaults to main
+content; supplementary content is opt-in, and reference/navigation/footer/related or
+unknown regions are excluded. PDF unknown-region chunks remain explicitly uncertain.
+
+```powershell
+spc extract-literature-knowledge --literature-id literature-... --knowledge-dir knowledge --provider mock
+spc inspect-literature-knowledge --literature-id literature-... --knowledge-dir knowledge --view audit
+spc curate-knowledge --target-type source_claim --target-id claim-... --status accepted `
+  --curator-id reviewer --rationale "Reviewed exact source grounding." --knowledge-dir knowledge
+```
