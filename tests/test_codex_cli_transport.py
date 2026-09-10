@@ -323,6 +323,19 @@ def test_codex_cli_transport_isolated_proposal_is_audited_and_materialized(
         repositories.literature_knowledge_proposals.get(compiled.proposal_set.proposal_set_id).provider_invocation
         == invocation
     )
+    assert compiled.proposal_set.batch_invocations is not None
+    assert len(compiled.proposal_set.batch_invocations) == 1
+    batch_invocation = compiled.proposal_set.batch_invocations[0]
+    assert batch_invocation.batch_index == 1
+    assert batch_invocation.chunk_ids == tuple(chunk.chunk_id for chunk in chunks)
+    assert batch_invocation.chunk_hashes == tuple(
+        chunk.content_hash for chunk in chunks
+    )
+    assert batch_invocation.input_hash == invocation.input_hash
+    assert batch_invocation.output_hash == invocation.output_hash
+    assert batch_invocation.selected_model == "test-codex-model"
+    assert batch_invocation.runtime_version == "codex-cli 99.1.2-test"
+    assert batch_invocation.provider_invocation == invocation
     assert len(compiled.materialized.source_quotes) == 1
     assert len(compiled.materialized.source_claims) == 1
     assert len(compiled.materialized.groundings) == 1
@@ -548,11 +561,40 @@ def test_cli_codex_provider_uses_fake_cli_without_real_quota(
             "test-codex-model",
             "--max-attempts",
             "1",
+            "--max-chunks-per-batch",
+            "1",
+            "--max-batches",
+            "1",
+            "--provider-output-dir",
+            str(tmp_path / "provider-output"),
         ],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["provider_id"] == "structured-llm-literature-knowledge"
     assert payload["provider_invocation"]["transport_id"] == "codex-cli"
+    assert payload["processed_batch_count"] == 1
+    assert payload["total_batch_count"] > 1
+    assert len(payload["batch_invocations"]) == 1
     assert "untrusted" in payload["provider_notice"]
     assert "must-never-reach-codex" not in result.output
+    inference_calls = tuple(
+        call
+        for call in _recorded_calls(tmp_path)
+        if call["arguments"][0] == "exec" and "--help" not in call["arguments"]
+    )
+    assert len(inference_calls) == 1
+    provenance_paths = tuple(
+        (tmp_path / "provider-output").glob("batch-*-provenance.json")
+    )
+    assert len(provenance_paths) == 1
+    batch_provenance = json.loads(
+        provenance_paths[0].read_text(encoding="utf-8")
+    )
+    assert batch_provenance["batch_index"] == 1
+    assert batch_provenance["selected_model"] == "test-codex-model"
+    assert batch_provenance["runtime_version"] == "codex-cli 99.1.2-test"
+    assert len(batch_provenance["chunk_ids"]) == 1
+    assert len(batch_provenance["chunk_hashes"]) == 1
+    assert len(batch_provenance["input_hash"]) == 64
+    assert len(batch_provenance["output_hash"]) == 64

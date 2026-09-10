@@ -194,6 +194,41 @@ class LiteratureKnowledgeProviderInvocation(StrictModel):
         return self
 
 
+class LiteratureKnowledgeBatchInvocation(StrictModel):
+    batch_index: int = Field(ge=1)
+    chunk_ids: tuple[NonBlankStr, ...] = Field(min_length=1)
+    chunk_hashes: tuple[Sha256Str, ...] = Field(min_length=1)
+    input_hash: Sha256Str
+    output_hash: Sha256Str
+    selected_model: NonBlankStr
+    runtime_version: NonBlankStr | None = None
+    provider_invocation: LiteratureKnowledgeProviderInvocation | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> LiteratureKnowledgeBatchInvocation:
+        if len(self.chunk_ids) != len(self.chunk_hashes):
+            raise ValueError("batch chunk IDs and hashes must align")
+        if len(self.chunk_ids) != len(set(self.chunk_ids)):
+            raise ValueError("batch chunk IDs must be unique")
+        if self.provider_invocation is not None:
+            if (
+                self.provider_invocation.input_hash != self.input_hash
+                or self.provider_invocation.output_hash != self.output_hash
+                or self.provider_invocation.selected_model != self.selected_model
+                or self.provider_invocation.runtime_version != self.runtime_version
+            ):
+                raise ValueError("batch provider invocation binding is invalid")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"content_hash"},
+            exclude_none=True,
+        )
+        if self.content_hash != content_hash(identity):
+            raise ValueError("batch invocation content_hash is invalid")
+        return self
+
+
 class LiteratureKnowledgeProposalSet(StrictModel):
     proposal_set_id: NonBlankStr
     compilation_input_id: NonBlankStr
@@ -202,6 +237,7 @@ class LiteratureKnowledgeProposalSet(StrictModel):
     provider_version: NonBlankStr
     provider_config_hash: Sha256Str
     provider_invocation: LiteratureKnowledgeProviderInvocation | None = None
+    batch_invocations: tuple[LiteratureKnowledgeBatchInvocation, ...] | None = None
     quote_proposals: tuple[LiteratureQuoteProposal, ...] = ()
     claim_proposals: tuple[LiteratureClaimProposal, ...] = ()
     method_fact_proposals: tuple[LiteratureMethodFactProposal, ...] = ()
@@ -212,6 +248,11 @@ class LiteratureKnowledgeProposalSet(StrictModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> LiteratureKnowledgeProposalSet:
+        batch_indices = tuple(
+            item.batch_index for item in (self.batch_invocations or ())
+        )
+        if batch_indices != tuple(sorted(set(batch_indices))):
+            raise ValueError("batch invocation indices must be unique and sorted")
         for values, field in (
             (self.quote_proposals, "quote_key"),
             (self.claim_proposals, "claim_key"),

@@ -17,6 +17,7 @@ from .context import (
 )
 from .contracts import (
     LiteratureClaimProposal,
+    LiteratureKnowledgeBatchInvocation,
     LiteratureKnowledgeChunk,
     LiteratureKnowledgeCompilationInput,
     LiteratureKnowledgeCompilationRecord,
@@ -41,11 +42,16 @@ from .materializer import (
     LiteratureKnowledgeMaterializer,
 )
 from .provider import (
+    DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
+    DEFAULT_MAX_CHUNKS_PER_BATCH,
     LiteratureKnowledgeProvider,
     MockLiteratureKnowledgeProvider,
     StructuredLiteratureKnowledgeOutputError,
     StructuredLLMLiteratureKnowledgeProvider,
+    StructuredOutputDiagnostic,
+    StructuredOutputFailureCategory,
     build_literature_knowledge_proposal_set,
+    partition_literature_knowledge_chunks,
 )
 from .repositories import (
     LiteratureKnowledgeChunkRepository,
@@ -106,6 +112,9 @@ __all__ = [
     "CodexCLILLMTransport",
     "CodexCLIRuntime",
     "CodexCLIUnavailableError",
+    "DEFAULT_MAX_BATCH_TEXT_CHARACTERS",
+    "DEFAULT_MAX_CHUNKS_PER_BATCH",
+    "LiteratureKnowledgeBatchInvocation",
     "LiteratureKnowledgeChunk",
     "LiteratureKnowledgeChunkRepository",
     "LiteratureKnowledgeCompilationInput",
@@ -138,9 +147,12 @@ __all__ = [
     "RejectedLiteratureKnowledgeProposal",
     "StructuredLiteratureKnowledgeOutputError",
     "StructuredLLMLiteratureKnowledgeProvider",
+    "StructuredOutputDiagnostic",
+    "StructuredOutputFailureCategory",
     "build_literature_knowledge_chunks",
     "build_literature_knowledge_proposal_set",
     "curate_knowledge_record",
+    "partition_literature_knowledge_chunks",
     "resolve_literature_knowledge_input",
     "validate_literature_knowledge_chunk",
     "validate_grounding_record",

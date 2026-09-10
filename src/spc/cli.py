@@ -190,6 +190,8 @@ from .knowledge.literature_knowledge import (
     CodexCLIExecutionError,
     CodexCLILLMTransport,
     CodexCLIUnavailableError,
+    DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
+    DEFAULT_MAX_CHUNKS_PER_BATCH,
     LiteratureClaimProposal,
     LiteratureKnowledgeChunk,
     LiteratureKnowledgeCompilationInput,
@@ -630,7 +632,24 @@ def extract_literature_knowledge(
         typer.Option("--codex-max-output-bytes"),
     ] = 1_000_000,
     temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
-    max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
+    max_attempts: Annotated[int, typer.Option("--max-attempts")] = 1,
+    max_chunks_per_batch: Annotated[
+        int,
+        typer.Option("--max-chunks-per-batch"),
+    ] = DEFAULT_MAX_CHUNKS_PER_BATCH,
+    max_batch_characters: Annotated[
+        int,
+        typer.Option("--max-batch-characters"),
+    ] = DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
+    max_batches: Annotated[int | None, typer.Option("--max-batches")] = None,
+    batch_failure_policy: Annotated[
+        str,
+        typer.Option("--batch-failure-policy"),
+    ] = "stop",
+    provider_output_dir: Annotated[
+        Path | None,
+        typer.Option("--provider-output-dir"),
+    ] = None,
 ) -> None:
     """Compile untrusted, exactly grounded literature knowledge proposals."""
     if provider == "mock":
@@ -649,6 +668,11 @@ def extract_literature_knowledge(
             ),
             temperature=temperature,
             max_attempts=max_attempts,
+            max_chunks_per_batch=max_chunks_per_batch,
+            max_batch_text_characters=max_batch_characters,
+            max_batches=max_batches,
+            batch_failure_policy=batch_failure_policy,
+            provider_output_dir=provider_output_dir,
         )
         provider_notice = "structured proposal provider; explicit human curation remains required"
     elif provider == "codex":
@@ -671,6 +695,11 @@ def extract_literature_knowledge(
             transport,
             temperature=temperature,
             max_attempts=max_attempts,
+            max_chunks_per_batch=max_chunks_per_batch,
+            max_batch_text_characters=max_batch_characters,
+            max_batches=max_batches,
+            batch_failure_policy=batch_failure_policy,
+            provider_output_dir=provider_output_dir,
         )
         provider_notice = (
             "authenticated Codex CLI proposal provider; output is untrusted and explicit human "
@@ -710,6 +739,16 @@ def extract_literature_knowledge(
                 ),
                 "provider_notice": provider_notice,
                 "chunk_count": len(outcome.chunks),
+                "total_batch_count": getattr(selected_provider, "total_batch_count", 0),
+                "processed_batch_count": len(outcome.proposal_set.batch_invocations or ()),
+                "batch_invocations": [
+                    item.model_dump(mode="json")
+                    for item in (outcome.proposal_set.batch_invocations or ())
+                ],
+                "failed_batch_diagnostics": [
+                    item.as_dict()
+                    for item in getattr(selected_provider, "last_diagnostics", ())
+                ],
                 "region_uncertain_chunk_count": sum(chunk.region_uncertain for chunk in outcome.chunks),
                 "source_quote_ids": outcome.materialized.record.source_quote_ids,
                 "source_claim_ids": outcome.materialized.record.source_claim_ids,
