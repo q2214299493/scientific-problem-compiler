@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import sys
+from types import SimpleNamespace
 
-from click.testing import Result
 import pytest
 from typer.testing import CliRunner
 
@@ -39,16 +40,70 @@ HTML = b"""<html><head>
 </head><body><article><h1>Results</h1><p>Sentence A.</p></article></body></html>"""
 
 
-def _captured_cli_text(result: Result) -> str:
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _captured_cli_text(result: object) -> str:
     streams: list[str] = []
+
     for attribute in ("output", "stdout", "stderr"):
         try:
             value = getattr(result, attribute)
         except (AttributeError, ValueError):
             continue
-        if value and value not in streams:
+
+        if isinstance(value, str) and value and value not in streams:
             streams.append(value)
-    return "\n".join(streams)
+
+    text = _ANSI_CSI.sub("", "\n".join(streams))
+    text = text.replace("│", " ").replace("┃", " ")
+
+    return " ".join(text.split())
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "Invalid value: --provider codex requires an explicit --codex-model",
+        (
+            "Invalid value: --provider codex requires an explicit "
+            "\x1b[1;36m--codex\x1b[0m\x1b[1;36m-model\x1b[0m"
+        ),
+        (
+            "│ Invalid value: --provider codex requires an explicit │\n"
+            "│ --codex-model                                      │"
+        ),
+        (
+            "\x1b[31m│\x1b[0m Invalid value: --provider codex requires an\n"
+            "\x1b[31m│\x1b[0m explicit "
+            "\x1b[1;36m--codex-model\x1b[0m"
+        ),
+    ),
+)
+def test_captured_cli_text_normalizes_terminal_formatting(diagnostic: str) -> None:
+    result = SimpleNamespace(output="", stdout="", stderr=diagnostic)
+
+    assert "requires an explicit --codex-model" in _captured_cli_text(result)
+
+
+def test_captured_cli_text_handles_missing_stream_attributes() -> None:
+    result = SimpleNamespace(output="requires an explicit --codex-model")
+
+    assert "requires an explicit --codex-model" in _captured_cli_text(result)
+
+
+def test_captured_cli_text_handles_unavailable_stderr() -> None:
+    class ResultWithoutCapturedStderr:
+        output = "requires an explicit --codex-model"
+        stdout = ""
+
+        @property
+        def stderr(self) -> str:
+            raise ValueError("stderr was not separately captured")
+
+    assert "requires an explicit --codex-model" in _captured_cli_text(
+        ResultWithoutCapturedStderr(),
+    )
 
 
 class StaticHTMLTransport:
@@ -430,7 +485,7 @@ def test_cli_codex_provider_requires_explicit_model() -> None:
             "codex",
         ],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert "requires an explicit --codex-model" in _captured_cli_text(result)
 
 
