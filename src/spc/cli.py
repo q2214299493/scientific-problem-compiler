@@ -187,6 +187,9 @@ from .knowledge.collection import (
 )
 from .knowledge.evidence_migration import migrate_knowledge_evidence
 from .knowledge.literature_knowledge import (
+    CodexCLIExecutionError,
+    CodexCLILLMTransport,
+    CodexCLIUnavailableError,
     LiteratureClaimProposal,
     LiteratureKnowledgeChunk,
     LiteratureKnowledgeCompilationInput,
@@ -585,6 +588,16 @@ def extract_literature_knowledge(
     llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
     llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
     llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
+    codex_executable: Annotated[str, typer.Option("--codex-executable")] = "codex",
+    codex_model: Annotated[str | None, typer.Option("--codex-model")] = None,
+    codex_timeout_seconds: Annotated[
+        float,
+        typer.Option("--codex-timeout-seconds"),
+    ] = 300.0,
+    codex_max_output_bytes: Annotated[
+        int,
+        typer.Option("--codex-max-output-bytes"),
+    ] = 1_000_000,
     temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
     max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
 ) -> None:
@@ -607,8 +620,29 @@ def extract_literature_knowledge(
             max_attempts=max_attempts,
         )
         provider_notice = "structured proposal provider; explicit human curation remains required"
+    elif provider == "codex":
+        transport = CodexCLILLMTransport(
+            codex_executable,
+            model=codex_model,
+            timeout_seconds=codex_timeout_seconds,
+            max_output_bytes=codex_max_output_bytes,
+        )
+        try:
+            transport.inspect_runtime()
+        except CodexCLIUnavailableError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from error
+        selected_provider = StructuredLLMLiteratureKnowledgeProvider(
+            transport,
+            temperature=temperature,
+            max_attempts=max_attempts,
+        )
+        provider_notice = (
+            "authenticated Codex CLI proposal provider; output is untrusted and explicit human "
+            "curation remains required"
+        )
     else:
-        raise typer.BadParameter("--provider must be 'mock' or 'llm'")
+        raise typer.BadParameter("--provider must be 'mock', 'llm', or 'codex'")
     repositories = KnowledgeRepositories(knowledge_dir)
     try:
         outcome = LiteratureKnowledgeCompiler().compile(
@@ -618,7 +652,11 @@ def extract_literature_knowledge(
             KnowledgeEvidenceStore(knowledge_dir),
             include_supplementary=include_supplementary,
         )
-    except StructuredLiteratureKnowledgeOutputError as error:
+    except (
+        CodexCLIExecutionError,
+        CodexCLIUnavailableError,
+        StructuredLiteratureKnowledgeOutputError,
+    ) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from error
     typer.echo(
@@ -630,6 +668,11 @@ def extract_literature_knowledge(
                 "provider_id": outcome.proposal_set.provider_id,
                 "provider_version": outcome.proposal_set.provider_version,
                 "provider_config_hash": outcome.proposal_set.provider_config_hash,
+                "provider_invocation": (
+                    outcome.proposal_set.provider_invocation.model_dump(mode="json")
+                    if outcome.proposal_set.provider_invocation is not None
+                    else None
+                ),
                 "provider_notice": provider_notice,
                 "chunk_count": len(outcome.chunks),
                 "region_uncertain_chunk_count": sum(chunk.region_uncertain for chunk in outcome.chunks),

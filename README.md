@@ -535,6 +535,28 @@ records. It also verifies that identical table offsets in different papers bind
 different table identities. This demonstrates plumbing and trust gates, not
 scientific extraction accuracy.
 
+K1F may also use the user's existing authenticated Codex CLI session without an
+API key. Sign in through the supported ChatGPT flow first, then opt in explicitly:
+
+```powershell
+codex login
+codex login status
+spc extract-literature-knowledge `
+  --literature-id literature-... `
+  --knowledge-dir knowledge `
+  --provider codex
+```
+
+The Codex transport uses `codex exec` in an isolated temporary directory with a
+read-only sandbox, approval disabled, user configuration and repository rules
+ignored, web search omitted, and ephemeral session storage. It removes API-key
+and transient token environment variables from the child process. The only
+scientific payload is the bounded K1F compilation input and chunks; the strict
+`LiteratureKnowledgeLLMResponse` schema is supplied separately. The persisted
+proposal records the Codex CLI version, explicitly selected model when provided,
+configuration hash, input hash, and output hash, never authentication material.
+Use `--codex-model` only when an explicit model override is required.
+
 Real structured-model extraction is opt-in and uses the same vendor-neutral HTTP
 transport as planning and approval:
 

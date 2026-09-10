@@ -3,6 +3,12 @@
 from dataclasses import dataclass
 
 from ...repositories import EvidenceStore, KnowledgeRepositories
+from .codex_transport import (
+    CodexCLIExecutionError,
+    CodexCLILLMTransport,
+    CodexCLIRuntime,
+    CodexCLIUnavailableError,
+)
 from .context import (
     build_literature_knowledge_chunks,
     resolve_literature_knowledge_input,
@@ -17,6 +23,7 @@ from .contracts import (
     LiteratureKnowledgeGroundingRecord,
     LiteratureKnowledgeLLMResponse,
     LiteratureKnowledgeProposalSet,
+    LiteratureKnowledgeProviderInvocation,
     LiteratureKnowledgeRecordType,
     LiteratureKnowledgeSupportingQuoteView,
     LiteratureKnowledgeViewMode,
@@ -95,6 +102,10 @@ class LiteratureKnowledgeCompiler:
 
 __all__ = [
     "LiteratureClaimProposal",
+    "CodexCLIExecutionError",
+    "CodexCLILLMTransport",
+    "CodexCLIRuntime",
+    "CodexCLIUnavailableError",
     "LiteratureKnowledgeChunk",
     "LiteratureKnowledgeChunkRepository",
     "LiteratureKnowledgeCompilationInput",
@@ -109,6 +120,7 @@ __all__ = [
     "LiteratureKnowledgeLLMResponse",
     "LiteratureKnowledgeMaterializer",
     "LiteratureKnowledgeProposalSet",
+    "LiteratureKnowledgeProviderInvocation",
     "LiteratureKnowledgeProposalSetRepository",
     "LiteratureKnowledgeProvider",
     "LiteratureKnowledgeRecordType",

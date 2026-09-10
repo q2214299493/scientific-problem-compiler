@@ -16,6 +16,7 @@ from .contracts import (
     LiteratureKnowledgeCompilationInput,
     LiteratureKnowledgeLLMResponse,
     LiteratureKnowledgeProposalSet,
+    LiteratureKnowledgeProviderInvocation,
     LiteratureQuoteProposal,
 )
 
@@ -52,6 +53,7 @@ def build_literature_knowledge_proposal_set(
     provider_version: str,
     provider_config_hash: str,
     response: LiteratureKnowledgeLLMResponse,
+    provider_invocation: LiteratureKnowledgeProviderInvocation | None = None,
 ) -> LiteratureKnowledgeProposalSet:
     identity = {
         "compilation_input_id": compilation_input.compilation_input_id,
@@ -59,8 +61,10 @@ def build_literature_knowledge_proposal_set(
         "provider_id": provider_id,
         "provider_version": provider_version,
         "provider_config_hash": provider_config_hash,
+        "provider_invocation": provider_invocation,
         **response.model_dump(mode="json", exclude_none=True),
     }
+    identity = {key: value for key, value in identity.items() if value is not None}
     proposal_set_id = f"literature-knowledge-proposals-{content_hash(identity)[:24]}"
     payload = {"proposal_set_id": proposal_set_id, **identity}
     return LiteratureKnowledgeProposalSet(**payload, content_hash=content_hash(payload))
@@ -176,12 +180,23 @@ class StructuredLLMLiteratureKnowledgeProvider:
                 if not isinstance(data, dict):
                     raise TypeError("structured response must be a JSON object")
                 response = LiteratureKnowledgeLLMResponse.model_validate(data)
+                provider_invocation = getattr(
+                    self.transport,
+                    "last_invocation",
+                    None,
+                )
+                if provider_invocation is not None and not isinstance(
+                    provider_invocation,
+                    LiteratureKnowledgeProviderInvocation,
+                ):
+                    raise TypeError("transport invocation provenance has an invalid type")
                 return build_literature_knowledge_proposal_set(
                     compilation_input,
                     provider_id=self.provider_id,
                     provider_version=self.provider_version,
                     provider_config_hash=self.provider_config_hash,
                     response=response,
+                    provider_invocation=provider_invocation,
                 )
             except (json.JSONDecodeError, TypeError, ValueError, ValidationError) as error:
                 last_error = error

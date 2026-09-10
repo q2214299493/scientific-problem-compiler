@@ -173,6 +173,27 @@ class LiteratureKnowledgeLLMResponse(StrictModel):
     relation_proposals: tuple[LiteratureRelationProposal, ...] = ()
 
 
+class LiteratureKnowledgeProviderInvocation(StrictModel):
+    invocation_id: NonBlankStr
+    transport_id: NonBlankStr
+    transport_version: NonBlankStr
+    runtime_version: NonBlankStr
+    selected_model: NonBlankStr | None = None
+    invocation_config_hash: Sha256Str
+    input_hash: Sha256Str
+    output_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureKnowledgeProviderInvocation:
+        _validate_content_bound(
+            self,
+            id_field="invocation_id",
+            prefix="literature-knowledge-provider-invocation",
+        )
+        return self
+
+
 class LiteratureKnowledgeProposalSet(StrictModel):
     proposal_set_id: NonBlankStr
     compilation_input_id: NonBlankStr
@@ -180,6 +201,7 @@ class LiteratureKnowledgeProposalSet(StrictModel):
     provider_id: NonBlankStr
     provider_version: NonBlankStr
     provider_config_hash: Sha256Str
+    provider_invocation: LiteratureKnowledgeProviderInvocation | None = None
     quote_proposals: tuple[LiteratureQuoteProposal, ...] = ()
     claim_proposals: tuple[LiteratureClaimProposal, ...] = ()
     method_fact_proposals: tuple[LiteratureMethodFactProposal, ...] = ()
