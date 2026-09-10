@@ -372,6 +372,32 @@ def trust_relation_endpoint(
         repositories.curations.put(
             endpoint_curation.curation_id, endpoint_curation
         )
+        if record_type == "reported_result" and target.result_context is not None:
+            for dependency_type, repository_name, dependency_ids in (
+                (
+                    "method_fact",
+                    "method_facts",
+                    target.result_context.method_fact_refs,
+                ),
+                (
+                    "model_fact",
+                    "model_facts",
+                    target.result_context.model_fact_refs,
+                ),
+            ):
+                for dependency_id in dependency_ids:
+                    dependency = getattr(repositories, repository_name).get(
+                        dependency_id
+                    )
+                    dependency_curation = make_curation(
+                        dependency_type,
+                        dependency,
+                        CurationStatus.ACCEPTED,
+                    )
+                    repositories.curations.put(
+                        dependency_curation.curation_id,
+                        dependency_curation,
+                    )
     relation = make_relation(
         object_type=record_type,
         object_id=record_id,
@@ -568,6 +594,10 @@ def test_accepted_opinion_requires_all_related_records(tmp_path, updates) -> Non
     repositories.source_claims.put(claim.claim_id, claim)
     repositories.workflow_patterns.put(workflow.pattern_id, workflow)
     repositories.expert_opinions.put(opinion.opinion_id, opinion)
+    claim_curation = make_curation(
+        "source_claim", claim, CurationStatus.ACCEPTED
+    )
+    repositories.curations.put(claim_curation.curation_id, claim_curation)
     curation = make_curation("expert_opinion", opinion, CurationStatus.ACCEPTED)
     repositories.curations.put(curation.curation_id, curation)
     with pytest.raises(TrustedKnowledgeError, match="UNKNOWN_KNOWLEDGE_ENDPOINT"):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import re
 
 from pydantic import BaseModel
@@ -26,7 +27,12 @@ from ...serialization import content_hash
 from ...backends.rebinding import exact_normalized_matches
 from ..ingestion import create_evidence_span_from_canonical_text
 from ..structure import _create_locator
-from .context import validate_literature_knowledge_chunk, validate_literature_knowledge_input
+from .context import (
+    resolve_figure_ownership,
+    resolve_table_ownership,
+    validate_literature_knowledge_chunk,
+    validate_literature_knowledge_input,
+)
 from .contracts import (
     LiteratureKnowledgeCompilationInput,
     LiteratureKnowledgeCompilationRecord,
@@ -44,6 +50,9 @@ from .validation import ensure_machine_curation
 
 COMPILER_ID = "spc-literature-scientific-knowledge-compiler"
 COMPILER_VERSION = "1.0.0"
+NUMERIC_TOKEN = re.compile(
+    r"(?<![\w.])(?P<number>[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?)(?![\w.])"
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +101,109 @@ def _claim_status_compatible(claim_type: str, status: EpistemicStatus) -> bool:
     elif "result" in normalized:
         required = EpistemicStatus.REPORTED_RESULT
     return required is None or status == required
+
+
+def _matching_numeric_evidence(
+    evidence_refs: tuple[str, ...],
+    value: float,
+    store: EvidenceStore,
+) -> tuple[str, ...]:
+    expected = Decimal(str(value))
+    matches = []
+    for evidence_id in evidence_refs:
+        text = store.get_evidence(evidence_id).text
+        for token in NUMERIC_TOKEN.finditer(text):
+            try:
+                parsed = Decimal(token.group("number"))
+            except InvalidOperation:
+                continue
+            if parsed == expected:
+                matches.append(evidence_id)
+                break
+    return tuple(matches)
+
+
+def _contains_unit(text: str, unit: str) -> bool:
+    return re.search(rf"(?<!\w){re.escape(unit)}(?!\w)", text, flags=re.I) is not None
+
+
+def _table_result_supports_unit_and_context(
+    numeric_evidence_ids: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+    unit: str,
+    grounding_by_evidence: dict,
+    repositories: KnowledgeRepositories,
+    store: EvidenceStore,
+) -> bool:
+    located = {}
+    for evidence_id in evidence_refs:
+        grounding = grounding_by_evidence.get(evidence_id)
+        if grounding is None:
+            continue
+        located[evidence_id] = repositories.structured_evidence_locators.get(
+            grounding.locator_id
+        )
+    for numeric_evidence_id in numeric_evidence_ids:
+        value_locator = located.get(numeric_evidence_id)
+        if value_locator is None or value_locator.table_cell_id is None:
+            continue
+        value_cell = repositories.table_cell_structures.get(
+            value_locator.table_cell_id
+        )
+        unit_supported = False
+        row_context_supported = False
+        for evidence_id, locator in located.items():
+            if locator.table_id != value_locator.table_id:
+                continue
+            text = store.get_evidence(evidence_id).text
+            if locator.table_cell_id is None:
+                unit_supported |= _contains_unit(text, unit)
+                continue
+            cell = repositories.table_cell_structures.get(locator.table_cell_id)
+            if cell.table_id != value_cell.table_id:
+                continue
+            if cell.is_header and (
+                cell.column_index
+                <= value_cell.column_index
+                < cell.column_index + cell.column_span
+            ):
+                unit_supported |= _contains_unit(text, unit)
+            if (
+                not cell.is_header
+                and cell.row_index == value_cell.row_index
+                and cell.column_index != value_cell.column_index
+            ):
+                row_context_supported = True
+        if unit_supported and row_context_supported:
+            return True
+    return False
+
+
+def _result_is_explicitly_supported(
+    *,
+    evidence_refs: tuple[str, ...],
+    value: float,
+    unit: str,
+    grounding_by_evidence: dict,
+    repositories: KnowledgeRepositories,
+    store: EvidenceStore,
+) -> bool:
+    numeric_evidence_ids = _matching_numeric_evidence(evidence_refs, value, store)
+    if not numeric_evidence_ids:
+        return False
+    if any(
+        _contains_unit(store.get_evidence(evidence_id).text, unit)
+        for evidence_id in numeric_evidence_ids
+    ):
+        return True
+    return _table_result_supports_unit_and_context(
+        numeric_evidence_ids,
+        evidence_refs,
+        unit,
+        grounding_by_evidence,
+        repositories,
+        store,
+    )
 
 
 def _grounding_record(
@@ -152,6 +264,9 @@ class LiteratureKnowledgeMaterializer:
             raise ValueError("literature knowledge chunks must be unique")
         for chunk in chunks:
             validate_literature_knowledge_chunk(chunk, compilation_input, repositories)
+        structure = repositories.document_structure_artifacts.get(
+            compilation_input.structure_id
+        )
         rejected: list[RejectedLiteratureKnowledgeProposal] = []
         quotes_by_key: dict[str, SourceQuote] = {}
         grounding_by_quote: dict[str, LiteratureKnowledgeGroundingRecord] = {}
@@ -187,12 +302,18 @@ class LiteratureKnowledgeMaterializer:
                 store,
                 locator=f"K1F exact quote in {block.block_id}",
             )
+            table_ownership = resolve_table_ownership(block, structure, repositories)
+            table, cell = table_ownership if table_ownership is not None else (None, None)
+            figure = resolve_figure_ownership(block, structure, repositories)
             evidence, locator = _create_locator(
                 evidence=evidence,
-                artifact=repositories.document_structure_artifacts.get(compilation_input.structure_id),
+                artifact=structure,
                 block=block,
                 repositories=repositories,
                 evidence_store=store,
+                table=table,
+                cell=cell,
+                figure=figure,
             )
             source = store.get_source(evidence.source_id, evidence.source_version)
             quote = SourceQuote(
@@ -309,6 +430,10 @@ class LiteratureKnowledgeMaterializer:
             model_by_key[proposal.fact_key] = fact
 
         result_by_key: dict[str, ReportedResult] = {}
+        grounding_by_evidence = {
+            grounding.evidence_id: grounding
+            for grounding in grounding_by_quote.values()
+        }
         for proposal in proposal_set.reported_result_proposals:
             claims = tuple(claims_by_key[key] for key in proposal.claim_keys if key in claims_by_key)
             if len(claims) != len(proposal.claim_keys):
@@ -321,11 +446,14 @@ class LiteratureKnowledgeMaterializer:
                 _reject(rejected, proposal.result_key, "reported_result", "RESULT_NOT_EXPLICIT")
                 continue
             evidence_refs = tuple(sorted({ref for claim in claims for ref in claim.evidence_refs}))
-            source_pattern = re.compile(
-                rf"(?<![\d.]){re.escape(format(proposal.value, 'g'))}\s*{re.escape(proposal.unit)}\b",
-                re.I,
-            )
-            if not any(source_pattern.search(store.get_evidence(ref).text) for ref in evidence_refs):
+            if not _result_is_explicitly_supported(
+                evidence_refs=evidence_refs,
+                value=proposal.value,
+                unit=proposal.unit,
+                grounding_by_evidence=grounding_by_evidence,
+                repositories=repositories,
+                store=store,
+            ):
                 _reject(rejected, proposal.result_key, "reported_result", "RESULT_NOT_PRESENT_IN_SOURCE")
                 continue
             method_refs = tuple(

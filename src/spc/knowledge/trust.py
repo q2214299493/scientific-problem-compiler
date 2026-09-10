@@ -44,6 +44,10 @@ from ..models import (
     SourceType,
 )
 from ..serialization import content_hash
+from .k1f_authority import (
+    K1FScientificAuthorityStatus,
+    classify_k1f_scientific_authority,
+)
 
 if TYPE_CHECKING:
     from ..repositories import EvidenceStore, KnowledgeRepositories
@@ -276,8 +280,11 @@ class TrustedKnowledgeValidator:
                         literature_id
                     )
                 )
-            except (FileNotFoundError, ValueError):
-                continue
+            except (FileNotFoundError, ValueError) as error:
+                raise TrustedKnowledgeError(
+                    "INVALID_LITERATURE_REPRESENTATION_SELECTION",
+                    f"cannot resolve current representation for {literature_id}",
+                ) from error
             current_selection_ids.add(selection.selection_id)
             curation = current.get(
                 ("literature_representation_selection", selection.selection_id)
@@ -300,12 +307,17 @@ class TrustedKnowledgeValidator:
                         representation.source_version or "",
                     )
                 )
-        active_accepted = {
-            key: curation
-            for key, curation in accepted.items()
-            if key[0] != "literature_representation_selection"
-            or key[1] in current_selection_ids
-        }
+        active_accepted: dict[tuple[str, str], KnowledgeCurationRecord] = {}
+        for key, curation in accepted.items():
+            if (
+                key[0] == "literature_representation_selection"
+                and key[1] not in current_selection_ids
+            ):
+                continue
+            authority = self._k1f_authority(key, current)
+            if authority == K1FScientificAuthorityStatus.STALE:
+                continue
+            active_accepted[key] = curation
         for curation in active_accepted.values():
             self._verify_evidence_refs(curation.evidence_refs)
             self._reachable[("knowledge_curation", curation.curation_id)] = curation
@@ -358,6 +370,18 @@ class TrustedKnowledgeValidator:
         if key in visiting:
             return self._require_record(*key)
         record = self._require_record(*key)
+        if key[0] in CURATION_REQUIRED_TYPES:
+            curation = current.get(key)
+            if curation is None or curation.status != CurationStatus.ACCEPTED:
+                raise TrustedKnowledgeError(
+                    "UNTRUSTED_SCIENTIFIC_DEPENDENCY",
+                    f"trusted record depends on unaccepted {key[0]}:{key[1]}",
+                )
+            if self._k1f_authority(key, current) == K1FScientificAuthorityStatus.STALE:
+                raise TrustedKnowledgeError(
+                    "STALE_K1F_SCIENTIFIC_AUTHORITY",
+                    f"trusted record depends on stale K1F authority {key[0]}:{key[1]}",
+                )
         visiting.add(key)
         try:
             if isinstance(record, LiteratureDocument):
@@ -411,6 +435,29 @@ class TrustedKnowledgeValidator:
             return record
         finally:
             visiting.remove(key)
+
+    def _k1f_authority(
+        self,
+        key: tuple[str, str],
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+    ) -> K1FScientificAuthorityStatus:
+        if self.evidence_store is None:
+            return K1FScientificAuthorityStatus.NOT_K1F
+        try:
+            return classify_k1f_scientific_authority(
+                key[0],
+                key[1],
+                self.repositories,
+                self.evidence_store,
+                current,
+            )
+        except (FileNotFoundError, ValueError) as error:
+            if isinstance(error, TrustedKnowledgeError):
+                raise
+            raise TrustedKnowledgeError(
+                "INVALID_K1F_SCIENTIFIC_AUTHORITY",
+                f"K1F authority is missing or corrupted for {key[0]}:{key[1]}",
+            ) from error
 
     def _validate_literature(
         self,

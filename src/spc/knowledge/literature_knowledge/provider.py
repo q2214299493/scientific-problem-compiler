@@ -68,8 +68,8 @@ def build_literature_knowledge_proposal_set(
 
 class MockLiteratureKnowledgeProvider:
     provider_id = "mock-literature-knowledge"
-    provider_version = "1.0.0"
-    provider_config_hash = content_hash({"mode": "first-exact-sentence"})
+    provider_version = "1.1.0"
+    provider_config_hash = content_hash({"mode": "first-punctuated-exact-sentence"})
 
     def propose(
         self,
@@ -79,7 +79,14 @@ class MockLiteratureKnowledgeProvider:
         if not chunks:
             response = LiteratureKnowledgeLLMResponse()
         else:
-            chunk = chunks[0]
+            chunk = next(
+                (
+                    item
+                    for item in chunks
+                    if re.search(r"[.!?](?=\s|$)", item.text)
+                ),
+                chunks[0],
+            )
             match = re.search(r"\S.*?(?:[.!?](?=\s|$)|$)", chunk.text, flags=re.S)
             quote_text = match.group().strip() if match is not None else chunk.text.strip()
             response = LiteratureKnowledgeLLMResponse(

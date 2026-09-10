@@ -293,14 +293,42 @@ class LiteratureKnowledgeCompilationRecord(StrictModel):
         return self
 
 
+class LiteratureKnowledgeSupportingQuoteView(StrictModel):
+    quote_id: NonBlankStr
+    evidence_id: NonBlankStr
+    exact_text: NonBlankStr
+    locator_id: NonBlankStr
+    locator: NonBlankStr
+    page_number: int | None = Field(default=None, ge=1)
+    section_path: tuple[NonBlankStr, ...] = ()
+    table_id: NonBlankStr | None = None
+    row_index: int | None = Field(default=None, ge=0)
+    column_index: int | None = Field(default=None, ge=0)
+    content_region: DocumentContentRegion
+    region_uncertain: bool = False
+
+    @model_validator(mode="after")
+    def validate_uncertainty(self) -> LiteratureKnowledgeSupportingQuoteView:
+        if self.region_uncertain != (
+            self.content_region == DocumentContentRegion.UNKNOWN
+        ):
+            raise ValueError("quote-view uncertainty must describe UNKNOWN content")
+        return self
+
+
 class LiteratureScientificKnowledgeViewRecord(StrictModel):
     record_type: NonBlankStr
     record_id: NonBlankStr
     record_hash: Sha256Str
+    scientific_statement: NonBlankStr
+    result_value: float | None = Field(default=None, allow_inf_nan=False)
+    result_unit: NonBlankStr | None = None
     curation_status: CurationStatus | None = None
     grounding_refs: tuple[NonBlankStr, ...] = ()
+    supporting_quotes: tuple[LiteratureKnowledgeSupportingQuoteView, ...] = ()
     content_regions: tuple[DocumentContentRegion, ...] = ()
     section_paths: tuple[tuple[NonBlankStr, ...], ...] = ()
+    region_uncertain: bool = False
 
 
 class LiteratureScientificKnowledgeView(StrictModel):
@@ -309,6 +337,7 @@ class LiteratureScientificKnowledgeView(StrictModel):
     view_mode: LiteratureKnowledgeViewMode
     records: tuple[LiteratureScientificKnowledgeViewRecord, ...]
     compilation_ids: tuple[NonBlankStr, ...]
+    rejected_proposals: tuple[RejectedLiteratureKnowledgeProposal, ...] = ()
     content_hash: Sha256Str
 
     @model_validator(mode="after")

@@ -18,6 +18,7 @@ from spc.backends import (
 )
 from spc.backends.retrieval import ExternalRetrievalEvidenceResolver, validate_resolution_batch_current
 from spc.cli import app
+from spc.domains import DomainPackLoader
 from spc.knowledge.acquisition import HTTPResponse, LiteratureAcquisitionService, SafeHTTPFetcher
 from spc.knowledge.graph import KnowledgeGraphBuilder
 from spc.knowledge.ingestion import (
@@ -27,6 +28,7 @@ from spc.knowledge.ingestion import (
 )
 from spc.knowledge.literature_knowledge import (
     LiteratureClaimProposal,
+    LiteratureKnowledgeChunk,
     LiteratureKnowledgeCompiler,
     LiteratureKnowledgeLLMResponse,
     LiteratureMethodFactProposal,
@@ -41,6 +43,8 @@ from spc.knowledge.literature_knowledge import (
     build_literature_knowledge_proposal_set,
     curate_knowledge_record,
     resolve_literature_knowledge_input,
+    validate_literature_knowledge_chunk,
+    validate_literature_knowledge_input,
 )
 from spc.knowledge.structure import (
     DocumentStructureService,
@@ -78,9 +82,12 @@ HTML = b"""<html><head>
 <p>The computational method used VASP.</p>
 <p>The model used periodic boundary conditions.</p>
 <p>The reported activation barrier was 1.25 eV.</p>
+<p>The signed energy was -1.25 eV.</p>
+<p>The scientific notation energy was 1e-3 eV.</p>
+<p>The context-free value was 1.25.</p>
 <p>Performance increased substantially.</p>
-<table><caption>Table 1 Barrier</caption><tr><th>Method</th><th>Barrier</th></tr>
-<tr><td>DFT</td><td>1.25 eV</td></tr></table>
+<table><caption>Table 1 Barrier</caption><tr><th>Method</th><th>Barrier (eV)</th></tr>
+<tr><td>DFT</td><td>1.25</td></tr></table>
 <figure><figcaption>Figure 1 schematic only.</figcaption></figure>
 <aside><p>Supplementary convergence statement.</p></aside>
 </article>
@@ -92,13 +99,16 @@ PDF = Path(__file__).parent / "fixtures" / "generic-born-digital.pdf"
 
 
 class StaticHTMLTransport:
+    def __init__(self, body: bytes = HTML) -> None:
+        self.body = body
+
     def request(self, url: str, *, validated_ips, timeout: float, max_bytes: int) -> HTTPResponse:
-        assert validated_ips and timeout > 0 and max_bytes > len(HTML)
+        assert validated_ips and timeout > 0 and max_bytes > len(self.body)
         return HTTPResponse(
             url=url,
             status=200,
             headers={"content-type": "text/html"},
-            body=HTML,
+            body=self.body,
             connected_ip="93.184.216.34",
         )
 
@@ -481,8 +491,8 @@ def test_table_chunks_preserve_topology_and_support_multi_quote_result(tmp_path:
     compilation_input = resolve_literature_knowledge_input(outcome.literature_id or "", repositories, store)
     chunks = build_literature_knowledge_chunks(compilation_input, repositories, store)
     method = chunk_with(chunks, "DFT")
-    header = next(chunk for chunk in chunks if chunk.text == "Barrier")
-    value = next(chunk for chunk in chunks if chunk.text == "1.25 eV")
+    header = next(chunk for chunk in chunks if chunk.text == "Barrier (eV)")
+    value = next(chunk for chunk in chunks if chunk.text == "1.25")
     assert all(chunk.table_context is not None for chunk in (method, header, value))
     assert value.table_context["row_index"] == 1
     assert value.table_context["column_index"] == 1
@@ -491,8 +501,8 @@ def test_table_chunks_preserve_topology_and_support_multi_quote_result(tmp_path:
         return LiteratureKnowledgeLLMResponse(
             quote_proposals=(
                 LiteratureQuoteProposal(quote_key="method", chunk_id=method.chunk_id, block_id=method.block_refs[0], exact_text="DFT"),
-                LiteratureQuoteProposal(quote_key="header", chunk_id=header.chunk_id, block_id=header.block_refs[0], exact_text="Barrier"),
-                LiteratureQuoteProposal(quote_key="value", chunk_id=value.chunk_id, block_id=value.block_refs[0], exact_text="1.25 eV"),
+                LiteratureQuoteProposal(quote_key="header", chunk_id=header.chunk_id, block_id=header.block_refs[0], exact_text="Barrier (eV)"),
+                LiteratureQuoteProposal(quote_key="value", chunk_id=value.chunk_id, block_id=value.block_refs[0], exact_text="1.25"),
             ),
             claim_proposals=(
                 LiteratureClaimProposal(
@@ -524,6 +534,227 @@ def test_table_chunks_preserve_topology_and_support_multi_quote_result(tmp_path:
     result = compiled.materialized.reported_results[0]
     assert len(result.evidence_refs) == 3
     assert len(compiled.materialized.groundings) == 3
+
+
+def test_table_context_is_isolated_by_literature_and_rejects_forgery(tmp_path: Path) -> None:
+    repositories, store, first, _structure = setup_html_literature(tmp_path)
+    second_html = HTML.replace(b"K1F Evidence Paper", b"K1F Evidence Study").replace(
+        b"10.0000/k1f.1", b"10.0000/k1f.2"
+    )
+    fetcher = SafeHTTPFetcher(
+        StaticHTMLTransport(second_html),
+        dns_resolver=lambda _host: ("93.184.216.34",),
+    )
+    second = LiteratureAcquisitionService(fetcher).add(
+        "https://journal.example/k1f-paper-2",
+        "base",
+        repositories,
+        store,
+    )
+    LiteratureRepresentationSelector().select(
+        second.literature_id or "",
+        second.representation_id or "",
+        "k1f-test",
+        "Select the second deterministic HTML representation.",
+        repositories,
+        store,
+    )
+    DocumentStructureService().extract(
+        second.literature_id or "",
+        second.representation_id or "",
+        repositories,
+        store,
+    )
+    second_document = repositories.literature_documents.get(second.literature_id or "")
+    second_selection = repositories.literature_representation_selections.resolve_current(
+        second_document.literature_id
+    )
+    _curate(repositories, "literature_document", second_document)
+    _curate(repositories, "literature_representation_selection", second_selection)
+
+    first_input = resolve_literature_knowledge_input(
+        first.literature_id or "", repositories, store
+    )
+    second_input = resolve_literature_knowledge_input(
+        second.literature_id or "", repositories, store
+    )
+    first_value = next(
+        chunk
+        for chunk in build_literature_knowledge_chunks(
+            first_input, repositories, store
+        )
+        if chunk.text == "1.25"
+    )
+    second_value = next(
+        chunk
+        for chunk in build_literature_knowledge_chunks(
+            second_input, repositories, store
+        )
+        if chunk.text == "1.25"
+    )
+    assert first_value.canonical_start_offset == second_value.canonical_start_offset
+    assert first_value.table_context["table_id"] != second_value.table_context["table_id"]
+    assert first_value.structure_id != second_value.structure_id
+
+    identity = first_value.model_dump(
+        mode="json", exclude={"chunk_id", "content_hash"}, exclude_none=True
+    )
+    forged_context = dict(identity["table_context"])
+    forged_context["table_id"] = second_value.table_context["table_id"]
+    forged_context["table_hash"] = second_value.table_context["table_hash"]
+    forged_context["cell_id"] = second_value.table_context["cell_id"]
+    forged_context["cell_hash"] = second_value.table_context["cell_hash"]
+    identity["table_context"] = forged_context
+    chunk_id = f"literature-knowledge-chunk-{content_hash(identity)[:24]}"
+    payload = {"chunk_id": chunk_id, **identity}
+    forged = LiteratureKnowledgeChunk(
+        **payload,
+        content_hash=content_hash(payload),
+    )
+    repositories.literature_knowledge_chunks.put(forged.chunk_id, forged)
+    with pytest.raises(ValueError, match="table context"):
+        validate_literature_knowledge_chunk(
+            forged, first_input, repositories
+        )
+
+    replacement = DocumentStructureService().extract(
+        first.literature_id or "",
+        first.representation_id or "",
+        repositories,
+        store,
+        extractor=VersionedHTMLStructureExtractor("table-isolation-2.0.0"),
+    )
+    DocumentStructureSelector().select(
+        first.literature_id or "",
+        first.representation_id or "",
+        replacement.artifact.structure_id,
+        repositories,
+        store,
+        rationale="Promote replacement table structure.",
+    )
+    with pytest.raises(ValueError, match="not bound to current authority"):
+        validate_literature_knowledge_input(first_input, repositories, store)
+    current_input = resolve_literature_knowledge_input(
+        first.literature_id or "", repositories, store
+    )
+    current_value = next(
+        chunk
+        for chunk in build_literature_knowledge_chunks(
+            current_input, repositories, store
+        )
+        if chunk.text == "1.25"
+    )
+    assert current_value.table_context["table_id"] != first_value.table_context["table_id"]
+
+
+def test_nested_multi_region_table_cell_ownership_is_preserved(tmp_path: Path) -> None:
+    body = b"""<html><head>
+    <meta name="citation_title" content="K1F Nested Table">
+    <meta name="citation_author" content="A. Author">
+    <meta name="citation_publication_date" content="2026">
+    <meta name="citation_doi" content="10.0000/k1f.nested">
+    </head><body><article><h1>Results</h1>
+    <table><caption>Table Nested</caption>
+    <tr><th>Condition</th><th>Value (eV)</th></tr>
+    <tr><td><p>First region</p><p>Second region</p></td><td>0.50</td></tr>
+    </table></article></body></html>"""
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = KnowledgeEvidenceStore(repositories.root)
+    outcome = LiteratureAcquisitionService(
+        SafeHTTPFetcher(
+            StaticHTMLTransport(body),
+            dns_resolver=lambda _host: ("93.184.216.34",),
+        )
+    ).add("https://journal.example/k1f-nested", "base", repositories, store)
+    LiteratureRepresentationSelector().select(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        "k1f-test",
+        "Select nested table representation.",
+        repositories,
+        store,
+    )
+    DocumentStructureService().extract(
+        outcome.literature_id or "",
+        outcome.representation_id or "",
+        repositories,
+        store,
+    )
+    document = repositories.literature_documents.get(outcome.literature_id or "")
+    selection = repositories.literature_representation_selections.resolve_current(
+        document.literature_id
+    )
+    _curate(repositories, "literature_document", document)
+    _curate(repositories, "literature_representation_selection", selection)
+    compilation_input = resolve_literature_knowledge_input(
+        document.literature_id, repositories, store
+    )
+    chunks = build_literature_knowledge_chunks(
+        compilation_input, repositories, store
+    )
+    first_region = chunk_with(chunks, "First region")
+    second_region = chunk_with(chunks, "Second region")
+    assert first_region.table_context["cell_id"] == second_region.table_context["cell_id"]
+    assert len(first_region.table_context["canonical_block_refs"]) == 2
+
+
+def test_numeric_tokens_preserve_sign_exponent_and_table_relationships(tmp_path: Path) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+
+    def response(chunks):
+        negative = chunk_with(chunks, "signed energy")
+        scientific = chunk_with(chunks, "scientific notation")
+        plain = chunk_with(chunks, "context-free value")
+        header = next(chunk for chunk in chunks if chunk.text == "Barrier (eV)")
+        quote_specs = (
+            ("negative", negative),
+            ("scientific", scientific),
+            ("plain", plain),
+            ("header", header),
+        )
+        return LiteratureKnowledgeLLMResponse(
+            quote_proposals=tuple(
+                LiteratureQuoteProposal(
+                    quote_key=key,
+                    chunk_id=chunk.chunk_id,
+                    block_id=chunk.block_refs[0],
+                    exact_text=chunk.text,
+                )
+                for key, chunk in quote_specs
+            ),
+            claim_proposals=(
+                LiteratureClaimProposal(claim_key="negative", text=negative.text, claim_type="reported_result", quote_keys=("negative",), claim_strength="explicit", epistemic_status=EpistemicStatus.REPORTED_RESULT),
+                LiteratureClaimProposal(claim_key="scientific", text=scientific.text, claim_type="reported_result", quote_keys=("scientific",), claim_strength="explicit", epistemic_status=EpistemicStatus.REPORTED_RESULT),
+                LiteratureClaimProposal(claim_key="unrelated", text="The context-free value is a barrier in eV.", claim_type="reported_result", quote_keys=("plain", "header"), claim_strength="incomplete", epistemic_status=EpistemicStatus.REPORTED_RESULT),
+            ),
+            reported_result_proposals=(
+                LiteratureReportedResultProposal(result_key="wrong-sign", claim_keys=("negative",), quantity="energy", value=1.25, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+                LiteratureReportedResultProposal(result_key="wrong-exponent", claim_keys=("scientific",), quantity="energy", value=3.0, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+                LiteratureReportedResultProposal(result_key="scientific", claim_keys=("scientific",), quantity="energy", value=0.001, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+                LiteratureReportedResultProposal(result_key="unrelated", claim_keys=("unrelated",), quantity="barrier", value=1.25, unit="eV", system_context={}, method_context={}, result_status=ResultStatus.COMPUTED_REPORTED),
+            ),
+        )
+
+    compiled = LiteratureKnowledgeCompiler().compile(
+        outcome.literature_id or "", StaticProvider(response), repositories, store
+    )
+    assert len(compiled.materialized.reported_results) == 1
+    result = compiled.materialized.reported_results[0]
+    assert result.value == 0.001
+    assert any(
+        "1e-3 eV" in store.get_evidence(evidence_id).text
+        for evidence_id in result.evidence_refs
+    )
+    rejected = {
+        item.proposal_ref: item.rejection_code
+        for item in compiled.materialized.record.rejected_proposals
+        if item.proposal_kind == "reported_result"
+    }
+    assert rejected == {
+        "wrong-sign": "RESULT_NOT_PRESENT_IN_SOURCE",
+        "wrong-exponent": "RESULT_NOT_PRESENT_IN_SOURCE",
+        "unrelated": "RESULT_NOT_PRESENT_IN_SOURCE",
+    }
 
 
 def test_structured_provider_retries_malformed_json_and_treats_injection_as_data(
@@ -643,6 +874,76 @@ def test_accepted_relation_cannot_promote_machine_extracted_endpoints(tmp_path: 
         )
 
 
+@pytest.mark.parametrize(
+    "dependency_status",
+    [CurationStatus.MACHINE_EXTRACTED, CurationStatus.REJECTED],
+)
+def test_accepted_result_cannot_promote_unaccepted_fact_dependencies(
+    tmp_path: Path,
+    dependency_status: CurationStatus,
+) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+
+    def response(chunks):
+        method = chunk_with(chunks, "computational method")
+        model = chunk_with(chunks, "periodic boundary")
+        result = chunk_with(chunks, "reported activation barrier")
+        return LiteratureKnowledgeLLMResponse(
+            quote_proposals=(
+                LiteratureQuoteProposal(quote_key="method", chunk_id=method.chunk_id, block_id=method.block_refs[0], exact_text=method.text),
+                LiteratureQuoteProposal(quote_key="model", chunk_id=model.chunk_id, block_id=model.block_refs[0], exact_text=model.text),
+                LiteratureQuoteProposal(quote_key="result", chunk_id=result.chunk_id, block_id=result.block_refs[0], exact_text=result.text),
+            ),
+            claim_proposals=(
+                LiteratureClaimProposal(claim_key="method", text=method.text, claim_type="method_statement", quote_keys=("method",), claim_strength="explicit", epistemic_status=EpistemicStatus.METHOD_STATEMENT),
+                LiteratureClaimProposal(claim_key="model", text=model.text, claim_type="model_statement", quote_keys=("model",), claim_strength="explicit", epistemic_status=EpistemicStatus.MODEL_STATEMENT),
+                LiteratureClaimProposal(claim_key="result", text=result.text, claim_type="reported_result", quote_keys=("result",), claim_strength="explicit", epistemic_status=EpistemicStatus.REPORTED_RESULT),
+            ),
+            method_fact_proposals=(LiteratureMethodFactProposal(fact_key="method", text=method.text, claim_keys=("method",), attributes={"software": "VASP"}),),
+            model_fact_proposals=(LiteratureModelFactProposal(fact_key="model", text=model.text, claim_keys=("model",), attributes={"boundary": "periodic"}),),
+            reported_result_proposals=(LiteratureReportedResultProposal(result_key="result", claim_keys=("result",), quantity="activation_barrier", value=1.25, unit="eV", system_context={"system": "reported"}, method_context={"method": "reported"}, method_fact_keys=("method",), model_fact_keys=("model",), result_status=ResultStatus.COMPUTED_REPORTED),),
+        )
+
+    compiled = LiteratureKnowledgeCompiler().compile(
+        outcome.literature_id or "", StaticProvider(response), repositories, store
+    )
+    method = compiled.materialized.method_facts[0]
+    model = compiled.materialized.model_facts[0]
+    result = compiled.materialized.reported_results[0]
+    if dependency_status == CurationStatus.REJECTED:
+        curate_knowledge_record(
+            repositories,
+            target_type="method_fact",
+            target_id=method.fact_id,
+            status=CurationStatus.REJECTED,
+            curator_id="human-reviewer",
+            rationale="Reject the method interpretation.",
+        )
+        curate_knowledge_record(
+            repositories,
+            target_type="model_fact",
+            target_id=model.fact_id,
+            status=CurationStatus.ACCEPTED,
+            curator_id="human-reviewer",
+            rationale="Accept the model interpretation.",
+        )
+    curate_knowledge_record(
+        repositories,
+        target_type="reported_result",
+        target_id=result.result_id,
+        status=CurationStatus.ACCEPTED,
+        curator_id="human-reviewer",
+        rationale="Accept the result interpretation.",
+    )
+
+    with pytest.raises(TrustedKnowledgeError, match="UNTRUSTED_SCIENTIFIC_DEPENDENCY"):
+        TrustedKnowledgeValidator(repositories, store).validate()
+    with pytest.raises(TrustedKnowledgeError, match="UNTRUSTED_SCIENTIFIC_DEPENDENCY"):
+        KnowledgeGraphBuilder().build(
+            repositories, store, view_mode=KnowledgeViewMode.TRUSTED
+        )
+
+
 def test_structure_switch_makes_old_knowledge_noncurrent_but_keeps_audit_history(
     tmp_path: Path,
 ) -> None:
@@ -681,8 +982,18 @@ def test_structure_switch_makes_old_knowledge_noncurrent_but_keeps_audit_history
     audit = LiteratureScientificKnowledgeViewBuilder().build(
         outcome.literature_id or "", repositories, store
     )
+    global_trusted = TrustedKnowledgeValidator(repositories, store).validate()
+    graph = KnowledgeGraphBuilder().build(
+        repositories, store, view_mode=KnowledgeViewMode.TRUSTED
+    )
+    snapshot = repositories.create_snapshot(
+        store, DomainPackLoader().load("base").profile
+    )
     assert trusted.records == ()
     assert {item.record_id for item in audit.records} == {claim.claim_id}
+    assert ("source_claim", claim.claim_id) not in global_trusted.trusted_records
+    assert all(node.record_id != claim.claim_id for node in graph.nodes)
+    assert f"source_claim:{claim.claim_id}" not in snapshot.trusted_record_hashes
 
 
 @pytest.mark.parametrize("tamper_target", ["evidence", "locator"])
@@ -693,6 +1004,15 @@ def test_broken_k1f_grounding_fails_closed(
     repositories, store, outcome, _structure = setup_html_literature(tmp_path)
     compiled = LiteratureKnowledgeCompiler().compile(
         outcome.literature_id or "", MockLiteratureKnowledgeProvider(), repositories, store
+    )
+    claim = compiled.materialized.source_claims[0]
+    curate_knowledge_record(
+        repositories,
+        target_type="source_claim",
+        target_id=claim.claim_id,
+        status=CurationStatus.ACCEPTED,
+        curator_id="human-reviewer",
+        rationale="Accept before testing current-grounding corruption.",
     )
     grounding = compiled.materialized.groundings[0]
     if tamper_target == "evidence":
@@ -705,10 +1025,16 @@ def test_broken_k1f_grounding_fails_closed(
         payload["block_id"] = "document-block-tampered"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises((ValidationError, ValueError)):
-        LiteratureScientificKnowledgeViewBuilder().build(
-            outcome.literature_id or "", repositories, store
-        )
+    for view_mode in ("audit", "trusted_current"):
+        with pytest.raises((ValidationError, ValueError)):
+            LiteratureScientificKnowledgeViewBuilder().build(
+                outcome.literature_id or "",
+                repositories,
+                store,
+                view_mode=view_mode,
+            )
+    with pytest.raises(TrustedKnowledgeError, match="INVALID_K1F_SCIENTIFIC_AUTHORITY"):
+        TrustedKnowledgeValidator(repositories, store).validate()
 
 
 def test_scientific_graph_excludes_storage_and_provenance_peer_nodes(tmp_path: Path) -> None:
@@ -757,7 +1083,49 @@ def test_cli_extract_inspect_and_curate_use_existing_curation_chain(tmp_path: Pa
         ["inspect-literature-knowledge", "--literature-id", outcome.literature_id or "", "--knowledge-dir", str(repositories.root), "--view", "trusted_current", "--record-type", "source_claim"],
     )
     assert inspected.exit_code == 0, inspected.output
-    assert json.loads(inspected.output)["records"][0]["record_id"] == claim_id
+    inspected_payload = json.loads(inspected.output)
+    record = inspected_payload["records"][0]
+    assert record["record_id"] == claim_id
+    assert record["scientific_statement"]
+    assert record["supporting_quotes"][0]["exact_text"]
+    assert record["supporting_quotes"][0]["locator"].startswith("HTML")
+
+
+def test_cli_llm_provider_path_uses_existing_transport_without_persisting_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories, _store, outcome, _structure = setup_html_literature(tmp_path)
+    fake = FakeLLMTransport(
+        (LiteratureKnowledgeLLMResponse().model_dump(mode="json"),),
+        model_id="fake-k1f-cli-model",
+    )
+    monkeypatch.setattr("spc.cli.HTTPJSONLLMTransport", lambda *_args, **_kwargs: fake)
+    monkeypatch.setenv("K1F_TEST_API_KEY", "must-not-be-persisted")
+    result = CliRunner().invoke(
+        app,
+        [
+            "extract-literature-knowledge",
+            "--literature-id",
+            outcome.literature_id or "",
+            "--knowledge-dir",
+            str(repositories.root),
+            "--provider",
+            "llm",
+            "--llm-endpoint",
+            "https://llm.example/structured",
+            "--llm-model",
+            "fake-k1f-cli-model",
+            "--llm-api-key-env",
+            "K1F_TEST_API_KEY",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["provider_id"] == "structured-llm-literature-knowledge"
+    assert payload["provider_config_hash"]
+    assert fake.call_count == 1
+    assert "must-not-be-persisted" not in result.output
 
 
 def _rebuild_resolution(resolution: ExternalRetrievalResolution, **changes) -> ExternalRetrievalResolution:

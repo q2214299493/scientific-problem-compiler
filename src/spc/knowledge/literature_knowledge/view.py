@@ -3,10 +3,15 @@ from __future__ import annotations
 from ...models import CurationStatus, DocumentContentRegion
 from ...repositories import EvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
+from ..k1f_authority import (
+    K1FScientificAuthorityStatus,
+    validate_k1f_compilation_authority,
+)
 from ..trust import TrustedKnowledgeValidator
-from .context import validate_literature_knowledge_input
+from ..structure import format_structured_evidence_locator
 from .contracts import (
     LiteratureKnowledgeViewMode,
+    LiteratureKnowledgeSupportingQuoteView,
     LiteratureScientificKnowledgeView,
     LiteratureScientificKnowledgeViewRecord,
 )
@@ -15,7 +20,6 @@ from .repositories import (
     LiteratureKnowledgeCompilationRepository,
     LiteratureKnowledgeGroundingRepository,
 )
-from .validation import validate_grounding_record
 
 
 RECORD_REPOSITORIES = {
@@ -44,9 +48,11 @@ class LiteratureScientificKnowledgeViewBuilder:
         mode = LiteratureKnowledgeViewMode(view_mode)
         status_filter = CurationStatus(curation_status) if curation_status is not None else None
         region_filter = DocumentContentRegion(content_region) if content_region is not None else None
-        current_curations = TrustedKnowledgeValidator(repositories, store).resolve_current_curations()
+        validator = TrustedKnowledgeValidator(repositories, store)
+        current_curations = validator.resolve_current_curations()
+        trusted_records = {}
         if mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT:
-            TrustedKnowledgeValidator(repositories, store).validate()
+            trusted_records = validator.validate().trusted_records
         inputs = LiteratureKnowledgeCompilationInputRepository(repositories.root)
         compilations = tuple(
             record
@@ -56,13 +62,19 @@ class LiteratureScientificKnowledgeViewBuilder:
         groundings_repository = LiteratureKnowledgeGroundingRepository(repositories.root)
         records: dict[tuple[str, str], LiteratureScientificKnowledgeViewRecord] = {}
         included_compilations: list[str] = []
+        rejected_proposals = []
         for compilation in compilations:
-            compilation_input = inputs.get(compilation.compilation_input_id)
-            if mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT:
-                try:
-                    validate_literature_knowledge_input(compilation_input, repositories, store)
-                except ValueError:
-                    continue
+            authority = validate_k1f_compilation_authority(
+                compilation,
+                repositories,
+                store,
+                current_curations,
+            )
+            if (
+                mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT
+                and authority != K1FScientificAuthorityStatus.CURRENT
+            ):
+                continue
             groundings = tuple(
                 groundings_repository.get(grounding_id)
                 for grounding_id in compilation.grounding_hashes
@@ -70,12 +82,6 @@ class LiteratureScientificKnowledgeViewBuilder:
             for grounding in groundings:
                 if grounding.content_hash != compilation.grounding_hashes[grounding.grounding_id]:
                     raise ValueError("compilation grounding hash is invalid")
-                validate_grounding_record(
-                    grounding,
-                    repositories,
-                    store,
-                    require_current=mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT,
-                )
             grounding_by_quote = {item.quote_id: item for item in groundings}
             grounding_by_evidence = {item.evidence_id: item for item in groundings}
             categories = {
@@ -93,8 +99,9 @@ class LiteratureScientificKnowledgeViewBuilder:
                     if getattr(scientific_record, identity_field) != record_id:
                         raise ValueError("scientific knowledge record identity mismatch")
                     curation = current_curations.get((category, record_id))
-                    if mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT and (
-                        curation is None or curation.status != CurationStatus.ACCEPTED
+                    if (
+                        mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT
+                        and (category, record_id) not in trusted_records
                     ):
                         continue
                     related_groundings = []
@@ -114,13 +121,59 @@ class LiteratureScientificKnowledgeViewBuilder:
                         if mode == LiteratureKnowledgeViewMode.TRUSTED_CURRENT:
                             raise ValueError("trusted K1F scientific record has no grounding")
                         continue
+                    supporting_quotes = []
+                    for grounding in related_groundings:
+                        quote = repositories.source_quotes.get(grounding.quote_id)
+                        locator = repositories.structured_evidence_locators.get(
+                            grounding.locator_id
+                        )
+                        supporting_quotes.append(
+                            LiteratureKnowledgeSupportingQuoteView(
+                                quote_id=quote.quote_id,
+                                evidence_id=quote.evidence_ref,
+                                exact_text=quote.text,
+                                locator_id=locator.locator_id,
+                                locator=format_structured_evidence_locator(
+                                    locator, repositories
+                                ),
+                                page_number=locator.page_number,
+                                section_path=locator.section_path,
+                                table_id=locator.table_id,
+                                row_index=locator.row_index,
+                                column_index=locator.column_index,
+                                content_region=locator.content_region,
+                                region_uncertain=(
+                                    locator.content_region
+                                    == DocumentContentRegion.UNKNOWN
+                                ),
+                            )
+                        )
+                    supporting_quotes = list(
+                        {
+                            item.quote_id: item for item in supporting_quotes
+                        }.values()
+                    )
+                    statement = (
+                        getattr(scientific_record, "text", None)
+                        or getattr(scientific_record, "rationale", None)
+                        or (
+                            f"{scientific_record.quantity} = "
+                            f"{scientific_record.value} {scientific_record.unit}"
+                        )
+                    )
                     view_record = LiteratureScientificKnowledgeViewRecord(
                         record_type=category,
                         record_id=record_id,
                         record_hash=getattr(scientific_record, "content_hash", None)
                         or content_hash(scientific_record),
+                        scientific_statement=statement,
+                        result_value=getattr(scientific_record, "value", None),
+                        result_unit=getattr(scientific_record, "unit", None),
                         curation_status=curation.status if curation is not None else None,
                         grounding_refs=tuple(sorted(item.grounding_id for item in related_groundings)),
+                        supporting_quotes=tuple(
+                            sorted(supporting_quotes, key=lambda item: item.quote_id)
+                        ),
                         content_regions=tuple(sorted({item.content_region for item in related_groundings})),
                         section_paths=tuple(
                             sorted(
@@ -129,6 +182,10 @@ class LiteratureScientificKnowledgeViewBuilder:
                                     for item in related_groundings
                                 }
                             )
+                        ),
+                        region_uncertain=any(
+                            item.content_region == DocumentContentRegion.UNKNOWN
+                            for item in related_groundings
                         ),
                     )
                     if record_type is not None and view_record.record_type != record_type:
@@ -141,12 +198,23 @@ class LiteratureScientificKnowledgeViewBuilder:
                         continue
                     records[(category, record_id)] = view_record
             included_compilations.append(compilation.compilation_id)
+            rejected_proposals.extend(compilation.rejected_proposals)
         ordered = tuple(records[key] for key in sorted(records))
         identity = {
             "literature_id": literature_id,
             "view_mode": mode,
             "records": ordered,
             "compilation_ids": tuple(sorted(included_compilations)),
+            "rejected_proposals": tuple(
+                sorted(
+                    rejected_proposals,
+                    key=lambda item: (
+                        item.proposal_kind,
+                        item.proposal_ref,
+                        item.rejection_code,
+                    ),
+                )
+            ),
         }
         view_id = f"literature-knowledge-view-{content_hash(identity)[:24]}"
         payload = {"view_id": view_id, **identity}

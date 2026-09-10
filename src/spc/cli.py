@@ -195,6 +195,7 @@ from .knowledge.literature_knowledge import (
     LiteratureKnowledgeGroundingRecord,
     LiteratureKnowledgeLLMResponse,
     LiteratureKnowledgeProposalSet,
+    LiteratureKnowledgeSupportingQuoteView,
     LiteratureMethodFactProposal,
     LiteratureModelFactProposal,
     LiteratureQuoteProposal,
@@ -203,6 +204,8 @@ from .knowledge.literature_knowledge import (
     LiteratureScientificKnowledgeView,
     LiteratureScientificKnowledgeViewBuilder,
     MockLiteratureKnowledgeProvider,
+    StructuredLiteratureKnowledgeOutputError,
+    StructuredLLMLiteratureKnowledgeProvider,
     curate_knowledge_record,
 )
 from .knowledge.structure import inspect_document_structure
@@ -579,24 +582,55 @@ def extract_literature_knowledge(
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
     provider: Annotated[str, typer.Option("--provider")] = "mock",
     include_supplementary: Annotated[bool, typer.Option("--include-supplementary")] = False,
+    llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
+    llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
+    llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
+    temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
+    max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
 ) -> None:
     """Compile untrusted, exactly grounded literature knowledge proposals."""
-    if provider != "mock":
-        raise typer.BadParameter("only the offline mock provider is configured by this command")
+    if provider == "mock":
+        selected_provider = MockLiteratureKnowledgeProvider()
+        provider_notice = "offline test provider; output is not scientific paper interpretation"
+    elif provider == "llm":
+        if llm_endpoint is None or llm_model is None:
+            raise typer.BadParameter(
+                "--provider llm requires --llm-endpoint and --llm-model"
+            )
+        selected_provider = StructuredLLMLiteratureKnowledgeProvider(
+            HTTPJSONLLMTransport(
+                llm_endpoint,
+                llm_model,
+                api_key=os.getenv(llm_api_key_env),
+            ),
+            temperature=temperature,
+            max_attempts=max_attempts,
+        )
+        provider_notice = "structured proposal provider; explicit human curation remains required"
+    else:
+        raise typer.BadParameter("--provider must be 'mock' or 'llm'")
     repositories = KnowledgeRepositories(knowledge_dir)
-    outcome = LiteratureKnowledgeCompiler().compile(
-        literature_id,
-        MockLiteratureKnowledgeProvider(),
-        repositories,
-        KnowledgeEvidenceStore(knowledge_dir),
-        include_supplementary=include_supplementary,
-    )
+    try:
+        outcome = LiteratureKnowledgeCompiler().compile(
+            literature_id,
+            selected_provider,
+            repositories,
+            KnowledgeEvidenceStore(knowledge_dir),
+            include_supplementary=include_supplementary,
+        )
+    except StructuredLiteratureKnowledgeOutputError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
     typer.echo(
         json.dumps(
             {
                 "compilation_id": outcome.materialized.record.compilation_id,
                 "compilation_input_id": outcome.compilation_input.compilation_input_id,
                 "proposal_set_id": outcome.proposal_set.proposal_set_id,
+                "provider_id": outcome.proposal_set.provider_id,
+                "provider_version": outcome.proposal_set.provider_version,
+                "provider_config_hash": outcome.proposal_set.provider_config_hash,
+                "provider_notice": provider_notice,
                 "chunk_count": len(outcome.chunks),
                 "region_uncertain_chunk_count": sum(chunk.region_uncertain for chunk in outcome.chunks),
                 "source_quote_ids": outcome.materialized.record.source_quote_ids,
@@ -1301,6 +1335,7 @@ def schema_command(
         LiteratureRelationProposal,
         LiteratureKnowledgeLLMResponse,
         LiteratureKnowledgeProposalSet,
+        LiteratureKnowledgeSupportingQuoteView,
         LiteratureKnowledgeGroundingRecord,
         LiteratureKnowledgeCompilationRecord,
         LiteratureScientificKnowledgeView,

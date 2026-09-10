@@ -512,3 +512,43 @@ spc inspect-literature-knowledge --literature-id literature-... --knowledge-dir 
 spc curate-knowledge --target-type source_claim --target-id claim-... --status accepted `
   --curator-id reviewer --rationale "Reviewed exact source grounding." --knowledge-dir knowledge
 ```
+
+K1F.1 applies one shared trusted-current authority rule to the literature view,
+global trusted graph, snapshots, and downstream retrieval contexts. Accepted
+results cannot pull unaccepted method/model facts into trusted knowledge. Table
+ownership is resolved only through the selected structure's table and cell
+inventories, while numeric grounding preserves sign and scientific notation.
+Inspection records include the scientific statement, exact quotes, formatted
+locators, curation state, uncertain regions, and deterministic proposal
+rejections.
+
+Run the bounded two-document pipeline demonstration without network access:
+
+```powershell
+python examples/k1f_offline_demo.py
+```
+
+The demo ingests two in-memory HTML fixtures, selects and curates source
+authority, structures both documents, extracts mock proposals, shows the audit
+view, explicitly accepts one claim per document, then shows trusted-current
+records. It also verifies that identical table offsets in different papers bind
+different table identities. This demonstrates plumbing and trust gates, not
+scientific extraction accuracy.
+
+Real structured-model extraction is opt-in and uses the same vendor-neutral HTTP
+transport as planning and approval:
+
+```powershell
+$env:SPC_LLM_API_KEY = "..."
+spc extract-literature-knowledge `
+  --literature-id literature-... `
+  --knowledge-dir knowledge `
+  --provider llm `
+  --llm-endpoint https://your-endpoint.example/structured `
+  --llm-model your-model-id `
+  --llm-api-key-env SPC_LLM_API_KEY
+```
+
+No model call occurs unless `--provider llm` and both endpoint/model options are
+supplied. API-key values are never written into K1F provenance. All LLM outputs
+remain strict, untrusted proposals and require explicit scientific curation.

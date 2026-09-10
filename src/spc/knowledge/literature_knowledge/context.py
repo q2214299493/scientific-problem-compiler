@@ -7,7 +7,11 @@ from ...models import (
     CurationStatus,
     DocumentBlockType,
     DocumentContentRegion,
+    DocumentStructureArtifact,
+    FigureStructure,
     LiteratureRepresentationKind,
+    TableCellStructure,
+    TableStructure,
 )
 from ...repositories import EvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
@@ -146,43 +150,120 @@ def _bounded_ranges(start: int, end: int, text: str) -> Iterable[tuple[int, int]
         cursor = max(boundary, cursor + 1)
 
 
-def _table_context(block, repositories: KnowledgeRepositories) -> FrozenDict | None:
-    cells = tuple(
-        cell
-        for cell in repositories.table_cell_structures.list()
-        if cell.start_offset is not None
-        and cell.end_offset is not None
-        and block.start_offset >= cell.start_offset
-        and block.end_offset <= cell.end_offset
+def _canonical_block_map(
+    structure: DocumentStructureArtifact,
+    repositories: KnowledgeRepositories,
+) -> dict[str, object]:
+    canonical = (
+        repositories.canonical_text_artifacts.get(structure.canonical_text_id)
+        if structure.representation_kind == LiteratureRepresentationKind.PDF
+        else repositories.canonical_html_text_artifacts.get(structure.canonical_text_id)
     )
-    if not cells:
+    return {block.block_id: block for block in canonical.blocks}
+
+
+def resolve_table_ownership(
+    block,
+    structure: DocumentStructureArtifact,
+    repositories: KnowledgeRepositories,
+) -> tuple[TableStructure, TableCellStructure | None] | None:
+    canonical_blocks = _canonical_block_map(structure, repositories)
+    matches: list[tuple[TableStructure, TableCellStructure | None]] = []
+    for table_id, expected_hash in structure.table_hashes.items():
+        table = repositories.table_structures.get(table_id)
+        if table.structure_id != structure.structure_id or table.content_hash != expected_hash:
+            raise ValueError("table is not bound to the selected structure")
+        if table.caption_block_ref == block.block_id:
+            matches.append((table, None))
+        for cell_id in table.cell_refs:
+            cell = repositories.table_cell_structures.get(cell_id)
+            if cell.table_id != table.table_id:
+                raise ValueError("table cell belongs to another table")
+            if cell.canonical_block_refs:
+                regions = []
+                for canonical_block_id in cell.canonical_block_refs:
+                    region = canonical_blocks.get(canonical_block_id)
+                    if region is None:
+                        raise ValueError("table cell references an unknown canonical block")
+                    regions.append(region)
+                owns_block = any(
+                    region.start_offset == block.start_offset
+                    and region.end_offset == block.end_offset
+                    and region.text_hash == block.text_hash
+                    for region in regions
+                )
+            else:
+                owns_block = (
+                    cell.start_offset == block.start_offset
+                    and cell.end_offset == block.end_offset
+                    and cell.text_hash == block.text_hash
+                )
+            if owns_block:
+                matches.append((table, cell))
+    if len(matches) > 1:
+        raise ValueError("document block has ambiguous table ownership")
+    return matches[0] if matches else None
+
+
+def _table_context(
+    block,
+    structure: DocumentStructureArtifact,
+    repositories: KnowledgeRepositories,
+) -> FrozenDict | None:
+    ownership = resolve_table_ownership(block, structure, repositories)
+    if ownership is None:
         return None
-    tables = {table.table_id: table for table in repositories.table_structures.list()}
-    cell = cells[0]
-    table = tables[cell.table_id]
+    table, cell = ownership
+    values = {
+        "table_id": table.table_id,
+        "table_hash": table.content_hash,
+        "label": table.label,
+        "caption_block_ref": table.caption_block_ref,
+        "cell_id": cell.cell_id if cell else None,
+        "cell_hash": cell.content_hash if cell else None,
+        "row_index": cell.row_index if cell else None,
+        "column_index": cell.column_index if cell else None,
+        "row_span": cell.row_span if cell else None,
+        "column_span": cell.column_span if cell else None,
+        "is_header": cell.is_header if cell else None,
+        "canonical_block_refs": cell.canonical_block_refs if cell else (),
+    }
+    return FrozenDict({key: value for key, value in values.items() if value is not None})
+
+
+def resolve_figure_ownership(
+    block,
+    structure: DocumentStructureArtifact,
+    repositories: KnowledgeRepositories,
+) -> FigureStructure | None:
+    matches = []
+    for figure_id, expected_hash in structure.figure_hashes.items():
+        figure = repositories.figure_structures.get(figure_id)
+        if figure.structure_id != structure.structure_id or figure.content_hash != expected_hash:
+            raise ValueError("figure is not bound to the selected structure")
+        if figure.caption_block_ref == block.block_id:
+            matches.append(figure)
+    if len(matches) > 1:
+        raise ValueError("document block has ambiguous figure ownership")
+    return matches[0] if matches else None
+
+
+def _figure_context(
+    block,
+    structure: DocumentStructureArtifact,
+    repositories: KnowledgeRepositories,
+) -> FrozenDict | None:
+    figure = resolve_figure_ownership(block, structure, repositories)
+    if figure is None:
+        return None
     return FrozenDict(
         {
-            "table_id": table.table_id,
-            "label": table.label,
-            "caption_block_ref": table.caption_block_ref,
-            "cell_id": cell.cell_id,
-            "row_index": cell.row_index,
-            "column_index": cell.column_index,
-            "row_span": cell.row_span,
-            "column_span": cell.column_span,
-            "is_header": cell.is_header,
+            "figure_id": figure.figure_id,
+            "figure_hash": figure.content_hash,
+            "label": figure.label,
+            "caption_only": True,
         }
     )
-
-
-def _figure_context(block_id: str, repositories: KnowledgeRepositories) -> FrozenDict | None:
-    figures = tuple(
-        figure for figure in repositories.figure_structures.list() if figure.caption_block_ref == block_id
-    )
-    if not figures:
-        return None
-    figure = figures[0]
-    return FrozenDict({"figure_id": figure.figure_id, "label": figure.label, "caption_only": True})
 
 
 def validate_literature_knowledge_chunk(
@@ -211,6 +292,9 @@ def validate_literature_knowledge_chunk(
         )
     if canonical_text[chunk.canonical_start_offset : chunk.canonical_end_offset] != chunk.text:
         raise ValueError("literature knowledge chunk text binding is invalid")
+    structure = repositories.document_structure_artifacts.get(
+        compilation_input.structure_id
+    )
     for block_id in chunk.block_refs:
         block = repositories.document_structure_blocks.get(block_id)
         if (
@@ -221,6 +305,10 @@ def validate_literature_knowledge_chunk(
             or block.content_region != chunk.content_region
         ):
             raise ValueError("literature knowledge chunk block binding is invalid")
+        if chunk.table_context != _table_context(block, structure, repositories):
+            raise ValueError("literature knowledge chunk table context is invalid")
+        if chunk.figure_context != _figure_context(block, structure, repositories):
+            raise ValueError("literature knowledge chunk figure context is invalid")
     return chunk
 
 
@@ -261,8 +349,8 @@ def build_literature_knowledge_chunks(
                 "canonical_start_offset": start,
                 "canonical_end_offset": end,
                 "text": canonical_text[start:end],
-                "table_context": _table_context(block, repositories),
-                "figure_context": _figure_context(block.block_id, repositories),
+                "table_context": _table_context(block, structure, repositories),
+                "figure_context": _figure_context(block, structure, repositories),
             }
             identity = {key: value for key, value in identity.items() if value is not None}
             chunk = _content_bound(

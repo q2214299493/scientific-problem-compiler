@@ -7,7 +7,6 @@ from ...serialization import content_hash
 from ..ingestion import LiteratureRepresentationSelector
 from ..structure import validate_document_structure, verify_structured_evidence_locator
 from ..structure_selection import validate_structure_selection
-from ..trust import TrustedKnowledgeValidator
 from .contracts import LiteratureKnowledgeGroundingRecord
 from .repositories import LiteratureKnowledgeGroundingRepository
 
@@ -27,7 +26,6 @@ CURATION_TRANSITIONS = {
     CurationStatus.REJECTED: frozenset(),
 }
 
-
 def curate_knowledge_record(
     repositories: KnowledgeRepositories,
     *,
@@ -37,6 +35,8 @@ def curate_knowledge_record(
     curator_id: str,
     rationale: str,
 ) -> KnowledgeCurationRecord:
+    from ..trust import TrustedKnowledgeValidator
+
     records = TrustedKnowledgeValidator.record_index(repositories)
     target = records.get((target_type, target_id))
     if target is None:
@@ -73,6 +73,8 @@ def ensure_machine_curation(
     target_type: str,
     target_id: str,
 ) -> KnowledgeCurationRecord:
+    from ..trust import TrustedKnowledgeValidator
+
     current = TrustedKnowledgeValidator(repositories, repositories.evidence_store).resolve_current_curations().get(
         (target_type, target_id)
     )
@@ -118,6 +120,11 @@ def validate_grounding_record(
     evidence = store.get_evidence(record.evidence_id)
     store.verify_evidence_integrity(evidence)
     locator = verify_structured_evidence_locator(record.locator_id, repositories, store)
+    from .context import resolve_figure_ownership, resolve_table_ownership
+
+    table_ownership = resolve_table_ownership(block, structure, repositories)
+    table, cell = table_ownership if table_ownership is not None else (None, None)
+    figure = resolve_figure_ownership(block, structure, repositories)
     quote = repositories.source_quotes.get(record.quote_id)
     issues, _source = source_quote_record_issues(
         quote,
@@ -157,6 +164,9 @@ def validate_grounding_record(
         or locator.block_id != block.block_id
         or quote.evidence_ref != evidence.evidence_id
         or record.content_region != block.content_region
+        or locator.table_id != (table.table_id if table is not None else None)
+        or locator.table_cell_id != (cell.cell_id if cell is not None else None)
+        or locator.figure_id != (figure.figure_id if figure is not None else None)
     ):
         raise ValueError("literature knowledge grounding provenance is invalid")
     if require_current:
