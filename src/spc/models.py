@@ -4427,3 +4427,126 @@ class ExecutionProposal(StrictModel):
         if self.content_hash != content_hash(payload):
             raise ValueError("ExecutionProposal content_hash is invalid")
         return self
+
+
+class ScientificProblemRunStatus(StrEnum):
+    CREATED = "CREATED"
+    BLOCKED_SOURCE_CURATION = "BLOCKED_SOURCE_CURATION"
+    READY = "READY"
+    CONTEXT_BUILT = "CONTEXT_BUILT"
+    INTERPRETED = "INTERPRETED"
+    PLANNED = "PLANNED"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPORTED = "EXPORTED"
+    FAILED = "FAILED"
+
+
+class ScientificRunBlockingItem(StrictModel):
+    target_type: KnowledgeEntityType
+    target_id: NonBlankStr
+    current_status: CurationStatus | None = None
+    required_status: CurationStatus = CurationStatus.ACCEPTED
+    message: NonBlankStr
+
+
+class ScientificRunArtifactBinding(StrictModel):
+    artifact_type: KnowledgeEntityType
+    artifact_id: NonBlankStr
+    artifact_hash: Sha256Str
+    relative_path: NonBlankStr
+
+
+class ScientificRunProviderBinding(StrictModel):
+    stage: KnowledgeEntityType
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    model_id: NonBlankStr | None = None
+    configuration_hash: Sha256Str
+
+
+class ScientificRunFailure(StrictModel):
+    stage: KnowledgeEntityType
+    category: NonBlankStr
+    message: NonBlankStr
+    retryable: bool = False
+
+
+class ScientificProblemRun(StrictModel):
+    """Content-bound, resumable audit record for the unified SPC workflow."""
+
+    run_id: NonBlankStr
+    original_request: NonBlankStr
+    domain: NonBlankStr
+    state_dir: NonBlankStr
+    knowledge_dir: NonBlankStr
+    knowledge_snapshot_id: NonBlankStr | None = None
+    knowledge_snapshot_hash: Sha256Str | None = None
+    retrieval_context_id: NonBlankStr | None = None
+    retrieval_context_hash: Sha256Str | None = None
+    context_id: NonBlankStr | None = None
+    context_hash: Sha256Str | None = None
+    evidence_packet_id: NonBlankStr | None = None
+    evidence_packet_hash: Sha256Str | None = None
+    planning_input_id: NonBlankStr | None = None
+    planning_input_hash: Sha256Str | None = None
+    planning_proposal_id: NonBlankStr | None = None
+    planning_proposal_hash: Sha256Str | None = None
+    candidate_plans: tuple[ScientificRunArtifactBinding, ...] = ()
+    candidate_compilation_receipts: tuple[ScientificRunArtifactBinding, ...] = ()
+    plan_validation_records: tuple[ScientificRunArtifactBinding, ...] = ()
+    selected_candidate_id: NonBlankStr | None = None
+    approval_review_id: NonBlankStr | None = None
+    approval_review_hash: Sha256Str | None = None
+    approval_verdict_id: NonBlankStr | None = None
+    approval_verdict_hash: Sha256Str | None = None
+    approval_receipt_id: NonBlankStr | None = None
+    approval_receipt_hash: Sha256Str | None = None
+    gate_id: NonBlankStr | None = None
+    gate_hash: Sha256Str | None = None
+    export_path: NonBlankStr | None = None
+    export_hash: Sha256Str | None = None
+    status: ScientificProblemRunStatus
+    last_successful_status: ScientificProblemRunStatus | None = None
+    blocking_items: tuple[ScientificRunBlockingItem, ...] = ()
+    providers: tuple[ScientificRunProviderBinding, ...] = ()
+    failure: ScientificRunFailure | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_bindings(self) -> ScientificProblemRun:
+        from .serialization import content_hash
+
+        identity = {
+            "original_request": self.original_request,
+            "domain": self.domain,
+            "state_dir": self.state_dir,
+            "knowledge_dir": self.knowledge_dir,
+        }
+        expected_id = f"scientific-run-{content_hash(identity)[:24]}"
+        if self.run_id != expected_id:
+            raise ValueError("ScientificProblemRun run_id is not content-bound")
+        for id_field, hash_field in (
+            ("knowledge_snapshot_id", "knowledge_snapshot_hash"),
+            ("retrieval_context_id", "retrieval_context_hash"),
+            ("context_id", "context_hash"),
+            ("evidence_packet_id", "evidence_packet_hash"),
+            ("planning_input_id", "planning_input_hash"),
+            ("planning_proposal_id", "planning_proposal_hash"),
+            ("approval_review_id", "approval_review_hash"),
+            ("approval_verdict_id", "approval_verdict_hash"),
+            ("approval_receipt_id", "approval_receipt_hash"),
+            ("gate_id", "gate_hash"),
+            ("export_path", "export_hash"),
+        ):
+            if (getattr(self, id_field) is None) != (getattr(self, hash_field) is None):
+                raise ValueError(f"{id_field} and {hash_field} must be supplied together")
+        if self.status == ScientificProblemRunStatus.BLOCKED_SOURCE_CURATION and not self.blocking_items:
+            raise ValueError("BLOCKED_SOURCE_CURATION requires actionable blocking_items")
+        if self.status == ScientificProblemRunStatus.FAILED and self.failure is None:
+            raise ValueError("FAILED run requires failure details")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ScientificProblemRun content_hash is invalid")
+        return self

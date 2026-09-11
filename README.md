@@ -689,3 +689,87 @@ The packet continues through the existing Phase 2B interpretation, Phase 2C
 planning, and Phase 2D approval contracts. Fingerprints and `runnable: false`
 rules remain authoritative. **Retrieval provides context, not scientific
 authority.**
+
+## K1I final unified SPC workflow
+
+K1I is the final MVP orchestration layer. It reuses trusted K1F/K1G knowledge
+retrieval, Phase 2B interpretation, Phase 2C planning, Phase 2D independent
+approval, and the existing immutable Phase 3A handoff. It does not add a
+workflow engine and never runs scientific software.
+
+Build the shared knowledge base once with the existing literature and expert
+commands, then explicitly review the generated records:
+
+```powershell
+spc add-literature 10.0000/example --domain base --knowledge-dir knowledge --state-dir .spc
+spc add-expert --name "Reviewer" --knowledge-dir knowledge
+spc add-expert-source --expert-id expert-... --source expert-note.txt `
+  --source-type internal_note --knowledge-dir knowledge
+spc curate-knowledge --target-type expert_opinion --target-id expert-opinion-... `
+  --status accepted --curator-id human --rationale "Reviewed attribution and scope." `
+  --knowledge-dir knowledge
+```
+
+`extract-literature-knowledge` and `extract-expert-knowledge` remain the
+existing extraction entry points. SPC never automatically accepts a document,
+representation, expert attribution, opinion, case, claim, fact, or reported
+result.
+
+Check readiness without a provider/model call:
+
+```powershell
+spc knowledge-status --knowledge-dir knowledge --state-dir .spc --domain base
+spc compile-scientific-request `
+  --request "The proposed mechanism is not sufficiently convincing. What should we test?" `
+  --domain base --knowledge-dir knowledge --state-dir .spc --dry-run
+```
+
+Start the offline MVP path. It retrieves trusted literature and expert
+knowledge, builds the interpreted evidence packet, compiles candidate plans,
+persists the run, and stops at independent approval:
+
+```powershell
+spc compile-scientific-request `
+  --request "The proposed mechanism is not sufficiently convincing. What should we test?" `
+  --domain base --knowledge-dir knowledge --state-dir .spc `
+  --interpretation-provider mock --planning-provider mock
+```
+
+An actionable `BLOCKED_SOURCE_CURATION` result lists every target type and ID
+that still requires review. After curation, resume without recreating the
+request:
+
+```powershell
+spc resume-scientific-run --run-id scientific-run-... --state-dir .spc
+```
+
+The optional mock approval path is offline and intended for workflow tests,
+not as a real scientific approver:
+
+```powershell
+spc resume-scientific-run --run-id scientific-run-... --state-dir .spc `
+  --approval-provider mock --candidate-id plan-...
+```
+
+Inspect IDs, uncertainty, exact quotes and locators, candidate fingerprints,
+and approval state; then export a deterministic report:
+
+```powershell
+spc scientific-run-status --run-id scientific-run-... --state-dir .spc
+spc inspect-scientific-run --run-id scientific-run-... --state-dir .spc
+spc export-scientific-run --run-id scientific-run-... --state-dir .spc `
+  --format markdown --output report.md
+```
+
+Only an independently approved Fischer–Tropsch run can use the existing
+downstream adapter:
+
+```powershell
+spc export-scientific-run --run-id scientific-run-... --state-dir .spc `
+  --format downstream --output exports --export-id approved-plan-1
+```
+
+The downstream package remains immutable and every task remains
+`runnable: false`. SPC does not replace scientific judgment: it preserves
+evidence, reasoning boundaries, fingerprints, uncertainty, and explicit human
+decisions.

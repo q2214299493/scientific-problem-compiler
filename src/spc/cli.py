@@ -157,6 +157,7 @@ from .models import (
     ScientificContextPacket,
     ScientificEvidencePacket,
     ScientificPlanningInput,
+    ScientificProblemRun,
     ScientificQuestionPlan,
     ScientificTaskExecutionContext,
     SPCExportPackage,
@@ -256,6 +257,13 @@ from .validators import (
     compare_method_fingerprints,
     validate_export,
     validate_question_plan,
+)
+from .workflow import (
+    ScientificProblemRunRepository,
+    ScientificProblemWorkflow,
+    build_knowledge_status,
+    render_scientific_run_markdown,
+    scientific_run_status,
 )
 
 app = typer.Typer(
@@ -1596,6 +1604,205 @@ def export(
     typer.echo(str(path))
 
 
+def _workflow_options(
+    *,
+    dry_run: bool,
+    interpretation_provider: str,
+    planning_provider: str,
+    approval_provider: str,
+    candidate_id: str | None,
+    llm_endpoint: str | None,
+    llm_model: str | None,
+    llm_api_key_env: str,
+    temperature: float,
+    max_attempts: int,
+) -> dict[str, object]:
+    return {
+        "dry_run": dry_run,
+        "interpretation_provider": interpretation_provider,
+        "planning_provider": planning_provider,
+        "approval_provider": approval_provider,
+        "selected_candidate_id": candidate_id,
+        "llm_endpoint": llm_endpoint,
+        "llm_model": llm_model,
+        "llm_api_key": os.getenv(llm_api_key_env),
+        "temperature": temperature,
+        "max_attempts": max_attempts,
+    }
+
+
+@app.command("compile-scientific-request")
+def compile_scientific_request(
+    request: Annotated[str | None, typer.Option("--request")] = None,
+    request_file: Annotated[
+        Path | None,
+        typer.Option("--request-file", exists=True, dir_okay=False, readable=True),
+    ] = None,
+    domain: Annotated[str, typer.Option("--domain")] = "base",
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    interpretation_provider: Annotated[
+        str, typer.Option("--interpretation-provider")
+    ] = "mock",
+    planning_provider: Annotated[str, typer.Option("--planning-provider")] = "mock",
+    approval_provider: Annotated[str, typer.Option("--approval-provider")] = "none",
+    candidate_id: Annotated[str | None, typer.Option("--candidate-id")] = None,
+    llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
+    llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
+    llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
+    temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
+    max_attempts: Annotated[int, typer.Option("--max-attempts", min=1, max=5)] = 1,
+) -> None:
+    """Start the trusted, planning-only SPC workflow and persist its run."""
+    if (request is None) == (request_file is None):
+        raise typer.BadParameter("supply exactly one of --request or --request-file")
+    request_text = request if request is not None else request_file.read_text(encoding="utf-8")
+    workflow = ScientificProblemWorkflow(
+        state_dir=state_dir,
+        knowledge_dir=knowledge_dir,
+    )
+    result = workflow.start(
+        request_text,
+        domain,
+        **_workflow_options(
+            dry_run=dry_run,
+            interpretation_provider=interpretation_provider,
+            planning_provider=planning_provider,
+            approval_provider=approval_provider,
+            candidate_id=candidate_id,
+            llm_endpoint=llm_endpoint,
+            llm_model=llm_model,
+            llm_api_key_env=llm_api_key_env,
+            temperature=temperature,
+            max_attempts=max_attempts,
+        ),
+    )
+    payload = result.dry_run_report or scientific_run_status(result.run, workflow.runs)
+    typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+    if result.run.status.value in {"BLOCKED_SOURCE_CURATION", "FAILED"}:
+        raise typer.Exit(1)
+
+
+@app.command("resume-scientific-run")
+def resume_scientific_run(
+    run_id: Annotated[str, typer.Option("--run-id")],
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    interpretation_provider: Annotated[
+        str, typer.Option("--interpretation-provider")
+    ] = "mock",
+    planning_provider: Annotated[str, typer.Option("--planning-provider")] = "mock",
+    approval_provider: Annotated[str, typer.Option("--approval-provider")] = "none",
+    candidate_id: Annotated[str | None, typer.Option("--candidate-id")] = None,
+    llm_endpoint: Annotated[str | None, typer.Option("--llm-endpoint")] = None,
+    llm_model: Annotated[str | None, typer.Option("--llm-model")] = None,
+    llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
+    temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
+    max_attempts: Annotated[int, typer.Option("--max-attempts", min=1, max=5)] = 1,
+) -> None:
+    """Revalidate and resume a persisted scientific run."""
+    persisted = ScientificProblemRunRepository(state_dir.resolve()).get(run_id)
+    workflow = ScientificProblemWorkflow(
+        state_dir=state_dir,
+        knowledge_dir=Path(persisted.knowledge_dir),
+    )
+    result = workflow.resume(
+        run_id,
+        **_workflow_options(
+            dry_run=dry_run,
+            interpretation_provider=interpretation_provider,
+            planning_provider=planning_provider,
+            approval_provider=approval_provider,
+            candidate_id=candidate_id,
+            llm_endpoint=llm_endpoint,
+            llm_model=llm_model,
+            llm_api_key_env=llm_api_key_env,
+            temperature=temperature,
+            max_attempts=max_attempts,
+        ),
+    )
+    typer.echo(
+        json.dumps(
+            result.dry_run_report or scientific_run_status(result.run, workflow.runs),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    if result.run.status.value in {"BLOCKED_SOURCE_CURATION", "FAILED"}:
+        raise typer.Exit(1)
+
+
+@app.command("scientific-run-status")
+def show_scientific_run_status(
+    run_id: Annotated[str, typer.Option("--run-id")],
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Show concise state and artifact IDs for one unified workflow run."""
+    repository = ScientificProblemRunRepository(state_dir.resolve())
+    run = repository.get(run_id)
+    typer.echo(
+        json.dumps(
+            scientific_run_status(run, repository), indent=2, ensure_ascii=False
+        )
+    )
+
+
+@app.command("inspect-scientific-run")
+def inspect_scientific_run(
+    run_id: Annotated[str, typer.Option("--run-id")],
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Render the evidence, questions, fingerprints and approval for a run."""
+    repository = ScientificProblemRunRepository(state_dir.resolve())
+    run = repository.get(run_id)
+    typer.echo(render_scientific_run_markdown(run, repository))
+
+
+@app.command("export-scientific-run")
+def export_scientific_run(
+    run_id: Annotated[str, typer.Option("--run-id")],
+    format: Annotated[str, typer.Option("--format")] = "markdown",
+    output: Annotated[Path, typer.Option("--output")] = Path("scientific-run.md"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    export_id: Annotated[str | None, typer.Option("--export-id")] = None,
+) -> None:
+    """Export a deterministic Markdown view or the existing immutable handoff."""
+    repository = ScientificProblemRunRepository(state_dir.resolve())
+    run = repository.get(run_id)
+    if format == "markdown":
+        if output.exists():
+            raise typer.BadParameter(f"refusing to overwrite report: {output}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render_scientific_run_markdown(run, repository), encoding="utf-8")
+        typer.echo(str(output))
+        return
+    if format != "downstream":
+        raise typer.BadParameter("--format must be 'markdown' or 'downstream'")
+    final_export_id = export_id or f"{run.run_id}-downstream"
+    workflow = ScientificProblemWorkflow(
+        state_dir=state_dir,
+        knowledge_dir=Path(run.knowledge_dir),
+    )
+    try:
+        path = workflow.export_downstream(run_id, output, final_export_id)
+    except (FileNotFoundError, OSError, ValueError, ExportError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(str(path))
+
+
+@app.command("knowledge-status")
+def knowledge_status(
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    domain: Annotated[str, typer.Option("--domain")] = "base",
+) -> None:
+    """Inspect literature/expert trust readiness without model inference."""
+    report = build_knowledge_status(knowledge_dir, state_dir, domain)
+    typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+
+
 @app.command("schema")
 def schema_command(
     output_dir: Annotated[Path, typer.Option("--output-dir")] = Path("schemas"),
@@ -1664,6 +1871,7 @@ def schema_command(
         ScientificTaskExecutionContext,
         SPCExportPackage,
         ExecutionProposal,
+        ScientificProblemRun,
         ApprovalVerdict,
         PlanValidationRecord,
         ProjectTrustPolicy,
