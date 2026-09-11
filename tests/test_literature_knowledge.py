@@ -32,10 +32,12 @@ from spc.knowledge.literature_knowledge import (
     LiteratureKnowledgeChunk,
     LiteratureKnowledgeCompiler,
     LiteratureKnowledgeLLMResponse,
+    LiteratureKnowledgeLLMWireResponse,
     LiteratureKnowledgeMaterializer,
     LiteratureMethodFactProposal,
     LiteratureModelFactProposal,
     LiteratureQuoteProposal,
+    LiteratureQuoteLLMWireProposal,
     LiteratureRelationProposal,
     LiteratureReportedResultProposal,
     LiteratureScientificKnowledgeViewBuilder,
@@ -43,6 +45,7 @@ from spc.knowledge.literature_knowledge import (
     StructuredLiteratureKnowledgeOutputError,
     StructuredLLMLiteratureKnowledgeProvider,
     StructuredOutputFailureCategory,
+    LiteratureClaimLLMWireProposal,
     build_literature_knowledge_chunks,
     build_literature_knowledge_proposal_set,
     curate_knowledge_record,
@@ -107,6 +110,17 @@ HTML = b"""<html><head>
 <footer><p>Footer statement.</p></footer>
 </body></html>"""
 PDF = Path(__file__).parent / "fixtures" / "generic-born-digital.pdf"
+
+
+def empty_literature_knowledge_wire_response() -> LiteratureKnowledgeLLMWireResponse:
+    return LiteratureKnowledgeLLMWireResponse(
+        quote_proposals=(),
+        claim_proposals=(),
+        method_fact_proposals=(),
+        model_fact_proposals=(),
+        reported_result_proposals=(),
+        relation_proposals=(),
+    )
 
 
 class StaticHTMLTransport:
@@ -813,7 +827,9 @@ def test_structured_provider_retries_malformed_json_and_treats_injection_as_data
     repositories, store, outcome, _structure = setup_html_literature(tmp_path)
     compilation_input = resolve_literature_knowledge_input(outcome.literature_id or "", repositories, store)
     chunks = build_literature_knowledge_chunks(compilation_input, repositories, store)
-    transport = FakeLLMTransport(("not-json", LiteratureKnowledgeLLMResponse().model_dump(mode="json")))
+    transport = FakeLLMTransport(
+        ("not-json", empty_literature_knowledge_wire_response().model_dump(mode="json"))
+    )
     provider = StructuredLLMLiteratureKnowledgeProvider(transport, max_attempts=2)
     proposal = provider.propose(compilation_input, chunks)
 
@@ -864,7 +880,7 @@ def test_structured_provider_batches_calls_within_configured_limits(
     )
     transport = FakeLLMTransport(
         tuple(
-            LiteratureKnowledgeLLMResponse().model_dump(mode="json")
+            empty_literature_knowledge_wire_response().model_dump(mode="json")
             for _ in chunks
         )
     )
@@ -899,9 +915,9 @@ def test_batch_namespace_prevents_proposal_key_collisions(tmp_path: Path) -> Non
     assert len(chunks) == 2
 
     def response_for(chunk: LiteratureKnowledgeChunk) -> dict:
-        return LiteratureKnowledgeLLMResponse(
+        return LiteratureKnowledgeLLMWireResponse(
             quote_proposals=(
-                LiteratureQuoteProposal(
+                LiteratureQuoteLLMWireProposal(
                     quote_key="quote",
                     chunk_id=chunk.chunk_id,
                     block_id=chunk.block_refs[0],
@@ -909,7 +925,7 @@ def test_batch_namespace_prevents_proposal_key_collisions(tmp_path: Path) -> Non
                 ),
             ),
             claim_proposals=(
-                LiteratureClaimProposal(
+                LiteratureClaimLLMWireProposal(
                     claim_key="claim",
                     text=chunk.text,
                     claim_type="source_statement",
@@ -918,6 +934,10 @@ def test_batch_namespace_prevents_proposal_key_collisions(tmp_path: Path) -> Non
                     epistemic_status=EpistemicStatus.SOURCE_REPORTED,
                 ),
             ),
+            method_fact_proposals=(),
+            model_fact_proposals=(),
+            reported_result_proposals=(),
+            relation_proposals=(),
         ).model_dump(mode="json")
 
     provider = StructuredLLMLiteratureKnowledgeProvider(
@@ -1065,7 +1085,7 @@ def test_structured_provider_reports_output_limit_error(
     )
     provider = StructuredLLMLiteratureKnowledgeProvider(
         FakeLLMTransport(
-            (LiteratureKnowledgeLLMResponse().model_dump(mode="json"),)
+            (empty_literature_knowledge_wire_response().model_dump(mode="json"),)
         ),
         max_batches=1,
     )

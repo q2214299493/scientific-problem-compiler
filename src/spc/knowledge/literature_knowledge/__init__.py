@@ -62,6 +62,19 @@ from .repositories import (
 )
 from .validation import curate_knowledge_record, validate_grounding_record
 from .view import LiteratureScientificKnowledgeViewBuilder
+from .wire import (
+    LiteratureClaimLLMWireProposal,
+    LiteratureKnowledgeLLMWireEntry,
+    LiteratureKnowledgeLLMWireResponse,
+    LiteratureMethodFactLLMWireProposal,
+    LiteratureModelFactLLMWireProposal,
+    LiteratureQuoteLLMWireProposal,
+    LiteratureRelationLLMWireProposal,
+    LiteratureReportedResultLLMWireProposal,
+    literature_knowledge_llm_wire_schema,
+    literature_knowledge_wire_to_internal,
+    validate_strict_structured_output_schema,
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,7 @@ class LiteratureKnowledgeCompiler:
 
 __all__ = [
     "LiteratureClaimProposal",
+    "LiteratureClaimLLMWireProposal",
     "CodexCLIExecutionError",
     "CodexCLILLMTransport",
     "CodexCLIRuntime",
@@ -127,6 +141,8 @@ __all__ = [
     "LiteratureKnowledgeGroundingRecord",
     "LiteratureKnowledgeGroundingRepository",
     "LiteratureKnowledgeLLMResponse",
+    "LiteratureKnowledgeLLMWireEntry",
+    "LiteratureKnowledgeLLMWireResponse",
     "LiteratureKnowledgeMaterializer",
     "LiteratureKnowledgeProposalSet",
     "LiteratureKnowledgeProviderInvocation",
@@ -136,10 +152,15 @@ __all__ = [
     "LiteratureKnowledgeSupportingQuoteView",
     "LiteratureKnowledgeViewMode",
     "LiteratureMethodFactProposal",
+    "LiteratureMethodFactLLMWireProposal",
     "LiteratureModelFactProposal",
+    "LiteratureModelFactLLMWireProposal",
     "LiteratureQuoteProposal",
+    "LiteratureQuoteLLMWireProposal",
     "LiteratureRelationProposal",
+    "LiteratureRelationLLMWireProposal",
     "LiteratureReportedResultProposal",
+    "LiteratureReportedResultLLMWireProposal",
     "LiteratureScientificKnowledgeView",
     "LiteratureScientificKnowledgeViewBuilder",
     "LiteratureScientificKnowledgeViewRecord",
@@ -152,9 +173,12 @@ __all__ = [
     "build_literature_knowledge_chunks",
     "build_literature_knowledge_proposal_set",
     "curate_knowledge_record",
+    "literature_knowledge_llm_wire_schema",
+    "literature_knowledge_wire_to_internal",
     "partition_literature_knowledge_chunks",
     "resolve_literature_knowledge_input",
     "validate_literature_knowledge_chunk",
     "validate_grounding_record",
     "validate_literature_knowledge_input",
+    "validate_strict_structured_output_schema",
 ]

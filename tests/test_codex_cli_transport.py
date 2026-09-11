@@ -17,12 +17,13 @@ from spc.knowledge.literature_knowledge import (
     CodexCLIExecutionError,
     CodexCLILLMTransport,
     CodexCLIUnavailableError,
-    LiteratureClaimProposal,
+    LiteratureClaimLLMWireProposal,
     LiteratureKnowledgeCompiler,
-    LiteratureKnowledgeLLMResponse,
-    LiteratureQuoteProposal,
+    LiteratureKnowledgeLLMWireResponse,
+    LiteratureQuoteLLMWireProposal,
     StructuredLLMLiteratureKnowledgeProvider,
     build_literature_knowledge_chunks,
+    literature_knowledge_llm_wire_schema,
     resolve_literature_knowledge_input,
 )
 from spc.knowledge.structure import DocumentStructureService
@@ -178,7 +179,7 @@ def _setup_literature(tmp_path: Path):
 def _fake_codex_command(
     tmp_path: Path,
     *,
-    response: LiteratureKnowledgeLLMResponse | None = None,
+    response: LiteratureKnowledgeLLMWireResponse | None = None,
     login_status: str = "Logged in using ChatGPT",
     login_exit: int = 0,
     item_type: str = "agent_message",
@@ -187,7 +188,17 @@ def _fake_codex_command(
     executable = tmp_path / "fake_codex.py"
     calls_path = tmp_path / "codex-calls.jsonl"
     capture_path = tmp_path / "codex-capture.json"
-    response_json = (response or LiteratureKnowledgeLLMResponse()).model_dump_json()
+    response_json = (
+        response
+        or LiteratureKnowledgeLLMWireResponse(
+            quote_proposals=(),
+            claim_proposals=(),
+            method_fact_proposals=(),
+            model_fact_proposals=(),
+            reported_result_proposals=(),
+            relation_proposals=(),
+        )
+    ).model_dump_json()
     executable.write_text(
         f"""from __future__ import annotations
 import json
@@ -279,9 +290,9 @@ def test_codex_cli_transport_isolated_proposal_is_audited_and_materialized(
     )
     chunks = build_literature_knowledge_chunks(compilation_input, repositories, store)
     chunk = next(item for item in chunks if "Sentence A." in item.text)
-    response = LiteratureKnowledgeLLMResponse(
+    response = LiteratureKnowledgeLLMWireResponse(
         quote_proposals=(
-            LiteratureQuoteProposal(
+            LiteratureQuoteLLMWireProposal(
                 quote_key="codex-quote-1",
                 chunk_id=chunk.chunk_id,
                 block_id=chunk.block_refs[0],
@@ -289,7 +300,7 @@ def test_codex_cli_transport_isolated_proposal_is_audited_and_materialized(
             ),
         ),
         claim_proposals=(
-            LiteratureClaimProposal(
+            LiteratureClaimLLMWireProposal(
                 claim_key="codex-claim-1",
                 text="Sentence A.",
                 claim_type="source_statement",
@@ -298,6 +309,10 @@ def test_codex_cli_transport_isolated_proposal_is_audited_and_materialized(
                 epistemic_status=EpistemicStatus.SOURCE_REPORTED,
             ),
         ),
+        method_fact_proposals=(),
+        model_fact_proposals=(),
+        reported_result_proposals=(),
+        relation_proposals=(),
     )
     transport = CodexCLILLMTransport(
         _fake_codex_command(tmp_path, response=response),
@@ -370,7 +385,7 @@ def test_codex_cli_transport_isolated_proposal_is_audited_and_materialized(
         "DATABASE_PASSWORD",
         "UNRELATED_TOKEN",
     } & set(capture["environment_keys"])
-    assert "LiteratureKnowledgeLLMResponse" in json.dumps(capture["schema"])
+    assert "LiteratureKnowledgeLLMWireResponse" in json.dumps(capture["schema"])
     prompt = json.loads(capture["prompt"].split("\n", 1)[1])
     assert prompt["scientific_input"]["compilation_input"]["literature_id"] == (outcome.literature_id)
     assert len(prompt["scientific_input"]["chunks"]) == len(chunks)
@@ -437,15 +452,16 @@ def test_codex_cli_transport_rejects_tool_activity(tmp_path: Path) -> None:
         transport.generate_structured(
             system_prompt="Return JSON only.",
             input_payload={"chunks": []},
-            response_schema=LiteratureKnowledgeLLMResponse.model_json_schema(),
+            response_schema=literature_knowledge_llm_wire_schema(),
             temperature=0.0,
         )
 
 
 def test_codex_cli_transport_rejects_oversized_output(tmp_path: Path) -> None:
-    response = LiteratureKnowledgeLLMResponse(
+    response = LiteratureKnowledgeLLMWireResponse(
+        quote_proposals=(),
         claim_proposals=tuple(
-            LiteratureClaimProposal(
+            LiteratureClaimLLMWireProposal(
                 claim_key=f"claim-{index}",
                 text="oversized output text",
                 claim_type="source_statement",
@@ -454,7 +470,11 @@ def test_codex_cli_transport_rejects_oversized_output(tmp_path: Path) -> None:
                 epistemic_status=EpistemicStatus.SOURCE_REPORTED,
             )
             for index in range(20)
-        )
+        ),
+        method_fact_proposals=(),
+        model_fact_proposals=(),
+        reported_result_proposals=(),
+        relation_proposals=(),
     )
     transport = CodexCLILLMTransport(
         _fake_codex_command(tmp_path, response=response),
@@ -466,7 +486,7 @@ def test_codex_cli_transport_rejects_oversized_output(tmp_path: Path) -> None:
         transport.generate_structured(
             system_prompt="Return JSON only.",
             input_payload={"chunks": []},
-            response_schema=LiteratureKnowledgeLLMResponse.model_json_schema(),
+            response_schema=literature_knowledge_llm_wire_schema(),
             temperature=0.0,
         )
 
@@ -482,7 +502,7 @@ def test_codex_cli_transport_enforces_timeout(tmp_path: Path) -> None:
         transport.generate_structured(
             system_prompt="Return JSON only.",
             input_payload={"chunks": []},
-            response_schema=LiteratureKnowledgeLLMResponse.model_json_schema(),
+            response_schema=literature_knowledge_llm_wire_schema(),
             temperature=0.0,
         )
 
@@ -523,6 +543,7 @@ def test_cli_codex_preflight_diagnostic_never_runs_inference(
     payload = json.loads(result.output)
     assert payload["model_inference_performed"] is False
     assert payload["required_flags_accepted"] is True
+    assert payload["output_schema_strict_compatible"] is True
     assert payload["disabled_features"] == [
         "shell_tool",
         "shell_snapshot",

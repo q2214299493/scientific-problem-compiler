@@ -212,6 +212,7 @@ from .knowledge.literature_knowledge import (
     StructuredLiteratureKnowledgeOutputError,
     StructuredLLMLiteratureKnowledgeProvider,
     curate_knowledge_record,
+    literature_knowledge_llm_wire_schema,
 )
 from .knowledge.structure import inspect_document_structure
 from .knowledge.structure_selection import DocumentStructureSelector
@@ -588,6 +589,7 @@ def check_codex_provider(
 ) -> None:
     """Check Codex CLI K1F compatibility without running model inference."""
     try:
+        literature_knowledge_llm_wire_schema()
         runtime = CodexCLILLMTransport(
             codex_executable,
             model=codex_model,
@@ -603,6 +605,7 @@ def check_codex_provider(
                 "selected_model": runtime.selected_model,
                 "authentication_status": runtime.authentication_status,
                 "required_flags_accepted": True,
+                "output_schema_strict_compatible": True,
                 "disabled_features": runtime.disabled_features,
                 "model_inference_performed": False,
             },
