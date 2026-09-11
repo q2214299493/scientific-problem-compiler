@@ -14,6 +14,8 @@ def retrieve_evidence_spans(
     query: RetrievalQuery,
     repository: EvidenceStore,
     profile: DomainProfile,
+    *,
+    allowed_evidence_ids: set[str] | None = None,
 ) -> tuple[RetrievalHit, ...]:
     if repository.project_state_root is not None:
         project = load_data(repository.project_state_root / "project.yaml")
@@ -27,6 +29,11 @@ def retrieve_evidence_spans(
     except (FileNotFoundError, OSError, ValueError) as error:
         raise RetrievalIntegrityError(f"Evidence store integrity failed: {error}") from error
     for evidence in evidence_records:
+        if (
+            allowed_evidence_ids is not None
+            and evidence.evidence_id not in allowed_evidence_ids
+        ):
+            continue
         try:
             repository.verify_evidence_integrity(evidence)
         except (FileNotFoundError, OSError, ValueError) as error:

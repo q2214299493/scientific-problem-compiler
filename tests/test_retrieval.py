@@ -282,7 +282,7 @@ def test_retrieval_is_fully_offline(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(socket, "create_connection", reject_network)
     packet = build_context(tmp_path, "CO activation chain growth")
-    assert packet.retrieval_manifest.retriever_version == "lexical-1.0.0"
+    assert packet.retrieval_manifest.retriever_version == "lexical-graph-2.0.0"
 
 
 def test_retrieve_cli_writes_context_packet(tmp_path) -> None:

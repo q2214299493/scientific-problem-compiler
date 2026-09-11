@@ -10,6 +10,7 @@ from ..models import (
     LiteratureWorkflowPattern,
     RequiredHumanDecision,
     RetrievalHit,
+    RetrievalSourceType,
     ScientificCapability,
     ScientificContextPacket,
     ScientificEvidencePacket,
@@ -113,8 +114,16 @@ class PlanningContextResolver:
             )
 
         snapshot = context.knowledge_snapshot
+        expert_case_hits = (
+            *context.expert_case_hits,
+            *tuple(
+                hit
+                for hit in context.graph_expanded_hits
+                if hit.source_type == RetrievalSourceType.EXPERT_CASE
+            ),
+        )
         expert_cases = _resolve_records(
-            context.expert_case_hits,
+            expert_case_hits,
             knowledge.expert_cases,
             snapshot.expert_case_hashes,
             domain=context.domain,
@@ -135,7 +144,24 @@ class PlanningContextResolver:
             record_kind="capability",
         )
 
-        allowed_evidence_ids = tuple(hit.record_id for hit in context.evidence_hits)
+        allowed_evidence_ids = tuple(
+            dict.fromkeys(
+                (
+                    *(hit.record_id for hit in context.evidence_hits),
+                    *(
+                        evidence_id
+                        for hits in (
+                            context.literature_knowledge_hits,
+                            context.expert_opinion_hits,
+                            context.expert_case_hits,
+                            context.graph_expanded_hits,
+                        )
+                        for hit in hits
+                        for evidence_id in hit.evidence_refs
+                    ),
+                )
+            )
+        )
         allowed_claim_ids = tuple(claim.claim_id for claim in evidence_packet.source_claims)
         allowed_capability_ids = tuple(item.capability_id for item in capabilities)
         decisions = tuple(

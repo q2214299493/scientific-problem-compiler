@@ -48,6 +48,16 @@ class ScientificEvidencePacketBuilder:
             "provider_version": proposal.provider_version,
             "proposal_id": proposal.proposal_id,
             "evidence_record_ids": tuple(hit.record_id for hit in context.evidence_hits),
+            "retrieved_knowledge_record_ids": tuple(
+                hit.record_id
+                for hits in (
+                    context.literature_knowledge_hits,
+                    context.expert_opinion_hits,
+                    context.expert_case_hits,
+                    context.graph_expanded_hits,
+                )
+                for hit in hits
+            ),
             "source_document_hashes": source_document_hashes,
         }
         identity = {

@@ -639,3 +639,53 @@ spc extract-expert-knowledge --expert-source-id expert-source-... `
 
 The result remains `machine_extracted`; use the existing `curate-knowledge`
 command separately for any human-reviewed opinion or case.
+
+## Knowledge Layer K1H trusted retrieval integration
+
+K1H connects the existing persistent literature and expert repositories to the
+Phase 2A retrieval path. The default `trusted` mode recursively verifies current
+curation, representation/structure authority, exact `EvidenceSpan` and
+`SourceDocument` provenance, and record hashes before ranking anything. An
+explicit `audit` mode can display machine-extracted, rejected, stale, or
+uncurated records with their status; audit results are not used by the normal
+planning path unless the caller deliberately selects that mode.
+
+Retrieval uses the existing Domain Pack token normalization, exact phrases,
+aliases and synonyms. It searches structured literature claims, method/model
+facts, reported results, document metadata, expert opinions, and reusable
+ExpertCases. A bounded, deterministic, cycle-safe expansion follows only the
+existing scientific `KnowledgeRelation` graph (one hop by default). Raw
+artifacts, canonical text, ingestion records, evidence spans, structure
+selections, backend runs, and compilation records remain provenance and are not
+semantic traversal nodes.
+
+Every persistent knowledge hit retains its record hash, source class, curation
+and authority status, evidence/source references, grounding references, score
+components, and any graph expansion path. The retrieval policy and limits are
+content-bound to `KnowledgeRetrievalContext` and `RetrievalManifest`, while the
+queried trusted records remain bound to `KnowledgeSnapshot`. Literature reports,
+expert opinions, and ExpertCases remain distinct source classes. Conflicting
+records are not collapsed, and accepted contradiction relations remain visible.
+
+Inspect trusted knowledge without an LLM:
+
+```powershell
+spc retrieve-knowledge --query "mechanism not convincing" `
+  --domain base --knowledge-dir knowledge --mode trusted `
+  --max-literature-hits 20 --max-expert-hits 10 `
+  --max-expert-cases 5 --graph-hops 1 --max-graph-hits 40
+```
+
+Build the existing Phase 2 context packet from project evidence plus persistent
+knowledge:
+
+```powershell
+spc build-scientific-context --request "What evidence distinguishes the mechanisms?" `
+  --domain base --state-dir .spc --knowledge-dir knowledge `
+  --output .spc/context.yaml
+```
+
+The packet continues through the existing Phase 2B interpretation, Phase 2C
+planning, and Phase 2D approval contracts. Fingerprints and `runnable: false`
+rules remain authoritative. **Retrieval provides context, not scientific
+authority.**

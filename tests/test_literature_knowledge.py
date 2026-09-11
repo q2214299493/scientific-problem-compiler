@@ -73,6 +73,8 @@ from spc.models import (
 )
 from spc.planning import FakeLLMTransport
 from spc.repositories import KnowledgeEvidenceStore, KnowledgeRepositories
+from spc.retrieval import PersistentKnowledgeRetriever
+from spc.retrieval.query_builder import build_retrieval_query
 from spc.serialization import content_hash
 
 
@@ -1314,11 +1316,23 @@ def test_structure_switch_makes_old_knowledge_noncurrent_but_keeps_audit_history
     snapshot = repositories.create_snapshot(
         store, DomainPackLoader().load("base").profile
     )
+    profile = DomainPackLoader().load("base").profile
+    retrieval_query = build_retrieval_query(claim.text, "base", profile)
+    retrieval = PersistentKnowledgeRetriever().retrieve(
+        retrieval_query,
+        repositories,
+        store,
+        profile,
+        snapshot,
+    )
     assert trusted.records == ()
     assert {item.record_id for item in audit.records} == {claim.claim_id}
     assert ("source_claim", claim.claim_id) not in global_trusted.trusted_records
     assert all(node.record_id != claim.claim_id for node in graph.nodes)
     assert f"source_claim:{claim.claim_id}" not in snapshot.trusted_record_hashes
+    assert claim.claim_id not in {
+        hit.record_id for hit in retrieval.initial_literature_hits
+    }
 
 
 @pytest.mark.parametrize("tamper_target", ["evidence", "locator"])

@@ -120,6 +120,8 @@ from .models import (
     KnowledgeGraphEdge,
     KnowledgeGraphNode,
     KnowledgeRelation,
+    KnowledgeRetrievalContext,
+    KnowledgeViewMode,
     KnowledgeSnapshot,
     LiteratureAcquisitionOutcome,
     LiteratureAcquisitionRecord,
@@ -229,7 +231,11 @@ from .knowledge.structure import inspect_document_structure
 from .knowledge.structure_selection import DocumentStructureSelector
 from .knowledge.trust import TrustedKnowledgeValidator
 from .providers import MockProvider
-from .retrieval import ScientificContextBuilder
+from .retrieval import (
+    PersistentKnowledgeRetriever,
+    ScientificContextBuilder,
+    build_retrieval_query,
+)
 from .repositories import (
     CompositeEvidenceStore,
     KnowledgeEvidenceStore,
@@ -1073,6 +1079,12 @@ def retrieve(
     output: Annotated[Path, typer.Option("--output")],
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    mode: Annotated[KnowledgeViewMode, typer.Option("--mode")] = KnowledgeViewMode.TRUSTED,
+    max_literature_hits: Annotated[int, typer.Option("--max-literature-hits", min=1)] = 20,
+    max_expert_hits: Annotated[int, typer.Option("--max-expert-hits", min=1)] = 10,
+    max_expert_cases: Annotated[int, typer.Option("--max-expert-cases", min=1)] = 5,
+    graph_hops: Annotated[int, typer.Option("--graph-hops", min=0, max=2)] = 1,
+    max_graph_hits: Annotated[int, typer.Option("--max-graph-hits", min=1)] = 40,
 ) -> None:
     """Build an offline, evidence-grounded ScientificContextPacket."""
     packet = ScientificContextBuilder().build(
@@ -1080,6 +1092,82 @@ def retrieve(
         domain,
         state_dir=state_dir,
         knowledge_dir=knowledge_dir,
+        retrieval_mode=mode,
+        max_literature_hits=max_literature_hits,
+        max_expert_hits=max_expert_hits,
+        max_expert_cases=max_expert_cases,
+        graph_hops=graph_hops,
+        max_graph_hits=max_graph_hits,
+    )
+    dump_yaml(output, packet)
+    typer.echo(str(output))
+
+
+@app.command("retrieve-knowledge")
+def retrieve_knowledge(
+    query_text: Annotated[str, typer.Option("--query")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    domain: Annotated[str, typer.Option("--domain")] = "base",
+    mode: Annotated[KnowledgeViewMode, typer.Option("--mode")] = KnowledgeViewMode.TRUSTED,
+    max_literature_hits: Annotated[int, typer.Option("--max-literature-hits", min=1)] = 20,
+    max_expert_hits: Annotated[int, typer.Option("--max-expert-hits", min=1)] = 10,
+    max_expert_cases: Annotated[int, typer.Option("--max-expert-cases", min=1)] = 5,
+    graph_hops: Annotated[int, typer.Option("--graph-hops", min=0, max=2)] = 1,
+    max_graph_hits: Annotated[int, typer.Option("--max-graph-hits", min=1)] = 40,
+) -> None:
+    """Inspect bounded trusted persistent knowledge retrieval without an LLM."""
+    pack = DomainPackLoader().load(domain)
+    repositories = KnowledgeRepositories(knowledge_dir)
+    repositories.load_expert_cases(pack.expert_cases)
+    repositories.load_workflow_patterns(pack.workflow_patterns)
+    repositories.load_capabilities(pack.capabilities)
+    store = KnowledgeEvidenceStore(knowledge_dir)
+    query = build_retrieval_query(query_text, domain, pack.profile)
+    snapshot = repositories.create_snapshot(store, pack.profile)
+    context = PersistentKnowledgeRetriever().retrieve(
+        query,
+        repositories,
+        store,
+        pack.profile,
+        snapshot,
+        mode=mode,
+        max_literature_hits=max_literature_hits,
+        max_expert_hits=max_expert_hits,
+        max_expert_cases=max_expert_cases,
+        graph_hops=graph_hops,
+        max_graph_hits=max_graph_hits,
+    )
+    report = context.model_dump(mode="json")
+    report["retrieval_manifest_id"] = context.retrieval_context_id
+    typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+@app.command("build-scientific-context")
+def build_scientific_context(
+    request: Annotated[str, typer.Option("--request")],
+    domain: Annotated[str, typer.Option("--domain")],
+    output: Annotated[Path, typer.Option("--output")],
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    mode: Annotated[KnowledgeViewMode, typer.Option("--mode")] = KnowledgeViewMode.TRUSTED,
+    max_literature_hits: Annotated[int, typer.Option("--max-literature-hits", min=1)] = 20,
+    max_expert_hits: Annotated[int, typer.Option("--max-expert-hits", min=1)] = 10,
+    max_expert_cases: Annotated[int, typer.Option("--max-expert-cases", min=1)] = 5,
+    graph_hops: Annotated[int, typer.Option("--graph-hops", min=0, max=2)] = 1,
+    max_graph_hits: Annotated[int, typer.Option("--max-graph-hits", min=1)] = 40,
+) -> None:
+    """Build a ScientificContextPacket from project plus persistent knowledge."""
+    packet = ScientificContextBuilder().build(
+        request,
+        domain,
+        state_dir=state_dir,
+        knowledge_dir=knowledge_dir,
+        retrieval_mode=mode,
+        max_literature_hits=max_literature_hits,
+        max_expert_hits=max_expert_hits,
+        max_expert_cases=max_expert_cases,
+        graph_hops=graph_hops,
+        max_graph_hits=max_graph_hits,
     )
     dump_yaml(output, packet)
     typer.echo(str(output))
@@ -1587,6 +1675,7 @@ def schema_command(
         ExportManifest,
         RetrievalQuery,
         RetrievalHit,
+        KnowledgeRetrievalContext,
         LiteratureDocument,
         RawLiteratureArtifact,
         CanonicalTextBlock,

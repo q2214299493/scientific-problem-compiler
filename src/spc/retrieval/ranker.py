@@ -6,7 +6,7 @@ from typing import Iterable
 
 from ..models import DomainProfile, RetrievalHit, RetrievalQuery, RetrievalSourceType
 
-RETRIEVER_VERSION = "lexical-1.0.0"
+RETRIEVER_VERSION = "lexical-graph-2.0.0"
 
 _STOP_WORDS = {
     "a",
