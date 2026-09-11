@@ -1723,6 +1723,14 @@ class CollectionDiffRepository(IdentityBoundRepository[CollectionDiff]):
 
 class KnowledgeRepositories:
     def __init__(self, root: Path) -> None:
+        from .knowledge.expert_knowledge.repositories import (
+            ExpertKnowledgeChunkRepository,
+            ExpertKnowledgeCompilationInputRepository,
+            ExpertKnowledgeCompilationRepository,
+            ExpertKnowledgeGroundingRepository,
+            ExpertKnowledgeProposalSetRepository,
+            ExpertSourceRepository,
+        )
         from .knowledge.literature_knowledge.repositories import (
             LiteratureKnowledgeChunkRepository,
             LiteratureKnowledgeCompilationInputRepository,
@@ -1733,6 +1741,7 @@ class KnowledgeRepositories:
 
         self.root = root
         self.evidence_store = KnowledgeEvidenceStore(root)
+        self.expert_sources = ExpertSourceRepository(root)
         self.expert_cases = ExpertCaseRepository(root)
         self.workflow_patterns = LiteratureWorkflowRepository(root)
         self.capabilities = ScientificCapabilityRepository(root)
@@ -1796,6 +1805,11 @@ class KnowledgeRepositories:
         self.expert_profiles = ExpertProfileRepository(root)
         self.expert_opinions = ExpertOpinionRepository(root)
         self.expert_attributions = ExpertAttributionRepository(root)
+        self.expert_knowledge_inputs = ExpertKnowledgeCompilationInputRepository(root)
+        self.expert_knowledge_chunks = ExpertKnowledgeChunkRepository(root)
+        self.expert_knowledge_proposals = ExpertKnowledgeProposalSetRepository(root)
+        self.expert_knowledge_groundings = ExpertKnowledgeGroundingRepository(root)
+        self.expert_knowledge_compilations = ExpertKnowledgeCompilationRepository(root)
         self.relations = KnowledgeRelationRepository(root)
         self.curations = KnowledgeCurationRepository(root)
         self.source_quotes = IdentityBoundRepository(

@@ -589,3 +589,53 @@ spc extract-literature-knowledge `
 No model call occurs unless `--provider llm` and both endpoint/model options are
 supplied. API-key values are never written into K1F provenance. All LLM outputs
 remain strict, untrusted proposals and require explicit scientific curation.
+
+## Knowledge Layer K1G expert knowledge compiler
+
+K1G stores an explicitly identified expert source as immutable raw bytes and
+canonical UTF-8 evidence, binds it to an existing `ExpertProfile` through an
+`ExpertAttributionRecord`, and compiles exact quoted passages into attributed
+`ExpertOpinion` records plus reusable `ExpertCase` reasoning patterns. It reuses
+the K1F structured Codex transport and strict-schema validator; provider output
+cannot assign offsets, edit repositories, invoke tools, or mark records trusted.
+
+Source identity and attribution must be explicitly accepted before extraction.
+Generated opinions and cases always start as `machine_extracted`. Accepting an
+opinion confirms that the named expert expressed the attributed wording; it does
+not establish scientific truth. A trusted case additionally requires its source,
+attribution, every underlying opinion, and the case itself to remain valid and
+accepted. K1G never converts expert opinion into `SourceClaim`, `MethodFact`,
+`ModelFact`, or `ReportedResult` records.
+
+Offline workflow:
+
+```powershell
+spc add-expert --name "Reviewer Example" --organization "Example Lab" `
+  --role "Reviewer" --knowledge-dir knowledge
+spc add-expert-source --expert-id expert-... `
+  --source src/spc/knowledge/fixtures/expert-reviewer-feedback.txt `
+  --source-type reviewer_comments --knowledge-dir knowledge
+spc curate-knowledge --target-type expert_source --target-id expert-source-... `
+  --status accepted --curator-id human --rationale "Confirmed source identity." `
+  --knowledge-dir knowledge
+spc curate-knowledge --target-type expert_attribution `
+  --target-id expert-attribution-... --status accepted --curator-id human `
+  --rationale "Confirmed attribution only; not scientific correctness." `
+  --knowledge-dir knowledge
+spc extract-expert-knowledge --expert-source-id expert-source-... `
+  --provider mock --max-batches 1 --knowledge-dir knowledge
+spc inspect-expert-knowledge --expert-id expert-... --view audit `
+  --knowledge-dir knowledge
+```
+
+After tests and local preflight, one small real Codex proposal can be run
+manually without an API key. This command is intentionally not run by CI:
+
+```powershell
+spc extract-expert-knowledge --expert-source-id expert-source-... `
+  --provider codex --codex-model gpt-6-astra --max-attempts 1 `
+  --max-batches 1 --knowledge-dir knowledge
+```
+
+The result remains `machine_extracted`; use the existing `curate-knowledge`
+command separately for any human-reviewed opinion or case.

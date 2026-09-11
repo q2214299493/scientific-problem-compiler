@@ -214,8 +214,20 @@ from .knowledge.literature_knowledge import (
     curate_knowledge_record,
     literature_knowledge_llm_wire_schema,
 )
+from .knowledge.expert_knowledge import (
+    DEFAULT_MAX_BATCH_TEXT_CHARACTERS as EXPERT_DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
+    DEFAULT_MAX_CHUNKS_PER_BATCH as EXPERT_DEFAULT_MAX_CHUNKS_PER_BATCH,
+    ExpertKnowledgeCompiler,
+    ExpertKnowledgeViewBuilder,
+    ExpertSourceIngestionService,
+    MockExpertKnowledgeProvider,
+    StructuredLLMExpertKnowledgeProvider,
+    expert_knowledge_llm_wire_schema,
+    make_expert_profile,
+)
 from .knowledge.structure import inspect_document_structure
 from .knowledge.structure_selection import DocumentStructureSelector
+from .knowledge.trust import TrustedKnowledgeValidator
 from .providers import MockProvider
 from .retrieval import ScientificContextBuilder
 from .repositories import (
@@ -582,6 +594,183 @@ def inspect_backend_run(
     )
 
 
+@app.command("add-expert")
+def add_expert(
+    name: Annotated[str, typer.Option("--name")],
+    organization: Annotated[str | None, typer.Option("--organization")] = None,
+    role: Annotated[str | None, typer.Option("--role")] = None,
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+) -> None:
+    """Create one explicit expert identity/context profile."""
+    repositories = KnowledgeRepositories(knowledge_dir)
+    profile = make_expert_profile(name, organization=organization, role=role)
+    try:
+        existing = repositories.expert_profiles.get(profile.expert_id)
+    except FileNotFoundError:
+        repositories.expert_profiles.put(profile.expert_id, profile)
+    else:
+        if existing != profile:
+            raise typer.BadParameter("conflicting expert profile identity")
+    typer.echo(profile.model_dump_json(indent=2))
+
+
+@app.command("add-expert-source")
+def add_expert_source(
+    expert_id: Annotated[str, typer.Option("--expert-id")],
+    source: Annotated[str, typer.Option("--source")],
+    source_type: Annotated[str, typer.Option("--source-type")],
+    domain: Annotated[str, typer.Option("--domain")] = "base",
+    source_relationship: Annotated[
+        str,
+        typer.Option("--source-relationship"),
+    ] = "user-supplied attributed expert source",
+    attribution_basis: Annotated[
+        str,
+        typer.Option("--attribution-basis"),
+    ] = "explicit user attribution",
+    attribution_status: Annotated[
+        str,
+        typer.Option("--attribution-status"),
+    ] = "confirmed",
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+) -> None:
+    """Ingest one exact expert source and create its attribution binding."""
+    repositories = KnowledgeRepositories(knowledge_dir)
+    record = ExpertSourceIngestionService().ingest(
+        expert_id,
+        source,
+        source_type,
+        repositories,
+        domain=domain,
+        source_relationship=source_relationship,
+        attribution_basis=attribution_basis,
+        attribution_status=attribution_status,
+    )
+    current_curations = TrustedKnowledgeValidator(
+        repositories, repositories.evidence_store
+    ).resolve_current_curations()
+    for target_type, target_id in (
+        ("expert_source", record.expert_source_id),
+        ("expert_attribution", record.attribution_id),
+    ):
+        if (target_type, target_id) in current_curations:
+            continue
+        curate_knowledge_record(
+            repositories,
+            target_type=target_type,
+            target_id=target_id,
+            status=CurationStatus.MACHINE_EXTRACTED,
+            curator_id="spc-expert-source-ingestion",
+            rationale="User-supplied source authority candidate; explicit acceptance required.",
+        )
+    typer.echo(record.model_dump_json(indent=2))
+
+
+@app.command("extract-expert-knowledge")
+def extract_expert_knowledge(
+    expert_source_id: Annotated[str, typer.Option("--expert-source-id")],
+    provider: Annotated[str, typer.Option("--provider")] = "mock",
+    codex_model: Annotated[str | None, typer.Option("--codex-model")] = None,
+    codex_executable: Annotated[str, typer.Option("--codex-executable")] = "codex",
+    codex_timeout_seconds: Annotated[
+        float,
+        typer.Option("--codex-timeout-seconds"),
+    ] = 300.0,
+    max_attempts: Annotated[int, typer.Option("--max-attempts")] = 1,
+    max_chunks_per_batch: Annotated[
+        int,
+        typer.Option("--max-chunks-per-batch"),
+    ] = EXPERT_DEFAULT_MAX_CHUNKS_PER_BATCH,
+    max_batch_characters: Annotated[
+        int,
+        typer.Option("--max-batch-characters"),
+    ] = EXPERT_DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
+    max_batches: Annotated[int | None, typer.Option("--max-batches")] = None,
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+) -> None:
+    """Compile untrusted, exactly grounded expert opinions and reusable cases."""
+    if provider == "mock":
+        selected_provider = MockExpertKnowledgeProvider()
+        provider_notice = "offline test provider; output is not expert interpretation"
+    elif provider == "codex":
+        if codex_model is None:
+            raise typer.BadParameter(
+                "--provider codex requires an explicit --codex-model"
+            )
+        expert_knowledge_llm_wire_schema()
+        transport = CodexCLILLMTransport(
+            codex_executable,
+            model=codex_model,
+            timeout_seconds=codex_timeout_seconds,
+        )
+        try:
+            transport.inspect_runtime()
+        except CodexCLIUnavailableError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from error
+        selected_provider = StructuredLLMExpertKnowledgeProvider(
+            transport,
+            max_attempts=max_attempts,
+            max_chunks_per_batch=max_chunks_per_batch,
+            max_batch_text_characters=max_batch_characters,
+            max_batches=max_batches,
+        )
+        provider_notice = (
+            "authenticated Codex CLI proposal provider; all output remains untrusted "
+            "until explicit curation"
+        )
+    else:
+        raise typer.BadParameter("--provider must be 'mock' or 'codex'")
+    repositories = KnowledgeRepositories(knowledge_dir)
+    try:
+        outcome = ExpertKnowledgeCompiler().compile(
+            expert_source_id,
+            selected_provider,
+            repositories,
+        )
+    except (CodexCLIExecutionError, CodexCLIUnavailableError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(
+        json.dumps(
+            {
+                "compilation_id": outcome.materialized.record.compilation_id,
+                "compilation_input_id": outcome.compilation_input.compilation_input_id,
+                "proposal_set_id": outcome.proposal_set.proposal_set_id,
+                "provider_id": outcome.proposal_set.provider_id,
+                "provider_version": outcome.proposal_set.provider_version,
+                "provider_notice": provider_notice,
+                "chunk_count": len(outcome.chunks),
+                "total_batch_count": getattr(selected_provider, "total_batch_count", 0),
+                "processed_batch_count": len(outcome.proposal_set.batch_invocations),
+                "expert_opinion_ids": outcome.materialized.record.expert_opinion_ids,
+                "expert_case_ids": outcome.materialized.record.expert_case_ids,
+                "rejected_proposals": [
+                    item.model_dump(mode="json")
+                    for item in outcome.materialized.record.rejected_proposals
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+@app.command("inspect-expert-knowledge")
+def inspect_expert_knowledge(
+    expert_id: Annotated[str, typer.Option("--expert-id")],
+    view: Annotated[str, typer.Option("--view")] = "audit",
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+) -> None:
+    """Inspect attributed expert opinions and reusable reasoning cases."""
+    result = ExpertKnowledgeViewBuilder().build(
+        expert_id,
+        KnowledgeRepositories(knowledge_dir),
+        view_mode=view,
+    )
+    typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 @app.command("check-codex-provider")
 def check_codex_provider(
     codex_model: Annotated[str, typer.Option("--codex-model")],
@@ -590,6 +779,7 @@ def check_codex_provider(
     """Check Codex CLI K1F compatibility without running model inference."""
     try:
         literature_knowledge_llm_wire_schema()
+        expert_knowledge_llm_wire_schema()
         runtime = CodexCLILLMTransport(
             codex_executable,
             model=codex_model,
@@ -606,6 +796,7 @@ def check_codex_provider(
                 "authentication_status": runtime.authentication_status,
                 "required_flags_accepted": True,
                 "output_schema_strict_compatible": True,
+                "expert_output_schema_strict_compatible": True,
                 "disabled_features": runtime.disabled_features,
                 "model_inference_performed": False,
             },

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
 
 REPOSITORY_NODE_SPECS = (
+    ("expert_source", "expert_sources", "expert_source_id"),
     ("literature_document", "literature_documents", "literature_id"),
     ("raw_literature_artifact", "raw_literature_artifacts", "artifact_id"),
     ("canonical_text_artifact", "canonical_text_artifacts", "canonical_text_id"),
@@ -104,6 +105,7 @@ REPOSITORY_NODE_SPECS = (
 
 CURATION_REQUIRED_TYPES = frozenset(
     {
+        "expert_source",
         "literature_document",
         "literature_representation_selection",
         "expert_opinion",
@@ -326,6 +328,7 @@ class TrustedKnowledgeValidator:
         roots.update(
             ("expert_case", item.case_id)
             for item in self.repositories.expert_cases.list()
+            if not item.opinion_refs
         )
         roots.update(
             ("workflow_pattern", item.pattern_id)
@@ -370,7 +373,7 @@ class TrustedKnowledgeValidator:
         if key in visiting:
             return self._require_record(*key)
         record = self._require_record(*key)
-        if key[0] in CURATION_REQUIRED_TYPES:
+        if self._requires_curation(key, record):
             curation = current.get(key)
             if curation is None or curation.status != CurationStatus.ACCEPTED:
                 raise TrustedKnowledgeError(
@@ -384,7 +387,9 @@ class TrustedKnowledgeValidator:
                 )
         visiting.add(key)
         try:
-            if isinstance(record, LiteratureDocument):
+            if key[0] == "expert_source":
+                self._validate_expert_source(record, current, visiting)
+            elif isinstance(record, LiteratureDocument):
                 self._validate_literature(record, current, visiting)
             elif isinstance(record, RawLiteratureArtifact):
                 self.repositories.raw_literature_artifacts.get(record.artifact_id)
@@ -422,7 +427,9 @@ class TrustedKnowledgeValidator:
                 self._verify_evidence_refs(record.evidence_refs)
             elif isinstance(record, ReportedResult):
                 self._validate_reported_result(record, current, visiting)
-            elif isinstance(record, ExpertCase | LiteratureWorkflowPattern):
+            elif isinstance(record, ExpertCase):
+                self._validate_expert_case(record, current, visiting)
+            elif isinstance(record, LiteratureWorkflowPattern):
                 self._verify_evidence_refs(record.evidence_refs)
             elif isinstance(record, ScientificCapability):
                 pass
@@ -435,6 +442,82 @@ class TrustedKnowledgeValidator:
             return record
         finally:
             visiting.remove(key)
+
+    def _requires_curation(
+        self,
+        key: tuple[str, str],
+        record: BaseModel,
+    ) -> bool:
+        if key[0] in CURATION_REQUIRED_TYPES:
+            return True
+        if isinstance(record, ExpertCase):
+            return bool(record.opinion_refs)
+        if isinstance(record, ExpertAttributionRecord):
+            return any(
+                item.attribution_id == record.attribution_id
+                for item in self.repositories.expert_sources.list()
+            )
+        return False
+
+    def _validate_expert_source(
+        self,
+        record: BaseModel,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        from .expert_knowledge.contracts import ExpertSourceRecord
+        from .expert_knowledge.source import validate_expert_source
+
+        if not isinstance(record, ExpertSourceRecord):
+            raise TrustedKnowledgeError(
+                "INVALID_EXPERT_SOURCE",
+                "expert source repository contains an incompatible record",
+            )
+        try:
+            validate_expert_source(record, self.repositories)
+        except (FileNotFoundError, ValueError) as error:
+            raise TrustedKnowledgeError(
+                "INVALID_EXPERT_SOURCE",
+                f"expert source provenance is invalid: {record.expert_source_id}",
+            ) from error
+        self._validate_record(("expert_profile", record.expert_id), current, visiting)
+        attribution = self._validate_record(
+            ("expert_attribution", record.attribution_id), current, visiting
+        )
+        if (
+            not isinstance(attribution, ExpertAttributionRecord)
+            or attribution.content_hash != record.attribution_hash
+        ):
+            raise TrustedKnowledgeError(
+                "INVALID_EXPERT_SOURCE_ATTRIBUTION",
+                f"expert source attribution binding is invalid: {record.expert_source_id}",
+            )
+
+    def _validate_expert_case(
+        self,
+        record: ExpertCase,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        self._verify_evidence_refs(record.evidence_refs)
+        if not record.opinion_refs:
+            return
+        opinion_evidence: set[str] = set()
+        for opinion_id in record.opinion_refs:
+            opinion = self._validate_record(
+                ("expert_opinion", opinion_id), current, visiting
+            )
+            if not isinstance(opinion, ExpertOpinion):
+                raise TrustedKnowledgeError(
+                    "INVALID_EXPERT_CASE_OPINION",
+                    f"expert case dependency is not an opinion: {opinion_id}",
+                )
+            opinion_evidence.update(opinion.evidence_refs)
+        if not set(record.evidence_refs).issubset(opinion_evidence):
+            raise TrustedKnowledgeError(
+                "EXPERT_CASE_EVIDENCE_MISMATCH",
+                f"expert case evidence is not derived from its opinions: {record.case_id}",
+            )
 
     def _k1f_authority(
         self,
@@ -761,6 +844,11 @@ class TrustedKnowledgeValidator:
         self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
 
     def _validate_attribution(self, attribution: ExpertAttributionRecord) -> None:
+        if attribution.attribution_status not in {None, "confirmed"}:
+            raise TrustedKnowledgeError(
+                "UNRESOLVED_EXPERT_ATTRIBUTION",
+                f"expert attribution is not confirmed: {attribution.attribution_id}",
+            )
         source = self._verify_source(attribution.source_id, attribution.source_version)
         for evidence_id in attribution.evidence_refs:
             evidence, evidence_source = self._verify_evidence(evidence_id)
@@ -788,6 +876,7 @@ class TrustedKnowledgeValidator:
                 f"accepted ExpertOpinion has no attribution: {opinion.opinion_id}",
             )
         attributed_evidence: set[str] = set()
+        attributed_spans: list[EvidenceSpan] = []
         for attribution_id in opinion.attribution_refs:
             attribution = self._validate_record(
                 ("expert_attribution", attribution_id), current, visiting
@@ -803,11 +892,24 @@ class TrustedKnowledgeValidator:
                     f"attribution belongs to another expert: {attribution_id}",
                 )
             attributed_evidence.update(attribution.evidence_refs)
-        if not set(opinion.evidence_refs).issubset(attributed_evidence):
-            raise TrustedKnowledgeError(
-                "EXPERT_OPINION_EVIDENCE_NOT_ATTRIBUTED",
-                f"opinion evidence is not covered by its attributions: {opinion.opinion_id}",
+            attributed_spans.extend(
+                self._verify_evidence(evidence_id)[0]
+                for evidence_id in attribution.evidence_refs
             )
+        for evidence_id in opinion.evidence_refs:
+            evidence = self._verify_evidence(evidence_id)[0]
+            covered = evidence_id in attributed_evidence or any(
+                span.source_id == evidence.source_id
+                and span.source_version == evidence.source_version
+                and span.start_offset <= evidence.start_offset
+                and span.end_offset >= evidence.end_offset
+                for span in attributed_spans
+            )
+            if not covered:
+                raise TrustedKnowledgeError(
+                    "EXPERT_OPINION_EVIDENCE_NOT_ATTRIBUTED",
+                    f"opinion evidence is not covered by its attributions: {opinion.opinion_id}",
+                )
         self._verify_evidence_refs(opinion.evidence_refs)
         for claim_id in opinion.related_claim_refs:
             self._validate_record(("source_claim", claim_id), current, visiting)

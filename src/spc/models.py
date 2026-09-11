@@ -305,6 +305,7 @@ class SourceType(StrEnum):
     LITERATURE_ARTICLE = "literature_article"
     CALCULATION_ARCHIVE = "calculation_archive"
     INTERNAL_NOTE = "internal_note"
+    EXPERT_WEBPAGE = "expert_webpage"
     UNSPECIFIED = "unspecified"
 
 
@@ -792,6 +793,76 @@ class ExpertCase(StrictModel):
     positive: bool
     rationale: NonBlankStr
     evidence_refs: tuple[str, ...] = ()
+    opinion_refs: tuple[NonBlankStr, ...] = ()
+    original_wording: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    latent_concern: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    atomic_questions: tuple[NonBlankStr, ...] = ()
+    good_question_formulations: tuple[NonBlankStr, ...] = ()
+    wrong_formulations: tuple[NonBlankStr, ...] = ()
+    answerability_conditions: tuple[NonBlankStr, ...] = ()
+    required_evidence_types: tuple[NonBlankStr, ...] = ()
+    baseline_guidance: tuple[NonBlankStr, ...] = ()
+    common_misinterpretations: tuple[NonBlankStr, ...] = ()
+    resolution_pattern: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    applicability: tuple[NonBlankStr, ...] = ()
+    provenance_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_compiled_case(self) -> ExpertCase:
+        from .serialization import content_hash
+
+        tuple_fields = (
+            "translated_questions",
+            "evidence_refs",
+            "opinion_refs",
+            "atomic_questions",
+            "good_question_formulations",
+            "wrong_formulations",
+            "answerability_conditions",
+            "required_evidence_types",
+            "baseline_guidance",
+            "common_misinterpretations",
+            "applicability",
+        )
+        for field_name in tuple_fields:
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"ExpertCase {field_name} must be unique")
+        if not self.opinion_refs:
+            return self
+        required_values = (
+            self.original_wording,
+            self.latent_concern,
+            self.atomic_questions,
+            self.good_question_formulations,
+            self.wrong_formulations,
+            self.answerability_conditions,
+            self.required_evidence_types,
+            self.resolution_pattern,
+            self.applicability,
+            self.provenance_hash,
+        )
+        if any(not value for value in required_values):
+            raise ValueError("compiled ExpertCase is missing reusable reasoning fields")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"case_id", "provenance_hash"},
+            exclude_none=True,
+        )
+        expected_hash = content_hash(identity)
+        if self.provenance_hash != expected_hash:
+            raise ValueError("compiled ExpertCase provenance_hash is invalid")
+        if self.case_id != f"expert-case-{expected_hash[:24]}":
+            raise ValueError("compiled ExpertCase case_id is not content-bound")
+        return self
 
 
 class LiteratureWorkflowPattern(StrictModel):
@@ -2653,6 +2724,12 @@ class ExpertProfile(StrictModel):
     expertise_domains: tuple[NonBlankStr, ...] = ()
     expertise_topics: tuple[NonBlankStr, ...] = ()
     profile_source_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    organization: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    role: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -2684,6 +2761,9 @@ class ExpertAttributionRecord(StrictModel):
     evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
     medium: NonBlankStr
     attribution_basis: NonBlankStr
+    attribution_status: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     captured_at: datetime | None = None
     content_hash: Sha256Str
 
@@ -2722,6 +2802,9 @@ class ExpertOpinion(StrictModel):
     related_claim_refs: tuple[NonBlankStr, ...] = ()
     related_workflow_refs: tuple[NonBlankStr, ...] = ()
     supersedes: NonBlankStr | None = None
+    authority_status: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     content_hash: Sha256Str
 
     @model_validator(mode="after")
