@@ -9,6 +9,7 @@ from ..serialization import (
     canonical_json_bytes,
     content_hash,
     dump_yaml,
+    load_data,
     load_model,
     require_safe_path_component,
 )
@@ -71,6 +72,28 @@ class ScientificProblemRunRepository:
             artifact_type=artifact_type,
             artifact_id=artifact_id,
             artifact_hash=content_hash(value),
+            relative_path=relative_path,
+        )
+
+    def write_immutable_artifact(
+        self,
+        run_id: str,
+        relative_path: str,
+        artifact_type: str,
+        artifact_id: str,
+        value: object,
+    ) -> ScientificRunArtifactBinding:
+        path = self.resolve_artifact_path(run_id, relative_path)
+        expected_hash = content_hash(value)
+        if path.exists():
+            if path.is_symlink() or content_hash(load_data(path)) != expected_hash:
+                raise FileExistsError(f"conflicting immutable workflow artifact: {path}")
+        else:
+            dump_yaml(path, value)
+        return ScientificRunArtifactBinding(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            artifact_hash=expected_hash,
             relative_path=relative_path,
         )
 

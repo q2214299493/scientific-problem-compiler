@@ -13,7 +13,7 @@ from ..approval import (
     StructuredLLMApprovalProvider,
     bind_gate_verdict,
 )
-from ..compiler import ScientificProblemCompiler
+from ..compiler import CompilationResult, ScientificProblemCompiler
 from ..domains import DomainPackLoader
 from ..export import GenericExportService
 from ..interpretation import MockInterpretationProvider, ScientificEvidencePacketBuilder
@@ -30,6 +30,9 @@ from ..models import (
     IndependentApprovalReceipt,
     KnowledgeSnapshot,
     PlanCompilationReceipt,
+    PlanRevisionChain,
+    PlanRevisionRecord,
+    PlanRevisionRound,
     PlanValidationRecord,
     PlanningProposalSet,
     ProjectTrustPolicy,
@@ -46,8 +49,11 @@ from ..models import (
 from ..planning import (
     HTTPJSONLLMTransport,
     MockPlanningProvider,
+    PlanMaterializer,
     PlanningContextResolver,
     StructuredLLMPlanningProvider,
+    automatic_revision_block_reason,
+    build_plan_revision_input,
 )
 from ..planning.validators import validate_planning_proposal_set
 from ..repositories import (
@@ -111,6 +117,19 @@ def _update_run(run: ScientificProblemRun, **updates: Any) -> ScientificProblemR
     return _make_run(payload)
 
 
+def _make_revision_chain(payload: dict[str, Any]) -> PlanRevisionChain:
+    normalized_payload = dict(payload)
+    normalized_payload["rounds"] = tuple(
+        item if isinstance(item, PlanRevisionRound) else PlanRevisionRound.model_validate(item)
+        for item in payload["rounds"]
+    )
+    draft = PlanRevisionChain.model_construct(
+        **normalized_payload, content_hash="0" * 64
+    )
+    normalized = draft.model_dump(mode="json", exclude={"content_hash"})
+    return PlanRevisionChain(**normalized, content_hash=content_hash(normalized))
+
+
 def _provider_binding(stage: str, provider: Any) -> ScientificRunProviderBinding:
     config = dict(getattr(provider, "provider_config", {}))
     model_id = getattr(getattr(provider, "transport", None), "model_id", None)
@@ -146,6 +165,52 @@ class ScientificProblemWorkflow:
         self.runs = ScientificProblemRunRepository(self.state_dir)
         self.domain_loader = DomainPackLoader()
 
+    @staticmethod
+    def _revision_chain_path() -> str:
+        return "plan-revisions/revision-chain.yaml"
+
+    def _load_revision_chain(self, run_id: str) -> PlanRevisionChain | None:
+        try:
+            return self.runs.load_artifact(
+                run_id, self._revision_chain_path(), PlanRevisionChain
+            )
+        except FileNotFoundError:
+            return None
+
+    def _save_revision_chain(self, chain: PlanRevisionChain) -> None:
+        self.runs.write_immutable_artifact(
+            chain.run_id,
+            f"plan-revisions/history/{chain.content_hash}.yaml",
+            "plan_revision_chain",
+            chain.chain_id,
+            chain,
+        )
+        self.runs.write_artifact(
+            chain.run_id,
+            self._revision_chain_path(),
+            "plan_revision_chain",
+            chain.chain_id,
+            chain,
+        )
+
+    @staticmethod
+    def _round_prefix(round_index: int) -> str:
+        return f"plan-revisions/round-{round_index}"
+
+    def _approval_prefix(self, run_id: str) -> str:
+        chain = self._load_revision_chain(run_id)
+        if chain is None:
+            return "approval"
+        return f"{self._round_prefix(chain.rounds[-1].round_index)}/approval"
+
+    def _load_bound_artifact(self, run_id: str, binding, model_type):
+        value = self.runs.load_artifact(run_id, binding.relative_path, model_type)
+        if content_hash(value) != binding.artifact_hash:
+            raise ValueError(
+                f"workflow artifact hash mismatch: {binding.relative_path}"
+            )
+        return value
+
     def start(
         self,
         request: str,
@@ -161,6 +226,7 @@ class ScientificProblemWorkflow:
         llm_api_key: str | None = None,
         temperature: float = 0.0,
         max_attempts: int = 1,
+        max_plan_revisions: int = 0,
     ) -> WorkflowResult:
         if not request.strip():
             raise ValueError("scientific request must not be blank")
@@ -194,6 +260,7 @@ class ScientificProblemWorkflow:
             llm_api_key=llm_api_key,
             temperature=temperature,
             max_attempts=max_attempts,
+            max_plan_revisions=max_plan_revisions,
         )
 
     def resume(self, run_id: str, **options: Any) -> WorkflowResult:
@@ -268,7 +335,10 @@ class ScientificProblemWorkflow:
         llm_api_key: str | None = None,
         temperature: float = 0.0,
         max_attempts: int = 1,
+        max_plan_revisions: int = 0,
     ) -> WorkflowResult:
+        if not 0 <= max_plan_revisions <= 10:
+            raise ValueError("max_plan_revisions must be between zero and ten")
         repositories, evidence = self._knowledge(run.domain)
         try:
             blocking = self._blocking_curations(repositories, evidence, run.domain)
@@ -301,6 +371,21 @@ class ScientificProblemWorkflow:
             )
         except (FileNotFoundError, OSError, ValueError) as error:
             return self._fail(ready, "trusted_retrieval", error, retryable=False)
+        revision_chain = self._load_revision_chain(ready.run_id)
+        if revision_chain is not None and (
+            revision_chain.context_id != context.context_id
+            or revision_chain.context_hash != context.content_hash
+            or revision_chain.knowledge_snapshot_id
+            != context.knowledge_snapshot.snapshot_id
+            or revision_chain.knowledge_snapshot_hash
+            != _snapshot_hash(context.knowledge_snapshot)
+        ):
+            return self._revision_block(
+                ready,
+                revision_chain,
+                "TRUSTED_CONTEXT_CHANGED",
+                "trusted context or knowledge authority changed; start a new compiled context",
+            )
         self.runs.write_artifact(
             ready.run_id, "context.yaml", "scientific_context_packet", context.context_id, context
         )
@@ -399,11 +484,32 @@ class ScientificProblemWorkflow:
                 temperature=temperature,
                 max_attempts=max_attempts,
             )
-            compilation = self._reuse_compilation(interpreted, planning_input, evidence)
-            if compilation is None:
-                compilation = ScientificProblemCompiler(
-                    planner, evidence_repository=evidence
-                ).compile(planning_input)
+            if revision_chain is not None:
+                if max_plan_revisions not in {0, revision_chain.max_revisions}:
+                    raise ValueError(
+                        "persisted revision budget cannot be changed during resume"
+                    )
+                if (
+                    revision_chain.planning_input_id != planning_input.planning_input_id
+                    or revision_chain.planning_input_hash != planning_input.content_hash
+                ):
+                    return self._revision_block(
+                        interpreted,
+                        revision_chain,
+                        "PLANNING_INPUT_CHANGED",
+                        "trusted planning input changed; rebuild a new context before revision",
+                    )
+                compilation = self._load_revision_compilation(
+                    revision_chain, planning_input, evidence
+                )
+            else:
+                compilation = self._reuse_compilation(
+                    interpreted, planning_input, evidence
+                )
+                if compilation is None:
+                    compilation = ScientificProblemCompiler(
+                        planner, evidence_repository=evidence
+                    ).compile(planning_input)
         except (FileNotFoundError, OSError, ValueError, TypeError) as error:
             return self._fail(interpreted, "planning", error, retryable=True)
         proposal = compilation.proposal_set
@@ -417,47 +523,89 @@ class ScientificProblemWorkflow:
         self.runs.write_artifact(
             run.run_id, "planning-input.yaml", "scientific_planning_input", planning_input.planning_input_id, planning_input
         )
-        self.runs.write_artifact(
-            run.run_id, "planning-proposal.yaml", "planning_proposal_set", proposal.proposal_id, proposal
-        )
-        candidate_bindings: list[ScientificRunArtifactBinding] = []
-        receipt_bindings: list[ScientificRunArtifactBinding] = []
-        validation_bindings: list[ScientificRunArtifactBinding] = []
-        for plan, receipt in zip(
-            compilation.candidates,
-            compilation.compilation_receipts,
-            strict=True,
-        ):
-            candidate_bindings.append(
-                self.runs.write_artifact(
-                    run.run_id, f"candidates/{plan.plan_id}.yaml", "scientific_question_plan", plan.plan_id, plan
+        if revision_chain is not None:
+            current_round = revision_chain.rounds[-1]
+            proposal_binding = current_round.planning_proposal
+            candidate_bindings = [current_round.candidate_plan]
+            receipt_bindings = [current_round.compilation_receipt]
+            validation_bindings = [current_round.validation_record]
+        else:
+            revision_enabled = max_plan_revisions > 0
+            prefix = self._round_prefix(0) if revision_enabled else ""
+            proposal_path = (
+                f"{prefix}/planning-proposal.yaml"
+                if prefix
+                else "planning-proposal.yaml"
+            )
+            writer = (
+                self.runs.write_immutable_artifact
+                if revision_enabled
+                else self.runs.write_artifact
+            )
+            proposal_binding = writer(
+                run.run_id,
+                proposal_path,
+                "planning_proposal_set",
+                proposal.proposal_id,
+                proposal,
+            )
+            candidate_bindings = []
+            receipt_bindings = []
+            validation_bindings = []
+            for plan, receipt in zip(
+                compilation.candidates,
+                compilation.compilation_receipts,
+                strict=True,
+            ):
+                candidate_path = (
+                    f"{prefix}/candidates/{plan.plan_id}.yaml"
+                    if prefix
+                    else f"candidates/{plan.plan_id}.yaml"
                 )
-            )
-            receipt_bindings.append(
-                self.runs.write_artifact(
-                    run.run_id,
-                    f"compilation-receipts/{receipt.receipt_id}.yaml",
-                    "plan_compilation_receipt",
-                    receipt.receipt_id,
-                    receipt,
+                receipt_path = (
+                    f"{prefix}/compilation-receipts/{receipt.receipt_id}.yaml"
+                    if prefix
+                    else f"compilation-receipts/{receipt.receipt_id}.yaml"
                 )
-            )
-            validation = build_plan_validation_record(
-                plan,
-                validate_question_plan(
-                    plan, planning_input.scientific_capabilities, evidence
-                ),
-                validation_id=f"plan-validation-{content_hash(plan)[:24]}",
-            )
-            validation_bindings.append(
-                self.runs.write_artifact(
-                    run.run_id,
-                    f"validation-records/{validation.validation_id}.yaml",
-                    "plan_validation_record",
-                    validation.validation_id,
-                    validation,
+                candidate_bindings.append(
+                    writer(
+                        run.run_id,
+                        candidate_path,
+                        "scientific_question_plan",
+                        plan.plan_id,
+                        plan,
+                    )
                 )
-            )
+                receipt_bindings.append(
+                    writer(
+                        run.run_id,
+                        receipt_path,
+                        "plan_compilation_receipt",
+                        receipt.receipt_id,
+                        receipt,
+                    )
+                )
+                validation = build_plan_validation_record(
+                    plan,
+                    validate_question_plan(
+                        plan, planning_input.scientific_capabilities, evidence
+                    ),
+                    validation_id=f"plan-validation-{content_hash(plan)[:24]}",
+                )
+                validation_path = (
+                    f"{prefix}/validation-records/{validation.validation_id}.yaml"
+                    if prefix
+                    else f"validation-records/{validation.validation_id}.yaml"
+                )
+                validation_bindings.append(
+                    writer(
+                        run.run_id,
+                        validation_path,
+                        "plan_validation_record",
+                        validation.validation_id,
+                        validation,
+                    )
+                )
         planned = _update_run(
             interpreted,
             status=ScientificProblemRunStatus.PLANNED,
@@ -474,6 +622,65 @@ class ScientificProblemWorkflow:
             ),
         )
         self.runs.save(planned)
+        if revision_chain is None and max_plan_revisions > 0:
+            if selected_candidate_id is None:
+                if len(candidate_bindings) != 1:
+                    return self._fail(
+                        planned,
+                        "plan_revision",
+                        ValueError(
+                            "bounded revision with multiple candidates requires --candidate-id"
+                        ),
+                        retryable=False,
+                    )
+                selected_candidate_id = candidate_bindings[0].artifact_id
+            selected_ids = [item.artifact_id for item in candidate_bindings]
+            if selected_candidate_id not in selected_ids:
+                return self._fail(
+                    planned,
+                    "plan_revision",
+                    ValueError("selected candidate ID is not part of this run"),
+                    retryable=False,
+                )
+            selected_index = selected_ids.index(selected_candidate_id)
+            revision_chain = _make_revision_chain(
+                {
+                    "chain_id": (
+                        "plan-revision-chain-"
+                        + content_hash({"run_id": planned.run_id})[:24]
+                    ),
+                    "run_id": planned.run_id,
+                    "planning_input_id": planning_input.planning_input_id,
+                    "planning_input_hash": planning_input.content_hash,
+                    "context_id": context.context_id,
+                    "context_hash": context.content_hash,
+                    "knowledge_snapshot_id": context.knowledge_snapshot.snapshot_id,
+                    "knowledge_snapshot_hash": _snapshot_hash(
+                        context.knowledge_snapshot
+                    ),
+                    "max_revisions": max_plan_revisions,
+                    "revisions_used": 0,
+                    "rounds": (
+                        PlanRevisionRound(
+                            round_index=0,
+                            planning_proposal=proposal_binding,
+                            candidate_plan=candidate_bindings[selected_index],
+                            compilation_receipt=receipt_bindings[selected_index],
+                            validation_record=validation_bindings[selected_index],
+                        ),
+                    ),
+                    "termination_reason": None,
+                }
+            )
+            self._save_revision_chain(revision_chain)
+            planned = _update_run(
+                planned,
+                candidate_plans=(candidate_bindings[selected_index],),
+                candidate_compilation_receipts=(receipt_bindings[selected_index],),
+                plan_validation_records=(validation_bindings[selected_index],),
+                selected_candidate_id=selected_candidate_id,
+            )
+            self.runs.save(planned)
         awaiting = _update_run(
             planned,
             status=ScientificProblemRunStatus.AWAITING_APPROVAL,
@@ -491,8 +698,26 @@ class ScientificProblemWorkflow:
                 selected_candidate_id=selected_candidate_id,
             )
             return WorkflowResult(reusable or awaiting)
-        return WorkflowResult(
-            self._approve(
+        if revision_chain is not None and revision_chain.rounds[-1].approval_receipt is not None:
+            approved = self._reuse_approval(
+                awaiting,
+                previous=run,
+                context=context,
+                packet=packet,
+                planning_input=planning_input,
+                repositories=repositories,
+                evidence=evidence,
+                selected_candidate_id=selected_candidate_id,
+            )
+            if approved is None:
+                return self._revision_block(
+                    awaiting,
+                    revision_chain,
+                    "STALE_APPROVAL_CHAIN",
+                    "stored revision approval chain failed validation",
+                )
+        else:
+            approved = self._approve(
                 awaiting,
                 context,
                 packet,
@@ -501,6 +726,34 @@ class ScientificProblemWorkflow:
                 evidence,
                 approval_provider,
                 selected_candidate_id,
+                llm_endpoint,
+                llm_model,
+                llm_api_key,
+                temperature,
+                max_attempts,
+                artifact_prefix=(
+                    f"{self._round_prefix(revision_chain.rounds[-1].round_index)}/approval"
+                    if revision_chain is not None
+                    else "approval"
+                ),
+            )
+            if revision_chain is not None:
+                if approved.approval_receipt_id is None:
+                    return WorkflowResult(approved)
+                revision_chain = self._record_round_approval(revision_chain, approved)
+        if revision_chain is None:
+            return WorkflowResult(approved)
+        return WorkflowResult(
+            self._run_revision_cycle(
+                approved,
+                revision_chain,
+                context,
+                packet,
+                planning_input,
+                repositories,
+                evidence,
+                planner,
+                approval_provider,
                 llm_endpoint,
                 llm_model,
                 llm_api_key,
@@ -529,6 +782,7 @@ class ScientificProblemWorkflow:
         if previous.selected_candidate_id not in candidate_ids:
             return None
         index = candidate_ids.index(previous.selected_candidate_id)
+        approval_prefix = self._approval_prefix(run.run_id)
         try:
             plan = self.runs.load_artifact(
                 run.run_id, run.candidate_plans[index].relative_path, ScientificQuestionPlan
@@ -548,21 +802,27 @@ class ScientificProblemWorkflow:
                 evidence,
             )
             review_input = self.runs.load_artifact(
-                run.run_id, "approval/approval-review-input.yaml", ApprovalReviewInput
+                run.run_id,
+                f"{approval_prefix}/approval-review-input.yaml",
+                ApprovalReviewInput,
             )
             review = self.runs.load_artifact(
-                run.run_id, "approval/approval-review.yaml", ApprovalReviewRecord
+                run.run_id,
+                f"{approval_prefix}/approval-review.yaml",
+                ApprovalReviewRecord,
             )
             verdict = self.runs.load_artifact(
-                run.run_id, "approval/approval-verdict.yaml", ApprovalVerdict
+                run.run_id,
+                f"{approval_prefix}/approval-verdict.yaml",
+                ApprovalVerdict,
             )
             receipt = self.runs.load_artifact(
                 run.run_id,
-                "approval/independent-approval-receipt.yaml",
+                f"{approval_prefix}/independent-approval-receipt.yaml",
                 IndependentApprovalReceipt,
             )
             gate = self.runs.load_artifact(
-                run.run_id, "approval/plan-gate.yaml", GateVerdict
+                run.run_id, f"{approval_prefix}/plan-gate.yaml", GateVerdict
             )
             if not validate_independent_approval_chain(
                 plan, verdict, review_input, review, receipt
@@ -665,6 +925,439 @@ class ScientificProblemWorkflow:
         except (FileNotFoundError, OSError, ValueError):
             return None
 
+    def _load_revision_compilation(
+        self,
+        chain: PlanRevisionChain,
+        planning_input,
+        evidence,
+    ) -> CompilationResult:
+        current = chain.rounds[-1]
+        proposal = self._load_bound_artifact(
+            chain.run_id, current.planning_proposal, PlanningProposalSet
+        )
+        plan = self._load_bound_artifact(
+            chain.run_id, current.candidate_plan, ScientificQuestionPlan
+        )
+        receipt = self._load_bound_artifact(
+            chain.run_id, current.compilation_receipt, PlanCompilationReceipt
+        )
+        validation = self._load_bound_artifact(
+            chain.run_id, current.validation_record, PlanValidationRecord
+        )
+        proposal_report = validate_planning_proposal_set(proposal, planning_input)
+        plan_report = validate_question_plan(
+            plan, planning_input.scientific_capabilities, evidence
+        )
+        if not proposal_report.valid:
+            raise ValueError("stored revision planning proposal failed validation")
+        if not validate_plan_compilation_receipt(plan, receipt).valid:
+            raise ValueError("stored revision compilation receipt failed validation")
+        if (
+            validation.plan_id != plan.plan_id
+            or validation.plan_content_hash != content_hash(plan)
+        ):
+            raise ValueError("stored revision validation record is stale")
+        return CompilationResult(
+            candidates=(plan,),
+            reports=(proposal_report, plan_report),
+            proposal_set=proposal,
+            compilation_receipts=(receipt,),
+        )
+
+    def _record_round_approval(
+        self,
+        chain: PlanRevisionChain,
+        run: ScientificProblemRun,
+    ) -> PlanRevisionChain:
+        current = chain.rounds[-1]
+        prefix = f"{self._round_prefix(current.round_index)}/approval"
+        values = (
+            (
+                "approval-review-input.yaml",
+                "approval_review_input",
+                ApprovalReviewInput,
+                run.approval_review_id,
+            ),
+            (
+                "approval-review.yaml",
+                "approval_review_record",
+                ApprovalReviewRecord,
+                run.approval_review_id,
+            ),
+            (
+                "approval-verdict.yaml",
+                "approval_verdict",
+                ApprovalVerdict,
+                run.approval_verdict_id,
+            ),
+            (
+                "independent-approval-receipt.yaml",
+                "independent_approval_receipt",
+                IndependentApprovalReceipt,
+                run.approval_receipt_id,
+            ),
+            ("plan-gate.yaml", "gate_verdict", GateVerdict, run.gate_id),
+            (
+                "project-trust-policy.yaml",
+                "project_trust_policy",
+                ProjectTrustPolicy,
+                "project-trust-policy",
+            ),
+        )
+        bindings: list[ScientificRunArtifactBinding] = []
+        loaded: list[object] = []
+        for filename, artifact_type, model_type, expected_id in values:
+            path = f"{prefix}/{filename}"
+            value = self.runs.load_artifact(chain.run_id, path, model_type)
+            identifier = expected_id
+            if identifier is None:
+                raise ValueError("approval run is missing a required artifact identifier")
+            if artifact_type == "approval_review_input":
+                identifier = value.review_input_id
+            bindings.append(
+                ScientificRunArtifactBinding(
+                    artifact_type=artifact_type,
+                    artifact_id=identifier,
+                    artifact_hash=content_hash(value),
+                    relative_path=path,
+                )
+            )
+            loaded.append(value)
+        verdict = loaded[2]
+        updated_round = current.model_copy(
+            update={
+                "approval_review_input": bindings[0],
+                "approval_review_record": bindings[1],
+                "approval_verdict": bindings[2],
+                "approval_receipt": bindings[3],
+                "gate": bindings[4],
+                "trust_policy": bindings[5],
+                "outcome": verdict.decision.value,
+            }
+        )
+        termination_reason = (
+            "approved"
+            if verdict.decision == ApprovalDecision.APPROVE
+            else (
+                None
+                if verdict.decision == ApprovalDecision.REQUEST_REVISION
+                else f"non_revisable_decision:{verdict.decision.value}"
+            )
+        )
+        payload = chain.model_dump(mode="python", exclude={"content_hash"})
+        payload.update(
+            rounds=(*chain.rounds[:-1], updated_round),
+            termination_reason=termination_reason,
+        )
+        updated = _make_revision_chain(payload)
+        self._save_revision_chain(updated)
+        return updated
+
+    def _revision_block(
+        self,
+        run: ScientificProblemRun,
+        chain: PlanRevisionChain,
+        category: str,
+        message: str,
+    ) -> WorkflowResult:
+        payload = chain.model_dump(mode="python", exclude={"content_hash"})
+        payload["termination_reason"] = f"{category}:{message}"
+        updated_chain = _make_revision_chain(payload)
+        self._save_revision_chain(updated_chain)
+        blocked = _update_run(
+            run,
+            status=ScientificProblemRunStatus.REVISION_BLOCKED,
+            last_successful_status=run.status,
+            failure=ScientificRunFailure(
+                stage="plan_revision",
+                category=category,
+                message=message,
+                retryable=False,
+            ),
+        )
+        self.runs.save(blocked)
+        return WorkflowResult(blocked)
+
+    def _run_revision_cycle(
+        self,
+        run: ScientificProblemRun,
+        chain: PlanRevisionChain,
+        context,
+        packet,
+        planning_input,
+        repositories,
+        evidence,
+        planner,
+        approval_provider,
+        llm_endpoint,
+        llm_model,
+        llm_api_key,
+        temperature,
+        max_attempts,
+    ) -> ScientificProblemRun:
+        current_run = run
+        current_chain = chain
+        while True:
+            current_round = current_chain.rounds[-1]
+            if current_round.approval_verdict is None:
+                return current_run
+            plan = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.candidate_plan,
+                ScientificQuestionPlan,
+            )
+            validation = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.validation_record,
+                PlanValidationRecord,
+            )
+            proposal = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.planning_proposal,
+                PlanningProposalSet,
+            )
+            compilation_receipt = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.compilation_receipt,
+                PlanCompilationReceipt,
+            )
+            review_input = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.approval_review_input,
+                ApprovalReviewInput,
+            )
+            review = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.approval_review_record,
+                ApprovalReviewRecord,
+            )
+            verdict = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.approval_verdict,
+                ApprovalVerdict,
+            )
+            receipt = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.approval_receipt,
+                IndependentApprovalReceipt,
+            )
+            gate = self._load_bound_artifact(
+                current_run.run_id, current_round.gate, GateVerdict
+            )
+            if not validate_independent_approval_chain(
+                plan, verdict, review_input, review, receipt
+            ).valid or (
+                gate.candidate_id != plan.plan_id
+                or gate.candidate_content_hash != content_hash(plan)
+                or gate.approval_verdict_hash != content_hash(verdict)
+                or gate.independent_approval_receipt_hash != receipt.content_hash
+            ):
+                return self._revision_block(
+                    current_run,
+                    current_chain,
+                    "INVALID_TRIGGER_APPROVAL_CHAIN",
+                    "revision trigger approval chain is stale, cross-plan, or tampered",
+                ).run
+            if verdict.decision != ApprovalDecision.REQUEST_REVISION:
+                return current_run
+            if current_chain.revisions_used >= current_chain.max_revisions:
+                return self._revision_block(
+                    current_run,
+                    current_chain,
+                    "REVISION_BUDGET_EXHAUSTED",
+                    "independent review still requests revision after the configured limit",
+                ).run
+            block_reason = automatic_revision_block_reason(
+                plan, review, verdict, validation
+            )
+            if block_reason is not None:
+                return self._revision_block(
+                    current_run,
+                    current_chain,
+                    "REVISION_REQUIRES_EXTERNAL_ACTION",
+                    block_reason,
+                ).run
+            validation_report = validate_question_plan(
+                plan, planning_input.scientific_capabilities, evidence
+            )
+            candidate_key = next(
+                candidate.candidate_key
+                for candidate in proposal.candidates
+                if PlanMaterializer().materialize_candidate(
+                    candidate, proposal, planning_input
+                ).plan_id
+                == plan.plan_id
+            )
+            try:
+                revision_input = build_plan_revision_input(
+                    revision_index=current_chain.revisions_used + 1,
+                    planning_input=planning_input,
+                    parent_proposal=proposal,
+                    parent_candidate_key=candidate_key,
+                    parent_plan=plan,
+                    parent_compilation_receipt=compilation_receipt,
+                    plan_validation_record=validation,
+                    validation_report=validation_report,
+                    approval_review_input=review_input,
+                    approval_review_record=review,
+                    approval_verdict=verdict,
+                    approval_receipt=receipt,
+                )
+                revision = ScientificProblemCompiler(
+                    planner, evidence_repository=evidence
+                ).revise(revision_input)
+            except (FileNotFoundError, OSError, ValueError, TypeError) as error:
+                return self._revision_block(
+                    current_run,
+                    current_chain,
+                    "REVISION_OUTPUT_REJECTED",
+                    _sanitize_failure(error),
+                ).run
+
+            revised_plan = revision.plan
+            validation_report = validate_question_plan(
+                revised_plan, planning_input.scientific_capabilities, evidence
+            )
+            validation_record = build_plan_validation_record(
+                revised_plan,
+                validation_report,
+                validation_id=f"plan-validation-{content_hash(revised_plan)[:24]}",
+            )
+            record_identity = {
+                "revision_index": revision_input.revision_index,
+                "revision_input_id": revision_input.revision_input_id,
+                "revision_input_hash": revision_input.content_hash,
+                "parent_plan_id": plan.plan_id,
+                "parent_plan_hash": content_hash(plan),
+                "trigger_review_id": review.review_id,
+                "trigger_review_hash": review.content_hash,
+                "provider_id": planner.provider_id,
+                "provider_version": planner.provider_version,
+                "provider_config": dict(revision.proposal_set.provider_config),
+                "response": revision.response,
+                "planning_proposal_id": revision.proposal_set.proposal_id,
+                "planning_proposal_hash": content_hash(revision.proposal_set),
+                "revised_plan_id": revised_plan.plan_id,
+                "revised_plan_hash": content_hash(revised_plan),
+                "validation_id": validation_record.validation_id,
+                "validation_hash": content_hash(validation_record),
+                "substantive_change": True,
+            }
+            revision_id = f"plan-revision-{content_hash(record_identity)[:24]}"
+            record_payload = {"revision_id": revision_id, **record_identity}
+            revision_record = PlanRevisionRecord(
+                **record_payload,
+                content_hash=content_hash(record_payload),
+            )
+            round_index = revision_input.revision_index
+            prefix = self._round_prefix(round_index)
+            input_binding = self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{prefix}/revision-input.yaml",
+                "plan_revision_input",
+                revision_input.revision_input_id,
+                revision_input,
+            )
+            proposal_binding = self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{prefix}/planning-proposal.yaml",
+                "planning_proposal_set",
+                revision.proposal_set.proposal_id,
+                revision.proposal_set,
+            )
+            plan_binding = self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{prefix}/candidates/{revised_plan.plan_id}.yaml",
+                "scientific_question_plan",
+                revised_plan.plan_id,
+                revised_plan,
+            )
+            compilation_binding = self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{prefix}/compilation-receipts/{revision.compilation_receipt.receipt_id}.yaml",
+                "plan_compilation_receipt",
+                revision.compilation_receipt.receipt_id,
+                revision.compilation_receipt,
+            )
+            validation_binding = self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{prefix}/validation-records/{validation_record.validation_id}.yaml",
+                "plan_validation_record",
+                validation_record.validation_id,
+                validation_record,
+            )
+            record_binding = self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{prefix}/revision-record.yaml",
+                "plan_revision_record",
+                revision_record.revision_id,
+                revision_record,
+            )
+            next_round = PlanRevisionRound(
+                round_index=round_index,
+                parent_plan_id=plan.plan_id,
+                revision_input=input_binding,
+                revision_record=record_binding,
+                planning_proposal=proposal_binding,
+                candidate_plan=plan_binding,
+                compilation_receipt=compilation_binding,
+                validation_record=validation_binding,
+            )
+            chain_payload = current_chain.model_dump(
+                mode="python", exclude={"content_hash"}
+            )
+            chain_payload.update(
+                revisions_used=round_index,
+                rounds=(*current_chain.rounds, next_round),
+                termination_reason=None,
+            )
+            current_chain = _make_revision_chain(chain_payload)
+            self._save_revision_chain(current_chain)
+            current_run = _update_run(
+                current_run,
+                status=ScientificProblemRunStatus.AWAITING_APPROVAL,
+                planning_proposal_id=revision.proposal_set.proposal_id,
+                planning_proposal_hash=content_hash(revision.proposal_set),
+                candidate_plans=(plan_binding,),
+                candidate_compilation_receipts=(compilation_binding,),
+                plan_validation_records=(validation_binding,),
+                selected_candidate_id=revised_plan.plan_id,
+                approval_review_id=None,
+                approval_review_hash=None,
+                approval_verdict_id=None,
+                approval_verdict_hash=None,
+                approval_receipt_id=None,
+                approval_receipt_hash=None,
+                gate_id=None,
+                gate_hash=None,
+                export_path=None,
+                export_hash=None,
+                failure=None,
+                providers=self._replace_provider(
+                    current_run.providers, _provider_binding("planning", planner)
+                ),
+            )
+            self.runs.save(current_run)
+            current_run = self._approve(
+                current_run,
+                context,
+                packet,
+                planning_input,
+                repositories,
+                evidence,
+                approval_provider,
+                revised_plan.plan_id,
+                llm_endpoint,
+                llm_model,
+                llm_api_key,
+                temperature,
+                max_attempts,
+                artifact_prefix=f"{prefix}/approval",
+            )
+            if current_run.approval_receipt_id is None:
+                return current_run
+            current_chain = self._record_round_approval(current_chain, current_run)
+
     @staticmethod
     def _replace_provider(
         providers: tuple[ScientificRunProviderBinding, ...],
@@ -703,6 +1396,7 @@ class ScientificProblemWorkflow:
         llm_api_key,
         temperature,
         max_attempts,
+        artifact_prefix="approval",
     ) -> ScientificProblemRun:
         if selected_candidate_id is None:
             if len(run.candidate_plans) != 1:
@@ -768,7 +1462,18 @@ class ScientificProblemWorkflow:
             ("project-trust-policy.yaml", "project_trust_policy", "project-trust-policy", policy),
         )
         for path, kind, identifier, value in artifacts:
-            self.runs.write_artifact(run.run_id, f"approval/{path}", kind, identifier, value)
+            writer = (
+                self.runs.write_immutable_artifact
+                if artifact_prefix != "approval"
+                else self.runs.write_artifact
+            )
+            writer(
+                run.run_id,
+                f"{artifact_prefix}/{path}",
+                kind,
+                identifier,
+                value,
+            )
         if passed:
             status = ScientificProblemRunStatus.APPROVED
         elif result.verdict.decision in {
@@ -841,12 +1546,27 @@ class ScientificProblemWorkflow:
             "model_inference_performed": False,
         }
 
-    def export_downstream(self, run_id: str, output_root: Path, export_id: str) -> Path:
+    def export_downstream(
+        self,
+        run_id: str,
+        output_root: Path,
+        export_id: str,
+        *,
+        selected_candidate_id: str | None = None,
+    ) -> Path:
         run = self.runs.get(run_id)
         if run.status not in {ScientificProblemRunStatus.APPROVED, ScientificProblemRunStatus.EXPORTED}:
             raise ValueError("downstream export requires an independently APPROVED run")
         if run.selected_candidate_id is None:
             raise ValueError("approved run has no selected candidate")
+        revision_chain = self._load_revision_chain(run_id)
+        if revision_chain is not None and revision_chain.revisions_used > 0:
+            if selected_candidate_id != run.selected_candidate_id:
+                raise ValueError(
+                    "revised-plan export requires explicit selection of the final candidate ID"
+                )
+        elif selected_candidate_id not in {None, run.selected_candidate_id}:
+            raise ValueError("selected export candidate does not match the approved plan")
         index = tuple(item.artifact_id for item in run.candidate_plans).index(run.selected_candidate_id)
         plan = self.runs.load_artifact(run_id, run.candidate_plans[index].relative_path, ScientificQuestionPlan)
         validation = self.runs.load_artifact(
@@ -855,14 +1575,27 @@ class ScientificProblemWorkflow:
         compilation_receipt = self.runs.load_artifact(
             run_id, run.candidate_compilation_receipts[index].relative_path, PlanCompilationReceipt
         )
-        review_input = self.runs.load_artifact(run_id, "approval/approval-review-input.yaml", ApprovalReviewInput)
-        review = self.runs.load_artifact(run_id, "approval/approval-review.yaml", ApprovalReviewRecord)
-        verdict = self.runs.load_artifact(run_id, "approval/approval-verdict.yaml", ApprovalVerdict)
-        receipt = self.runs.load_artifact(
-            run_id, "approval/independent-approval-receipt.yaml", IndependentApprovalReceipt
+        approval_prefix = self._approval_prefix(run_id)
+        review_input = self.runs.load_artifact(
+            run_id, f"{approval_prefix}/approval-review-input.yaml", ApprovalReviewInput
         )
-        gate = self.runs.load_artifact(run_id, "approval/plan-gate.yaml", GateVerdict)
-        policy = self.runs.load_artifact(run_id, "approval/project-trust-policy.yaml", ProjectTrustPolicy)
+        review = self.runs.load_artifact(
+            run_id, f"{approval_prefix}/approval-review.yaml", ApprovalReviewRecord
+        )
+        verdict = self.runs.load_artifact(
+            run_id, f"{approval_prefix}/approval-verdict.yaml", ApprovalVerdict
+        )
+        receipt = self.runs.load_artifact(
+            run_id,
+            f"{approval_prefix}/independent-approval-receipt.yaml",
+            IndependentApprovalReceipt,
+        )
+        gate = self.runs.load_artifact(
+            run_id, f"{approval_prefix}/plan-gate.yaml", GateVerdict
+        )
+        policy = self.runs.load_artifact(
+            run_id, f"{approval_prefix}/project-trust-policy.yaml", ProjectTrustPolicy
+        )
         _, evidence = self._knowledge(run.domain)
         path = GenericExportService(output_root, evidence).export(
             plan=plan,
@@ -962,6 +1695,27 @@ def scientific_run_status(
 ) -> dict[str, Any]:
     retrieval_summary: dict[str, int] = {}
     evidence_gaps: list[dict[str, Any]] = []
+    revision_state: dict[str, Any] | None = None
+    revision_chain: PlanRevisionChain | None = None
+    if repository is not None:
+        try:
+            revision_chain = repository.load_artifact(
+                run.run_id,
+                "plan-revisions/revision-chain.yaml",
+                PlanRevisionChain,
+            )
+        except FileNotFoundError:
+            revision_chain = None
+    if revision_chain is not None:
+        revision_state = {
+            "max_revisions": revision_chain.max_revisions,
+            "revisions_used": revision_chain.revisions_used,
+            "current_round": revision_chain.rounds[-1].round_index,
+            "termination_reason": revision_chain.termination_reason,
+            "round_plan_ids": [
+                item.candidate_plan.artifact_id for item in revision_chain.rounds
+            ],
+        }
     if repository is not None and run.context_id is not None:
         context = repository.load_artifact(run.run_id, "context.yaml", ScientificContextPacket)
         retrieval_summary = {
@@ -999,6 +1753,7 @@ def scientific_run_status(
         "candidate_count": len(run.candidate_plans),
         "candidate_ids": [item.artifact_id for item in run.candidate_plans],
         "approval_state": run.approval_verdict_id,
+        "revision_state": revision_state,
         "export_state": run.export_path,
         "failure": run.failure.model_dump(mode="json") if run.failure else None,
     }
@@ -1068,6 +1823,14 @@ def render_scientific_run_markdown(run: ScientificProblemRun, repository: Scient
     context = None
     packet = None
     proposal = None
+    try:
+        revision_chain = repository.load_artifact(
+            run.run_id,
+            "plan-revisions/revision-chain.yaml",
+            PlanRevisionChain,
+        )
+    except FileNotFoundError:
+        revision_chain = None
     if run.context_id is not None:
         context = repository.load_artifact(run.run_id, "context.yaml", ScientificContextPacket)
         lines.extend(["", "## B. Retrieved trusted context", ""])
@@ -1131,7 +1894,14 @@ def render_scientific_run_markdown(run: ScientificProblemRun, repository: Scient
         else:
             lines.append("- None recorded.")
     if run.planning_proposal_id is not None:
-        proposal = repository.load_artifact(run.run_id, "planning-proposal.yaml", PlanningProposalSet)
+        proposal_path = (
+            revision_chain.rounds[-1].planning_proposal.relative_path
+            if revision_chain is not None
+            else "planning-proposal.yaml"
+        )
+        proposal = repository.load_artifact(
+            run.run_id, proposal_path, PlanningProposalSet
+        )
         lines.extend(
             [
                 "",
@@ -1170,7 +1940,15 @@ def render_scientific_run_markdown(run: ScientificProblemRun, repository: Scient
     if run.approval_verdict_id is None:
         lines.append("Awaiting independent approval.")
     else:
-        verdict = repository.load_artifact(run.run_id, "approval/approval-verdict.yaml", ApprovalVerdict)
+        verdict_path = (
+            revision_chain.rounds[-1].approval_verdict.relative_path
+            if revision_chain is not None
+            and revision_chain.rounds[-1].approval_verdict is not None
+            else "approval/approval-verdict.yaml"
+        )
+        verdict = repository.load_artifact(
+            run.run_id, verdict_path, ApprovalVerdict
+        )
         lines.extend(
             [
                 f"- Decision: `{verdict.decision.value}`",
@@ -1178,6 +1956,21 @@ def render_scientific_run_markdown(run: ScientificProblemRun, repository: Scient
                 f"- Unresolved human choices: {', '.join(verdict.human_decisions_required) or 'none'}",
             ]
         )
+    if revision_chain is not None:
+        lines.extend(
+            [
+                "",
+                "### Bounded plan revision",
+                "",
+                f"- Revision budget: {revision_chain.revisions_used}/{revision_chain.max_revisions}",
+                f"- Termination: `{revision_chain.termination_reason or 'not terminated'}`",
+            ]
+        )
+        for item in revision_chain.rounds:
+            lines.append(
+                f"- Round {item.round_index}: plan `{item.candidate_plan.artifact_id}`; "
+                f"outcome `{item.outcome}`"
+            )
     lines.extend(
         [
             "",

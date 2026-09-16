@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..models import PlanningProposalSet, ScientificPlanningInput
+from ..models import (
+    PlanRevisionInput,
+    PlanRevisionLLMResponse,
+    PlanningProposalSet,
+    ScientificPlanningInput,
+)
 
 
 class PlanningProvider(Protocol):
@@ -10,3 +15,5 @@ class PlanningProvider(Protocol):
     provider_version: str
 
     def propose(self, planning_input: ScientificPlanningInput) -> PlanningProposalSet: ...
+
+    def revise(self, revision_input: PlanRevisionInput) -> PlanRevisionLLMResponse: ...

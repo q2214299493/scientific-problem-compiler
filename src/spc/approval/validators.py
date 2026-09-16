@@ -1,9 +1,34 @@
 from __future__ import annotations
 
 from collections import Counter
+import re
 
 from ..models import ApprovalLLMResponse, ApprovalReviewInput
 from ..validators import ValidationIssue, ValidationReport
+
+
+_PLAN_PATH_PATTERN = re.compile(
+    r"[a-zA-Z_][a-zA-Z0-9_]*(?:\[\d+\])?"
+    r"(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[\d+\])?)*"
+)
+
+
+def _plan_path_exists(review_input: ApprovalReviewInput, path: str) -> bool:
+    if _PLAN_PATH_PATTERN.fullmatch(path) is None:
+        return False
+    value: object = review_input.candidate_plan.model_dump(mode="python")
+    for name, index_text in re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)(?:\[(\d+)\])?", path):
+        if not isinstance(value, dict) or name not in value:
+            return False
+        value = value[name]
+        if index_text:
+            if not isinstance(value, (list, tuple)):
+                return False
+            index = int(index_text)
+            if index >= len(value):
+                return False
+            value = value[index]
+    return True
 
 
 def validate_approval_response(
@@ -62,6 +87,16 @@ def validate_approval_response(
                 )
             )
     for index, flag in enumerate(response.hard_red_flags):
+        if flag.plan_path is not None and not _plan_path_exists(
+            review_input, flag.plan_path
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="UNKNOWN_APPROVAL_PLAN_PATH",
+                    message="hard red flag references an unknown candidate plan path",
+                    path=f"hard_red_flags[{index}].plan_path",
+                )
+            )
         if not set(flag.evidence_refs).issubset(allowed_evidence):
             issues.append(
                 ValidationIssue(

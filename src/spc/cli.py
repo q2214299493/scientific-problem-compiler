@@ -1616,6 +1616,7 @@ def _workflow_options(
     llm_api_key_env: str,
     temperature: float,
     max_attempts: int,
+    max_plan_revisions: int,
 ) -> dict[str, object]:
     return {
         "dry_run": dry_run,
@@ -1628,6 +1629,7 @@ def _workflow_options(
         "llm_api_key": os.getenv(llm_api_key_env),
         "temperature": temperature,
         "max_attempts": max_attempts,
+        "max_plan_revisions": max_plan_revisions,
     }
 
 
@@ -1653,6 +1655,9 @@ def compile_scientific_request(
     llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
     temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
     max_attempts: Annotated[int, typer.Option("--max-attempts", min=1, max=5)] = 1,
+    max_plan_revisions: Annotated[
+        int, typer.Option("--max-plan-revisions", min=0, max=10)
+    ] = 0,
 ) -> None:
     """Start the trusted, planning-only SPC workflow and persist its run."""
     if (request is None) == (request_file is None):
@@ -1676,11 +1681,16 @@ def compile_scientific_request(
             llm_api_key_env=llm_api_key_env,
             temperature=temperature,
             max_attempts=max_attempts,
+            max_plan_revisions=max_plan_revisions,
         ),
     )
     payload = result.dry_run_report or scientific_run_status(result.run, workflow.runs)
     typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-    if result.run.status.value in {"BLOCKED_SOURCE_CURATION", "FAILED"}:
+    if result.run.status.value in {
+        "BLOCKED_SOURCE_CURATION",
+        "REVISION_BLOCKED",
+        "FAILED",
+    }:
         raise typer.Exit(1)
 
 
@@ -1700,6 +1710,9 @@ def resume_scientific_run(
     llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
     temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
     max_attempts: Annotated[int, typer.Option("--max-attempts", min=1, max=5)] = 1,
+    max_plan_revisions: Annotated[
+        int, typer.Option("--max-plan-revisions", min=0, max=10)
+    ] = 0,
 ) -> None:
     """Revalidate and resume a persisted scientific run."""
     persisted = ScientificProblemRunRepository(state_dir.resolve()).get(run_id)
@@ -1720,6 +1733,7 @@ def resume_scientific_run(
             llm_api_key_env=llm_api_key_env,
             temperature=temperature,
             max_attempts=max_attempts,
+            max_plan_revisions=max_plan_revisions,
         ),
     )
     typer.echo(
@@ -1729,7 +1743,11 @@ def resume_scientific_run(
             ensure_ascii=False,
         )
     )
-    if result.run.status.value in {"BLOCKED_SOURCE_CURATION", "FAILED"}:
+    if result.run.status.value in {
+        "BLOCKED_SOURCE_CURATION",
+        "REVISION_BLOCKED",
+        "FAILED",
+    }:
         raise typer.Exit(1)
 
 
@@ -1766,6 +1784,7 @@ def export_scientific_run(
     output: Annotated[Path, typer.Option("--output")] = Path("scientific-run.md"),
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
     export_id: Annotated[str | None, typer.Option("--export-id")] = None,
+    candidate_id: Annotated[str | None, typer.Option("--candidate-id")] = None,
 ) -> None:
     """Export a deterministic Markdown view or the existing immutable handoff."""
     repository = ScientificProblemRunRepository(state_dir.resolve())
@@ -1785,7 +1804,12 @@ def export_scientific_run(
         knowledge_dir=Path(run.knowledge_dir),
     )
     try:
-        path = workflow.export_downstream(run_id, output, final_export_id)
+        path = workflow.export_downstream(
+            run_id,
+            output,
+            final_export_id,
+            selected_candidate_id=candidate_id,
+        )
     except (FileNotFoundError, OSError, ValueError, ExportError) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from error

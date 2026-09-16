@@ -6,11 +6,17 @@ from typing import Any
 from .domains import DomainPackLoader
 from .models import (
     PlanCompilationReceipt,
+    PlanRevisionInput,
+    PlanRevisionLLMResponse,
     PlanningProposalSet,
     ScientificPlanningInput,
     ScientificQuestionPlan,
 )
 from .planning.materializer import PlanMaterializer
+from .planning.revision import (
+    build_revision_proposal_set,
+    validate_plan_revision_response,
+)
 from .planning.validators import PlanningProposalError, validate_planning_proposal_set
 from .validators import EvidenceSpanRepository, ValidationReport, validate_candidate_set, validate_question_plan
 
@@ -21,6 +27,15 @@ class CompilationResult:
     reports: tuple[ValidationReport, ...]
     proposal_set: PlanningProposalSet | None = None
     compilation_receipts: tuple[PlanCompilationReceipt, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanRevisionResult:
+    plan: ScientificQuestionPlan
+    reports: tuple[ValidationReport, ...]
+    proposal_set: PlanningProposalSet
+    compilation_receipt: PlanCompilationReceipt
+    response: PlanRevisionLLMResponse
 
 
 class ScientificProblemCompiler:
@@ -90,3 +105,52 @@ class ScientificProblemCompiler:
         )
         set_report = validate_candidate_set(plans)
         return CompilationResult(plans, reports + (set_report,))
+
+    def revise(self, revision_input: PlanRevisionInput) -> PlanRevisionResult:
+        revise = getattr(self.provider, "revise", None)
+        if not callable(revise):
+            raise TypeError("bounded plan revision requires a revision-capable PlanningProvider")
+        response = revise(revision_input)
+        response_report = validate_plan_revision_response(response, revision_input)
+        if not response_report.valid:
+            raise PlanningProposalError(response_report)
+        provider_config = dict(getattr(self.provider, "provider_config", {}))
+        model_id = getattr(getattr(self.provider, "transport", None), "model_id", None)
+        if model_id is not None:
+            provider_config["model_id"] = model_id
+        for field_name in ("temperature", "max_attempts"):
+            value = getattr(self.provider, field_name, None)
+            if value is not None:
+                provider_config[field_name] = value
+        proposal = build_revision_proposal_set(
+            revision_input,
+            response,
+            provider_id=self.provider.provider_id,
+            provider_version=self.provider.provider_version,
+            provider_config=provider_config,
+        )
+        proposal_report = validate_planning_proposal_set(
+            proposal, revision_input.planning_input
+        )
+        if not proposal_report.valid:
+            raise PlanningProposalError(proposal_report)
+        plans = self.materializer.materialize(proposal, revision_input.planning_input)
+        if len(plans) != 1:
+            raise ValueError("bounded revision must materialize exactly one candidate")
+        plan = plans[0]
+        plan_report = validate_question_plan(
+            plan,
+            revision_input.planning_input.scientific_capabilities,
+            self.evidence_repository,
+        )
+        set_report = validate_candidate_set(plans)
+        receipt = self.materializer.build_compilation_receipt(
+            plan, proposal, revision_input.planning_input
+        )
+        return PlanRevisionResult(
+            plan=plan,
+            reports=(response_report, proposal_report, plan_report, set_report),
+            proposal_set=proposal,
+            compilation_receipt=receipt,
+            response=response,
+        )

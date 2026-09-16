@@ -4232,6 +4232,261 @@ class IndependentApprovalReceipt(StrictModel):
         return self
 
 
+class PlanRevisionFeedbackSource(StrEnum):
+    DETERMINISTIC_VALIDATION = "deterministic_validation"
+    APPROVAL_RED_FLAG = "approval_red_flag"
+    REQUIRED_FIX = "required_fix"
+
+
+class PlanRevisionDisposition(StrEnum):
+    ADDRESSED = "addressed"
+    UNRESOLVED = "unresolved"
+    NOT_ACCEPTED = "not_accepted"
+
+
+class PlanRevisionFeedback(StrictModel):
+    feedback_id: NonBlankStr
+    source: PlanRevisionFeedbackSource
+    code: NonBlankStr
+    description: NonBlankStr
+    plan_path: NonBlankStr | None = None
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    claim_refs: tuple[NonBlankStr, ...] = ()
+    task_refs: tuple[NonBlankStr, ...] = ()
+    capability_refs: tuple[NonBlankStr, ...] = ()
+    blocking: bool = True
+
+
+class PlanRevisionConstraints(StrictModel):
+    original_request: NonBlankStr
+    domain: NonBlankStr
+    domain_pack_version: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    evidence_packet_id: NonBlankStr
+    evidence_packet_hash: Sha256Str
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    allowed_evidence_ids: tuple[NonBlankStr, ...]
+    allowed_claim_ids: tuple[NonBlankStr, ...]
+    allowed_capability_ids: tuple[NonBlankStr, ...]
+    required_human_decision_ids: tuple[NonBlankStr, ...] = ()
+    unresolved_conflict_ids: tuple[NonBlankStr, ...] = ()
+
+
+class PlanRevisionInput(StrictModel):
+    revision_input_id: NonBlankStr
+    revision_index: int = Field(ge=1)
+    planning_input: ScientificPlanningInput
+    parent_proposal: PlanningProposalSet
+    parent_candidate_key: NonBlankStr
+    parent_plan: ScientificQuestionPlan
+    parent_plan_hash: Sha256Str
+    parent_compilation_receipt: PlanCompilationReceipt
+    plan_validation_record: PlanValidationRecord
+    plan_validation_hash: Sha256Str
+    approval_review_input: ApprovalReviewInput
+    approval_review_record: ApprovalReviewRecord
+    approval_verdict: ApprovalVerdict
+    approval_receipt: IndependentApprovalReceipt
+    feedback: tuple[PlanRevisionFeedback, ...] = Field(min_length=1)
+    constraints: PlanRevisionConstraints
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_bindings_and_feedback(self) -> PlanRevisionInput:
+        from .serialization import content_hash
+
+        if self.parent_plan_hash != content_hash(self.parent_plan):
+            raise ValueError("parent_plan_hash does not match parent_plan")
+        if self.plan_validation_hash != content_hash(self.plan_validation_record):
+            raise ValueError("plan_validation_hash does not match PlanValidationRecord")
+        if (
+            self.parent_proposal.planning_input_id != self.planning_input.planning_input_id
+            or self.parent_proposal.planning_input_hash != self.planning_input.content_hash
+        ):
+            raise ValueError("parent_proposal does not bind planning_input")
+        if self.parent_candidate_key not in {
+            candidate.candidate_key for candidate in self.parent_proposal.candidates
+        }:
+            raise ValueError("parent_candidate_key is not present in parent_proposal")
+        if (
+            self.parent_compilation_receipt.plan_id != self.parent_plan.plan_id
+            or self.parent_compilation_receipt.plan_hash != self.parent_plan_hash
+            or self.parent_compilation_receipt.planning_input_id
+            != self.planning_input.planning_input_id
+            or self.parent_compilation_receipt.planning_input_hash
+            != self.planning_input.content_hash
+            or self.parent_compilation_receipt.planning_proposal_id
+            != self.parent_proposal.proposal_id
+            or self.parent_compilation_receipt.planning_proposal_hash
+            != content_hash(self.parent_proposal)
+        ):
+            raise ValueError("parent compilation receipt does not bind revision sources")
+        if (
+            self.plan_validation_record.plan_id != self.parent_plan.plan_id
+            or self.plan_validation_record.plan_version != self.parent_plan.version
+            or self.plan_validation_record.plan_content_hash != self.parent_plan_hash
+        ):
+            raise ValueError("PlanValidationRecord does not bind parent_plan")
+        if (
+            self.approval_review_input.candidate_plan_hash != self.parent_plan_hash
+            or self.approval_review_input.review_input_id
+            != self.approval_review_record.review_input_id
+            or self.approval_review_input.content_hash
+            != self.approval_review_record.review_input_hash
+            or self.approval_review_record.review_id != self.approval_receipt.review_id
+            or self.approval_review_record.content_hash != self.approval_receipt.review_hash
+            or self.approval_receipt.verdict_id != self.approval_verdict.verdict_id
+            or self.approval_receipt.verdict_hash != content_hash(self.approval_verdict)
+            or self.approval_receipt.candidate_id != self.parent_plan.plan_id
+            or self.approval_receipt.candidate_version != self.parent_plan.version
+            or self.approval_receipt.candidate_hash != self.parent_plan_hash
+        ):
+            raise ValueError("independent approval chain does not bind parent_plan")
+        if self.approval_verdict.decision != ApprovalDecision.REQUEST_REVISION:
+            raise ValueError("PlanRevisionInput requires a REQUEST_REVISION verdict")
+
+        expected_constraints = {
+            "original_request": self.planning_input.original_request,
+            "domain": self.planning_input.domain,
+            "domain_pack_version": self.planning_input.domain_pack_version,
+            "context_id": self.planning_input.context_id,
+            "context_hash": self.planning_input.context_hash,
+            "evidence_packet_id": self.planning_input.evidence_packet_id,
+            "evidence_packet_hash": self.planning_input.evidence_packet_hash,
+            "planning_input_id": self.planning_input.planning_input_id,
+            "planning_input_hash": self.planning_input.content_hash,
+            "allowed_evidence_ids": self.planning_input.allowed_evidence_ids,
+            "allowed_claim_ids": self.planning_input.allowed_claim_ids,
+            "allowed_capability_ids": self.planning_input.allowed_capability_ids,
+            "required_human_decision_ids": tuple(
+                item.decision_id for item in self.planning_input.required_human_decisions
+            ),
+            "unresolved_conflict_ids": tuple(
+                item.conflict_id
+                for item in self.planning_input.conflict_sets
+                if item.resolution_status == "unresolved"
+            ),
+        }
+        if self.constraints.model_dump(mode="python") != expected_constraints:
+            raise ValueError("revision constraints do not match trusted planning input")
+
+        feedback_ids = tuple(item.feedback_id for item in self.feedback)
+        if len(set(feedback_ids)) != len(feedback_ids):
+            raise ValueError("revision feedback IDs must be unique")
+        allowed_evidence = set(self.planning_input.allowed_evidence_ids)
+        allowed_claims = set(self.planning_input.allowed_claim_ids)
+        allowed_tasks = {task.task_id for task in self.parent_plan.tasks}
+        allowed_capabilities = set(self.planning_input.allowed_capability_ids)
+        allowed_plan_roots = {
+            "plan",
+            "atomic_questions",
+            "hypothesis",
+            "model",
+            "observables",
+            "comparison_baselines",
+            "acceptance_criteria",
+            "falsification_criteria",
+            "intent_fingerprint",
+            "system_fingerprint",
+            "method_fingerprint",
+            "fingerprint_differences",
+            "evidence_refs",
+            "assumptions",
+            "unknowns",
+            "proposed_deviations",
+            "scientific_capability_ids",
+            "tasks",
+            "limitations",
+            "required_human_decisions",
+            "source_query_manifest",
+        }
+        for item in self.feedback:
+            if item.plan_path is not None:
+                root = item.plan_path.split(".", 1)[0].split("[", 1)[0]
+                if root not in allowed_plan_roots:
+                    raise ValueError(
+                        f"revision feedback has unknown plan path {item.plan_path}"
+                    )
+            if not set(item.evidence_refs).issubset(allowed_evidence):
+                raise ValueError("revision feedback contains fabricated evidence reference")
+            if not set(item.claim_refs).issubset(allowed_claims):
+                raise ValueError("revision feedback contains fabricated claim reference")
+            if not set(item.task_refs).issubset(allowed_tasks):
+                raise ValueError("revision feedback contains fabricated task reference")
+            if not set(item.capability_refs).issubset(allowed_capabilities):
+                raise ValueError("revision feedback contains fabricated capability reference")
+
+        identity = self.model_dump(
+            mode="json", exclude={"revision_input_id", "content_hash"}
+        )
+        expected_id = f"plan-revision-input-{content_hash(identity)[:24]}"
+        if self.revision_input_id != expected_id:
+            raise ValueError("PlanRevisionInput revision_input_id is not content-bound")
+        payload = {"revision_input_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("PlanRevisionInput content_hash is invalid")
+        return self
+
+
+class PlanRevisionFeedbackResponse(StrictModel):
+    feedback_id: NonBlankStr
+    disposition: PlanRevisionDisposition
+    changed_plan_paths: tuple[NonBlankStr, ...] = ()
+    rationale: NonBlankStr
+
+    @model_validator(mode="after")
+    def validate_disposition(self) -> PlanRevisionFeedbackResponse:
+        if self.disposition == PlanRevisionDisposition.ADDRESSED and not self.changed_plan_paths:
+            raise ValueError("addressed feedback requires changed_plan_paths")
+        return self
+
+
+class PlanRevisionLLMResponse(StrictModel):
+    intent: IntentInterpretation
+    candidate: CandidatePlanDraft
+    feedback_responses: tuple[PlanRevisionFeedbackResponse, ...] = Field(min_length=1)
+
+
+class PlanRevisionRecord(StrictModel):
+    revision_id: NonBlankStr
+    revision_index: int = Field(ge=1)
+    revision_input_id: NonBlankStr
+    revision_input_hash: Sha256Str
+    parent_plan_id: NonBlankStr
+    parent_plan_hash: Sha256Str
+    trigger_review_id: NonBlankStr
+    trigger_review_hash: Sha256Str
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict = Field(default_factory=FrozenDict)
+    response: PlanRevisionLLMResponse
+    planning_proposal_id: NonBlankStr
+    planning_proposal_hash: Sha256Str
+    revised_plan_id: NonBlankStr
+    revised_plan_hash: Sha256Str
+    validation_id: NonBlankStr
+    validation_hash: Sha256Str
+    substantive_change: bool
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanRevisionRecord:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"revision_id", "content_hash"}, exclude_none=True
+        )
+        expected_id = f"plan-revision-{content_hash(identity)[:24]}"
+        if self.revision_id != expected_id:
+            raise ValueError("PlanRevisionRecord revision_id is not content-bound")
+        payload = {"revision_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("PlanRevisionRecord content_hash is invalid")
+        return self
+
+
 class SPCExportPackage(StrictModel):
     """Verified, immutable view of an SPC export package."""
 
@@ -4439,6 +4694,7 @@ class ScientificProblemRunStatus(StrEnum):
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    REVISION_BLOCKED = "REVISION_BLOCKED"
     EXPORTED = "EXPORTED"
     FAILED = "FAILED"
 
@@ -4456,6 +4712,85 @@ class ScientificRunArtifactBinding(StrictModel):
     artifact_id: NonBlankStr
     artifact_hash: Sha256Str
     relative_path: NonBlankStr
+
+
+class PlanRevisionRound(StrictModel):
+    round_index: int = Field(ge=0)
+    parent_plan_id: NonBlankStr | None = None
+    revision_input: ScientificRunArtifactBinding | None = None
+    revision_record: ScientificRunArtifactBinding | None = None
+    planning_proposal: ScientificRunArtifactBinding
+    candidate_plan: ScientificRunArtifactBinding
+    compilation_receipt: ScientificRunArtifactBinding
+    validation_record: ScientificRunArtifactBinding
+    approval_review_input: ScientificRunArtifactBinding | None = None
+    approval_review_record: ScientificRunArtifactBinding | None = None
+    approval_verdict: ScientificRunArtifactBinding | None = None
+    approval_receipt: ScientificRunArtifactBinding | None = None
+    gate: ScientificRunArtifactBinding | None = None
+    trust_policy: ScientificRunArtifactBinding | None = None
+    outcome: NonBlankStr = "awaiting_approval"
+
+    @model_validator(mode="after")
+    def validate_round_shape(self) -> PlanRevisionRound:
+        revision_values = (self.revision_input, self.revision_record)
+        if self.round_index == 0 and any(value is not None for value in revision_values):
+            raise ValueError("initial planning round cannot contain revision artifacts")
+        if self.round_index > 0 and any(value is None for value in revision_values):
+            raise ValueError("revision rounds require revision input and record")
+        approval_values = (
+            self.approval_review_input,
+            self.approval_review_record,
+            self.approval_verdict,
+            self.approval_receipt,
+            self.gate,
+            self.trust_policy,
+        )
+        if any(value is not None for value in approval_values) and any(
+            value is None for value in approval_values
+        ):
+            raise ValueError("approval round artifacts must be supplied together")
+        return self
+
+
+class PlanRevisionChain(StrictModel):
+    chain_id: NonBlankStr
+    run_id: NonBlankStr
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    knowledge_snapshot_id: NonBlankStr
+    knowledge_snapshot_hash: Sha256Str
+    max_revisions: int = Field(ge=0, le=10)
+    revisions_used: int = Field(ge=0)
+    rounds: tuple[PlanRevisionRound, ...] = Field(min_length=1)
+    termination_reason: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity_and_rounds(self) -> PlanRevisionChain:
+        from .serialization import content_hash
+
+        expected_chain_id = f"plan-revision-chain-{content_hash({'run_id': self.run_id})[:24]}"
+        if self.chain_id != expected_chain_id:
+            raise ValueError("PlanRevisionChain chain_id is not bound to run_id")
+        indices = tuple(item.round_index for item in self.rounds)
+        if indices != tuple(range(len(self.rounds))):
+            raise ValueError("revision round indices must be contiguous")
+        if self.revisions_used != len(self.rounds) - 1:
+            raise ValueError("revisions_used does not match revision rounds")
+        if self.revisions_used > self.max_revisions:
+            raise ValueError("revision chain exceeds max_revisions")
+        for index, item in enumerate(self.rounds):
+            if index == 0 and item.parent_plan_id is not None:
+                raise ValueError("initial planning round cannot have parent_plan_id")
+            if index > 0 and item.parent_plan_id != self.rounds[index - 1].candidate_plan.artifact_id:
+                raise ValueError("revision round parent_plan_id does not match prior round")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("PlanRevisionChain content_hash is invalid")
+        return self
 
 
 class ScientificRunProviderBinding(StrictModel):

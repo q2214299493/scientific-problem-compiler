@@ -725,6 +725,40 @@ def test_hard_red_flag_prevents_approve_even_with_high_scores(tmp_path) -> None:
     assert result.verdict.decision == ApprovalDecision.INSUFFICIENT_EVIDENCE
 
 
+def test_hard_red_flag_rejects_unknown_plan_locator(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    flag = ApprovalHardRedFlag(
+        code="MISSING_BASELINE_OR_CONTROL",
+        severity=ApprovalRedFlagSeverity.BLOCKING,
+        description="The cited plan object does not exist.",
+        plan_path="tasks[999].success_criteria",
+    )
+    response = approving_response(case.review_input).model_copy(
+        update={"hard_red_flags": (flag,)}
+    )
+
+    report = validate_approval_response(response, case.review_input)
+
+    assert "UNKNOWN_APPROVAL_PLAN_PATH" in {issue.code for issue in report.issues}
+
+
+def test_hard_red_flag_rejects_malformed_plan_locator(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    flag = ApprovalHardRedFlag(
+        code="MISSING_BASELINE_OR_CONTROL",
+        severity=ApprovalRedFlagSeverity.BLOCKING,
+        description="The locator contains an unparsed suffix.",
+        plan_path="tasks[0].success_criteria<forged>",
+    )
+    response = approving_response(case.review_input).model_copy(
+        update={"hard_red_flags": (flag,)}
+    )
+
+    report = validate_approval_response(response, case.review_input)
+
+    assert "UNKNOWN_APPROVAL_PLAN_PATH" in {issue.code for issue in report.issues}
+
+
 @pytest.mark.parametrize(
     "field",
     ("candidate_plan", "verdict_id", "candidate_id", "approver_id", "created_at"),

@@ -751,6 +751,35 @@ spc resume-scientific-run --run-id scientific-run-... --state-dir .spc `
   --approval-provider mock --candidate-id plan-...
 ```
 
+Independent-review-driven plan revision is explicit and bounded. The default
+`--max-plan-revisions 0` preserves the one-pass workflow. Setting it to `1` or
+`2` permits a revision only after a fully bound independent
+`REQUEST_REVISION`. This budget is separate from `--max-attempts`, which still
+limits malformed structured-output retries within one provider call.
+
+```powershell
+spc compile-scientific-request `
+  --request "The proposed mechanism is not sufficiently convincing. What should we test?" `
+  --domain base --knowledge-dir knowledge --state-dir .spc `
+  --interpretation-provider mock --planning-provider mock `
+  --approval-provider mock --max-plan-revisions 1
+```
+
+Each revision is bound to the original trusted planning input, its parent plan,
+the triggering independent review and verdict, deterministic validation issues,
+and explicit item-by-item responses. Every round receives a new materialized
+plan, validation record, compilation receipt, independent review, verdict, and
+receipt. Round artifacts are immutable and stored under `plan-revisions/`.
+Resume reuses valid saved rounds and does not reset the revision budget.
+
+Automatic revision stops on rejection, insufficient evidence, a required human
+choice or external evidence, invalid bindings, changed trusted context, no
+substantive scientific-plan change, or budget exhaustion.
+`APPROVE_WITH_CONDITIONS` retains its existing handling. A revised downstream
+export also requires `--candidate-id` naming the exact final approved plan; old
+review receipts cannot approve a new version. Revision feedback remains review
+data, never trusted scientific knowledge.
+
 Inspect IDs, uncertainty, exact quotes and locators, candidate fingerprints,
 and approval state; then export a deterministic report:
 

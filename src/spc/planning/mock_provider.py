@@ -8,6 +8,10 @@ from ..models import (
     CriterionDraft,
     IntentInterpretation,
     ObservableDraft,
+    PlanRevisionDisposition,
+    PlanRevisionFeedbackResponse,
+    PlanRevisionInput,
+    PlanRevisionLLMResponse,
     PlanningProposalSet,
     PlanningStrategyClass,
     ScientificPlanningInput,
@@ -278,4 +282,109 @@ class MockPlanningProvider:
             intent=intent,
             ambiguity_assessment=ambiguity,
             candidates=tuple(candidates),
+        )
+
+    def revise(self, revision_input: PlanRevisionInput) -> PlanRevisionLLMResponse:
+        """Deterministically repair a small allowlist of plan-local review defects."""
+        parent = next(
+            candidate
+            for candidate in revision_input.parent_proposal.candidates
+            if candidate.candidate_key == revision_input.parent_candidate_key
+        )
+        candidate = parent
+        intent = revision_input.parent_proposal.intent
+        responses: list[PlanRevisionFeedbackResponse] = []
+        for feedback in revision_input.feedback:
+            changed_paths: tuple[str, ...] = ()
+            disposition = PlanRevisionDisposition.UNRESOLVED
+            rationale = (
+                "The offline mock reviser cannot safely resolve this issue inside the fixed "
+                "trusted context."
+            )
+            if feedback.code == "MISSING_BASELINE_OR_CONTROL":
+                baseline = candidate.comparison_baselines[0].model_copy(
+                    update={
+                        "description": (
+                            "Use an explicit evidence-grounded control that preserves the same "
+                            "system and method fields while testing the competing explanation."
+                        )
+                    }
+                )
+                candidate = candidate.model_copy(
+                    update={
+                        "comparison_baselines": (
+                            baseline,
+                            *candidate.comparison_baselines[1:],
+                        )
+                    }
+                )
+                changed_paths = ("comparison_baselines",)
+                disposition = PlanRevisionDisposition.ADDRESSED
+                rationale = "Added an explicit matched control for hypothesis discrimination."
+            elif feedback.code == "MISSING_OR_WEAK_OBSERVABLE":
+                observable = candidate.observables[0].model_copy(
+                    update={
+                        "description": (
+                            "Measure a declared decision-relevant observable that differs between "
+                            "the primary and competing explanations."
+                        )
+                    }
+                )
+                candidate = candidate.model_copy(
+                    update={"observables": (observable, *candidate.observables[1:])}
+                )
+                changed_paths = ("observables",)
+                disposition = PlanRevisionDisposition.ADDRESSED
+                rationale = "Replaced the weak observable with an explicit discriminating one."
+            elif feedback.code == "NON_FALSIFIABLE_PLAN":
+                criterion = candidate.falsification_criteria[0].model_copy(
+                    update={
+                        "statement": (
+                            "Reject the primary hypothesis and retain the null hypothesis when the "
+                            "declared observable matches the competing explanation."
+                        )
+                    }
+                )
+                candidate = candidate.model_copy(
+                    update={
+                        "falsification_criteria": (
+                            criterion,
+                            *candidate.falsification_criteria[1:],
+                        )
+                    }
+                )
+                changed_paths = ("falsification_criteria",)
+                disposition = PlanRevisionDisposition.ADDRESSED
+                rationale = "Added an explicit rejecting outcome for the primary hypothesis."
+            elif feedback.code == "ADJACENT_OR_WRONG_SCIENTIFIC_QUESTION":
+                question = revision_input.planning_input.original_request
+                if not question.rstrip().endswith("?"):
+                    question = f"{question.rstrip('.')}?"
+                intent = intent.model_copy(update={"atomic_questions": (question,)})
+                changed_paths = ("atomic_questions",)
+                disposition = PlanRevisionDisposition.ADDRESSED
+                rationale = "Restored the original user's scientific subject in the atomic question."
+            elif feedback.code == "PSEUDO_DIVERSE_CANDIDATE":
+                candidate = candidate.model_copy(
+                    update={
+                        "distinguishing_axis": "scientific strategy",
+                        "distinguishing_value": "matched decisive control",
+                        "strategy_class": PlanningStrategyClass.MINIMAL_DECISIVE_TEST,
+                    }
+                )
+                changed_paths = ("method_fingerprint",)
+                disposition = PlanRevisionDisposition.ADDRESSED
+                rationale = "Replaced parameter-only diversity with a scientific strategy axis."
+            responses.append(
+                PlanRevisionFeedbackResponse(
+                    feedback_id=feedback.feedback_id,
+                    disposition=disposition,
+                    changed_plan_paths=changed_paths,
+                    rationale=rationale,
+                )
+            )
+        return PlanRevisionLLMResponse(
+            intent=intent,
+            candidate=candidate,
+            feedback_responses=tuple(responses),
         )

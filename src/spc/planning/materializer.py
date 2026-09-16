@@ -397,8 +397,30 @@ class PlanMaterializer:
             for decision_id in candidate.human_decisions_required
         )
 
+        provider_config = dict(proposal.provider_config)
+        revision_index = provider_config.get("revision_index", 0)
+        if not isinstance(revision_index, int) or revision_index < 0:
+            raise ValueError("proposal revision_index must be a non-negative integer")
+        revision_parent = provider_config.get("revision_parent_plan_id")
+        revision_input_id = provider_config.get("revision_input_id")
+        revision_input_hash = provider_config.get("revision_input_hash")
+        if revision_index:
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (revision_parent, revision_input_id, revision_input_hash)
+            ):
+                raise ValueError("revision proposal is missing parent/input bindings")
+            revision_manifest = (
+                f"revision-input:{revision_input_id}",
+                f"revision-input-hash:{revision_input_hash}",
+                f"revision-parent-plan:{revision_parent}",
+                f"revision-index:{revision_index}",
+            )
+        else:
+            revision_manifest = ()
+
         identity = {
-            "version": "1.0.0",
+            "version": f"1.0.{revision_index}",
             "domain": planning_input.domain,
             "domain_pack_version": planning_input.domain_pack_version,
             "original_question": planning_input.original_request,
@@ -437,11 +459,12 @@ class PlanMaterializer:
                 MATERIALIZER_VERSION,
                 f"distinguishing-axis:{candidate.distinguishing_axis}",
                 f"distinguishing-value:{candidate.distinguishing_value}",
+                *revision_manifest,
                 *(f"claim:{claim_id}" for claim_id in candidate.claim_refs),
             ),
             "target_agent_capability_requirements": candidate.capability_ids,
             "wave_id": "wave-1",
-            "follow_up_of": None,
+            "follow_up_of": revision_parent if revision_index else None,
             "source_proposal": proposal.proposal_id,
         }
         return ScientificQuestionPlan(
