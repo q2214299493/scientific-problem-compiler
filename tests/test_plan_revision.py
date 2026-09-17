@@ -13,6 +13,8 @@ from spc.approval import MockApprovalProvider, validate_approval_response
 from spc.cli import app
 from spc.models import (
     ApprovalDecision,
+    ApprovalHardRedFlag,
+    ApprovalRedFlagSeverity,
     ApprovalReviewRecord,
     EvidenceSpan,
     PlanRevisionChain,
@@ -237,6 +239,91 @@ class TwoRoundApproval(MockApprovalProvider):
                 }
             )
         return response
+
+
+class TaskVersionRevisionPlanner(BaselineRepairPlanner):
+    def revise(self, revision_input):
+        parent = next(
+            candidate
+            for candidate in revision_input.parent_proposal.candidates
+            if candidate.candidate_key == revision_input.parent_candidate_key
+        )
+        task = parent.task_drafts[0].model_copy(
+            update={
+                "scientific_objective": (
+                    "Resolve the task-bound review issue in revision "
+                    f"{revision_input.revision_index}."
+                )
+            }
+        )
+        candidate = parent.model_copy(update={"task_drafts": (task,)})
+        return PlanRevisionLLMResponse(
+            intent=revision_input.parent_proposal.intent,
+            candidate=candidate,
+            feedback_responses=tuple(
+                PlanRevisionFeedbackResponse(
+                    feedback_id=item.feedback_id,
+                    disposition=PlanRevisionDisposition.ADDRESSED,
+                    changed_plan_paths=("tasks[0].scientific_objective",),
+                    rationale=(
+                        "Changed the specifically referenced task while retaining the "
+                        "issue for independent reassessment."
+                    ),
+                )
+                for item in revision_input.feedback
+            ),
+        )
+
+
+class TaskVersionApproval(MockApprovalProvider):
+    def review(self, review_input):
+        response = super().review(review_input)
+        if not isinstance(response, RevisionApprovalLLMResponse):
+            task_id = review_input.candidate_plan.tasks[0].task_id
+            return response.model_copy(
+                update={
+                    "decision_recommendation": ApprovalDecision.REQUEST_REVISION,
+                    "hard_red_flags": (
+                        ApprovalHardRedFlag(
+                            code="TASK_A_INADEQUATE",
+                            severity=ApprovalRedFlagSeverity.BLOCKING,
+                            description="Task A does not yet resolve the review issue.",
+                            plan_path="tasks[0].scientific_objective",
+                            task_refs=(task_id,),
+                        ),
+                    ),
+                    "required_fixes": (),
+                }
+            )
+        revision_index = review_input.revision_context.revision_input.revision_index
+        unresolved = revision_index == 1
+        return response.model_copy(
+            update={
+                "review": response.review.model_copy(
+                    update={
+                        "decision_recommendation": (
+                            ApprovalDecision.REQUEST_REVISION
+                            if unresolved
+                            else ApprovalDecision.APPROVE
+                        ),
+                        "hard_red_flags": (),
+                        "required_fixes": (),
+                    }
+                ),
+                "issue_assessments": tuple(
+                    item.model_copy(
+                        update={
+                            "status": (
+                                RevisionIssueStatus.UNRESOLVED
+                                if unresolved
+                                else RevisionIssueStatus.RESOLVED
+                            )
+                        }
+                    )
+                    for item in response.issue_assessments
+                ),
+            }
+        )
 
 
 class AlwaysRequestRevisionApproval(MockApprovalProvider):
@@ -857,6 +944,81 @@ def test_unresolved_feedback_is_carried_across_multiple_revision_rounds(
         {item.feedback_id for item in third_input.feedback}
     )
 
+
+def test_carried_task_feedback_maps_across_revised_task_versions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = _workflow(
+        tmp_path,
+        monkeypatch,
+        planner=TaskVersionRevisionPlanner,
+        approver=TaskVersionApproval,
+    )
+
+    run = workflow.start(
+        REQUEST,
+        "base",
+        approval_provider="mock",
+        max_plan_revisions=2,
+    ).run
+
+    assert run.status == ScientificProblemRunStatus.APPROVED
+    chain = _chain(workflow, run.run_id)
+    assert chain.revisions_used == 2
+    original_plan = workflow.runs.load_artifact(
+        run.run_id,
+        chain.rounds[0].candidate_plan.relative_path,
+        ScientificQuestionPlan,
+    )
+    first_revised_plan = workflow.runs.load_artifact(
+        run.run_id,
+        chain.rounds[1].candidate_plan.relative_path,
+        ScientificQuestionPlan,
+    )
+    second_input = workflow.runs.load_artifact(
+        run.run_id,
+        chain.rounds[1].revision_input.relative_path,
+        PlanRevisionInput,
+    )
+    third_input = workflow.runs.load_artifact(
+        run.run_id,
+        chain.rounds[2].revision_input.relative_path,
+        PlanRevisionInput,
+    )
+    original_feedback = next(
+        item for item in second_input.feedback if item.code == "TASK_A_INADEQUATE"
+    )
+
+    assert original_plan.tasks[0].task_id != first_revised_plan.tasks[0].task_id
+    assert original_feedback.task_refs == (original_plan.tasks[0].task_id,)
+    assert original_feedback in third_input.feedback
+    assert original_feedback.task_refs[0] not in {
+        task.task_id for task in third_input.parent_plan.tasks
+    }
+
+    no_source_payload = third_input.model_dump(mode="json")
+    no_source_payload["feedback"].append(
+        {
+            **original_feedback.model_dump(mode="json"),
+            "feedback_id": "feedback-without-source-plan-binding",
+        }
+    )
+    with pytest.raises(ValidationError, match="fabricated task reference"):
+        PlanRevisionInput.model_validate(no_source_payload)
+
+    modified_feedback_payload = third_input.model_dump(mode="json")
+    feedback_index = next(
+        index
+        for index, item in enumerate(modified_feedback_payload["feedback"])
+        if item["feedback_id"] == original_feedback.feedback_id
+    )
+    modified_feedback_payload["feedback"][feedback_index]["description"] = (
+        "modified historical feedback"
+    )
+    with pytest.raises(ValidationError, match="feedback identity was modified"):
+        PlanRevisionInput.model_validate(modified_feedback_payload)
+
 def test_fabricated_revision_reference_is_rejected_before_new_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -948,7 +1110,49 @@ def test_revision_response_rejects_change_to_a_claimed_as_change_to_b(
     }
 
 
-def test_revision_feedback_cannot_borrow_another_feedback_change_path(
+def test_revision_response_rejects_changed_task_key_as_object_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = _workflow(tmp_path, monkeypatch)
+    run = workflow.start(
+        REQUEST,
+        "base",
+        approval_provider="mock",
+        max_plan_revisions=1,
+    ).run
+    second = _chain(workflow, run.run_id).rounds[1]
+    revision_input = workflow.runs.load_artifact(
+        run.run_id,
+        second.revision_input.relative_path,
+        PlanRevisionInput,
+    )
+    response = MockPlanningProvider().revise(revision_input)
+    task = response.candidate.task_drafts[0].model_copy(
+        update={"task_key": "unrelated-task-key"}
+    )
+    candidate = response.candidate.model_copy(update={"task_drafts": (task,)})
+    feedback_response = response.feedback_responses[0].model_copy(
+        update={"changed_plan_paths": ("tasks[0].scientific_objective",)}
+    )
+
+    report = validate_plan_revision_response(
+        response.model_copy(
+            update={
+                "candidate": candidate,
+                "feedback_responses": (feedback_response,),
+            }
+        ),
+        revision_input,
+    )
+
+    assert not report.valid
+    assert "AMBIGUOUS_REVISION_OBJECT_MAPPING" in {
+        issue.code for issue in report.issues
+    }
+
+
+def test_one_actual_change_may_independently_answer_two_feedback_items(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -971,9 +1175,9 @@ def test_revision_feedback_cannot_borrow_another_feedback_change_path(
         feedback_id="feedback-independent-second-issue",
         source=original_feedback.source,
         code="SECOND_INDEPENDENT_ISSUE",
-        description="A separate issue requires a separate disclosed change.",
+        description="A second review concern requires the same new control.",
         blocking=True,
-        plan_path="falsification_criteria[0].statement",
+        plan_path="comparison_baselines",
     )
     expanded_input = PlanRevisionInput.model_construct(
         **{
@@ -986,8 +1190,14 @@ def test_revision_feedback_cannot_borrow_another_feedback_change_path(
         feedback_id=extra_feedback.feedback_id,
         disposition=PlanRevisionDisposition.ADDRESSED,
         changed_plan_paths=first_response.changed_plan_paths,
-        rationale="Improperly reuses the first issue's change.",
+        rationale="The same new control independently answers this second concern.",
     )
+
+    incomplete = validate_plan_revision_response(response, expanded_input)
+    assert not incomplete.valid
+    assert "REVISION_FEEDBACK_BINDING_MISMATCH" in {
+        issue.code for issue in incomplete.issues
+    }
 
     report = validate_plan_revision_response(
         response.model_copy(
@@ -1001,8 +1211,7 @@ def test_revision_feedback_cannot_borrow_another_feedback_change_path(
         expanded_input,
     )
 
-    assert not report.valid
-    assert "REVISION_CHANGE_PATH_REUSED" in {issue.code for issue in report.issues}
+    assert report.valid
 
 
 def test_revision_response_accepts_exact_add_delete_reorder_and_cross_field_paths(

@@ -4310,6 +4310,92 @@ class PlanRevisionConstraints(StrictModel):
     unresolved_conflict_ids: tuple[NonBlankStr, ...] = ()
 
 
+def _candidate_task_ids_by_key(
+    candidate: CandidatePlanDraft,
+    plan: ScientificQuestionPlan,
+) -> dict[str, str]:
+    from .serialization import content_hash
+
+    task_ids = {
+        task.task_key: (
+            "task-"
+            + content_hash(
+                {
+                    "candidate_key": candidate.candidate_key,
+                    **task.model_dump(mode="json"),
+                }
+            )[:24]
+        )
+        for task in candidate.task_drafts
+    }
+    if len(task_ids) != len(candidate.task_drafts):
+        raise ValueError("revision candidate task keys must be unique")
+    if set(task_ids.values()) != {task.task_id for task in plan.tasks}:
+        raise ValueError("revision candidate task keys do not bind the plan tasks")
+    return task_ids
+
+
+def _feedback_task_key_from_revision_history(
+    feedback: PlanRevisionFeedback,
+    task_ref: str,
+    review_input: object,
+    *,
+    visited_revision_inputs: frozenset[str] = frozenset(),
+) -> str | None:
+    revision_context = getattr(review_input, "revision_context", None)
+    if revision_context is None:
+        return None
+    source_input = revision_context.revision_input
+    if source_input.revision_input_id in visited_revision_inputs:
+        raise ValueError("revision feedback task lineage is cyclic")
+    visited = visited_revision_inputs | {source_input.revision_input_id}
+    source_feedback = next(
+        (
+            item
+            for item in source_input.feedback
+            if item.feedback_id == feedback.feedback_id
+        ),
+        None,
+    )
+    if source_feedback is not None and source_feedback != feedback:
+        raise ValueError("carried revision feedback identity was modified")
+
+    task_key = None
+    if source_feedback is not None:
+        source_candidate = next(
+            candidate
+            for candidate in source_input.parent_proposal.candidates
+            if candidate.candidate_key == source_input.parent_candidate_key
+        )
+        source_tasks = _candidate_task_ids_by_key(
+            source_candidate,
+            source_input.parent_plan,
+        )
+        task_key = next(
+            (key for key, task_id in source_tasks.items() if task_id == task_ref),
+            None,
+        )
+    if task_key is None:
+        task_key = _feedback_task_key_from_revision_history(
+            feedback,
+            task_ref,
+            source_input.approval_review_input,
+            visited_revision_inputs=visited,
+        )
+    if task_key is None:
+        return None
+
+    revised_tasks = _candidate_task_ids_by_key(
+        revision_context.revision_record.response.candidate,
+        revision_context.revised_plan,
+    )
+    if task_key not in revised_tasks:
+        raise ValueError(
+            "carried revision feedback task has no verified child task_key mapping"
+        )
+    return task_key
+
+
 class PlanRevisionInput(StrictModel):
     revision_input_id: NonBlankStr
     revision_index: int = Field(ge=1)
@@ -4414,6 +4500,15 @@ class PlanRevisionInput(StrictModel):
         allowed_evidence = set(self.planning_input.allowed_evidence_ids)
         allowed_claims = set(self.planning_input.allowed_claim_ids)
         allowed_tasks = {task.task_id for task in self.parent_plan.tasks}
+        parent_candidate = next(
+            candidate
+            for candidate in self.parent_proposal.candidates
+            if candidate.candidate_key == self.parent_candidate_key
+        )
+        current_tasks_by_key = _candidate_task_ids_by_key(
+            parent_candidate,
+            self.parent_plan,
+        )
         allowed_capabilities = set(self.planning_input.allowed_capability_ids)
         allowed_plan_roots = {
             "plan",
@@ -4449,8 +4544,22 @@ class PlanRevisionInput(StrictModel):
                 raise ValueError("revision feedback contains fabricated evidence reference")
             if not set(item.claim_refs).issubset(allowed_claims):
                 raise ValueError("revision feedback contains fabricated claim reference")
-            if not set(item.task_refs).issubset(allowed_tasks):
-                raise ValueError("revision feedback contains fabricated task reference")
+            for task_ref in item.task_refs:
+                if task_ref in allowed_tasks:
+                    continue
+                task_key = _feedback_task_key_from_revision_history(
+                    item,
+                    task_ref,
+                    self.approval_review_input,
+                )
+                if task_key is None:
+                    raise ValueError(
+                        "revision feedback contains fabricated task reference"
+                    )
+                if task_key not in current_tasks_by_key:
+                    raise ValueError(
+                        "revision feedback task has no verified current task_key mapping"
+                    )
             if not set(item.capability_refs).issubset(allowed_capabilities):
                 raise ValueError("revision feedback contains fabricated capability reference")
 

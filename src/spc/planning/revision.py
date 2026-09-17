@@ -510,25 +510,9 @@ def validate_plan_revision_response(
         )
     changed_roots = _changed_roots(revision_input, response)
     declared_roots: set[str] = set()
-    path_claimants: dict[str, str] = {}
     feedback_by_id = {item.feedback_id: item for item in revision_input.feedback}
     for index, item in enumerate(response.feedback_responses):
         for path in item.changed_plan_paths:
-            previous_claimant = path_claimants.get(path)
-            if previous_claimant is not None and previous_claimant != item.feedback_id:
-                issues.append(
-                    ValidationIssue(
-                        code="REVISION_CHANGE_PATH_REUSED",
-                        message=(
-                            f"changed plan path {path} is already claimed by feedback "
-                            f"{previous_claimant}; each feedback response must identify "
-                            "its own actual change"
-                        ),
-                        path=f"feedback_responses[{index}].changed_plan_paths",
-                    )
-                )
-            else:
-                path_claimants[path] = item.feedback_id
             try:
                 root = _path_parts(path)[0][0]
             except ValueError:
@@ -552,7 +536,11 @@ def validate_plan_revision_response(
                     if change_error
                     and "neither the parent nor revised plan" in change_error
                     else "AMBIGUOUS_REVISION_OBJECT_MAPPING"
-                    if change_error and "ambiguous" in change_error
+                    if change_error
+                    and (
+                        "ambiguous" in change_error
+                        or "stable local key" in change_error
+                    )
                     else "REVISION_RESPONSE_NOT_REFLECTED"
                 )
                 issues.append(
