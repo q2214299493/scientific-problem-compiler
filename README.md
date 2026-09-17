@@ -755,7 +755,12 @@ Independent-review-driven plan revision is explicit and bounded. The default
 `--max-plan-revisions 0` preserves the one-pass workflow. Setting it to `1` or
 `2` permits a revision only after a fully bound independent
 `REQUEST_REVISION`. This budget is separate from `--max-attempts`, which still
-limits malformed structured-output retries within one provider call.
+limits malformed structured-output retries within one provider call. The
+revision budget counts scientific revision attempts when they are durably
+claimed before invoking the planning provider; it is not replenished when an
+attempt returns invalid output. `revisions_used` retains its original meaning
+of successfully materialized revision versions, while run status separately
+reports `attempts_started` and each attempt outcome.
 
 ```powershell
 spc compile-scientific-request `
@@ -770,7 +775,28 @@ the triggering independent review and verdict, deterministic validation issues,
 and explicit item-by-item responses. Every round receives a new materialized
 plan, validation record, compilation receipt, independent review, verdict, and
 receipt. Round artifacts are immutable and stored under `plan-revisions/`.
-Resume reuses valid saved rounds and does not reset the revision budget.
+Resume reuses valid saved rounds and does not reset the revision budget. A
+saved revision waiting for approval resumes at approval without planning again.
+An attempt interrupted after its provider claim but before a complete result is
+recorded is marked uncertain and ordinary resume stops rather than blindly
+calling the provider again. SPC does not claim exactly-once behavior for an
+external model call. Terminal revision chains remain terminal under ordinary
+resume and are integrity-checked read-only.
+
+Revised plans use a versioned revision-approval context. It binds the parent
+and revised plans, triggering review, tracked prior issues, planner responses,
+and deterministically computed actual changes. The independent reviewer must
+assess every tracked issue as resolved, unresolved, not applicable with a
+reason, or requiring a human decision. A planner's `addressed` label cannot
+close an issue, and unresolved blocking issues cannot pass the gate. Declared
+change paths are parsed without expression evaluation and checked against the
+specific parent/revised objects; cross-field fixes are allowed but must name
+their actual changed paths for independent scientific review.
+
+Legacy one-pass approval records remain readable with their original hashes.
+They are audit-compatible only: a revised plan whose lineage contains a
+revision input requires the new revision-approval contract and cannot reuse a
+legacy approval record or receipt.
 
 Automatic revision stops on rejection, insufficient evidence, a required human
 choice or external evidence, invalid bindings, changed trusted context, no

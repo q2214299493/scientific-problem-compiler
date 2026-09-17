@@ -1,41 +1,37 @@
 from __future__ import annotations
 
 from collections import Counter
-import re
 
-from ..models import ApprovalLLMResponse, ApprovalReviewInput
+from ..models import (
+    ApprovalLLMResponse,
+    ApprovalReviewInput,
+    RevisionApprovalLLMResponse,
+    RevisionApprovalReviewInput,
+)
+from ..plan_paths import resolve_plan_path
 from ..validators import ValidationIssue, ValidationReport
 
 
-_PLAN_PATH_PATTERN = re.compile(
-    r"[a-zA-Z_][a-zA-Z0-9_]*(?:\[\d+\])?"
-    r"(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[\d+\])?)*"
-)
+ApprovalInput = ApprovalReviewInput | RevisionApprovalReviewInput
+ApprovalResponse = ApprovalLLMResponse | RevisionApprovalLLMResponse
 
 
-def _plan_path_exists(review_input: ApprovalReviewInput, path: str) -> bool:
-    if _PLAN_PATH_PATTERN.fullmatch(path) is None:
+def _plan_path_exists(review_input: ApprovalInput, path: str) -> bool:
+    try:
+        return resolve_plan_path(review_input.candidate_plan, path).exists
+    except ValueError:
         return False
-    value: object = review_input.candidate_plan.model_dump(mode="python")
-    for name, index_text in re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)(?:\[(\d+)\])?", path):
-        if not isinstance(value, dict) or name not in value:
-            return False
-        value = value[name]
-        if index_text:
-            if not isinstance(value, (list, tuple)):
-                return False
-            index = int(index_text)
-            if index >= len(value):
-                return False
-            value = value[index]
-    return True
 
 
 def validate_approval_response(
-    response: ApprovalLLMResponse,
-    review_input: ApprovalReviewInput,
+    response: ApprovalResponse,
+    review_input: ApprovalInput,
 ) -> ValidationReport:
     issues: list[ValidationIssue] = []
+    revision_response = (
+        response if isinstance(response, RevisionApprovalLLMResponse) else None
+    )
+    base_response = revision_response.review if revision_response else response
     allowed_evidence = set(review_input.allowed_evidence_ids)
     allowed_claims = set(review_input.allowed_claim_ids)
     allowed_tasks = set(review_input.allowed_task_ids)
@@ -45,7 +41,9 @@ def validate_approval_response(
         for decision in review_input.candidate_plan.required_human_decisions
     }
 
-    if not set(response.evidence_basis).issubset(allowed_evidence | allowed_claims):
+    if not set(base_response.evidence_basis).issubset(
+        allowed_evidence | allowed_claims
+    ):
         issues.append(
             ValidationIssue(
                 code="FABRICATED_APPROVAL_EVIDENCE_BASIS",
@@ -53,7 +51,7 @@ def validate_approval_response(
                 path="evidence_basis",
             )
         )
-    for dimension, score in response.scores:
+    for dimension, score in base_response.scores:
         if not set(score.evidence_refs).issubset(allowed_evidence):
             issues.append(
                 ValidationIssue(
@@ -86,7 +84,7 @@ def validate_approval_response(
                     path=f"scores.{dimension}.capability_refs",
                 )
             )
-    for index, flag in enumerate(response.hard_red_flags):
+    for index, flag in enumerate(base_response.hard_red_flags):
         if flag.plan_path is not None and not _plan_path_exists(
             review_input, flag.plan_path
         ):
@@ -129,7 +127,9 @@ def validate_approval_response(
                     path=f"hard_red_flags[{index}].capability_refs",
                 )
             )
-    unknown_decisions = set(response.unresolved_human_decisions) - allowed_decisions
+    unknown_decisions = (
+        set(base_response.unresolved_human_decisions) - allowed_decisions
+    )
     if unknown_decisions:
         issues.append(
             ValidationIssue(
@@ -139,9 +139,12 @@ def validate_approval_response(
             )
         )
     for field_name, identifiers in (
-        ("hard_red_flags", (flag.code for flag in response.hard_red_flags)),
-        ("required_fixes", (fix.fix_id for fix in response.required_fixes)),
-        ("unresolved_human_decisions", response.unresolved_human_decisions),
+        ("hard_red_flags", (flag.code for flag in base_response.hard_red_flags)),
+        ("required_fixes", (fix.fix_id for fix in base_response.required_fixes)),
+        (
+            "unresolved_human_decisions",
+            base_response.unresolved_human_decisions,
+        ),
     ):
         duplicates = tuple(
             identifier
@@ -156,6 +159,70 @@ def validate_approval_response(
                     path=field_name,
                 )
             )
+
+    if isinstance(review_input, RevisionApprovalReviewInput):
+        if revision_response is None:
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_REVISION_ISSUE_ASSESSMENTS",
+                    message="revision approval requires item-by-item issue assessments",
+                    path="issue_assessments",
+                )
+            )
+        else:
+            expected_ids = {
+                item.feedback_id
+                for item in review_input.revision_context.tracked_feedback
+            }
+            assessment_ids = tuple(
+                item.feedback_id for item in revision_response.issue_assessments
+            )
+            if len(set(assessment_ids)) != len(assessment_ids) or set(
+                assessment_ids
+            ) != expected_ids:
+                issues.append(
+                    ValidationIssue(
+                        code="REVISION_ISSUE_ASSESSMENT_MISMATCH",
+                        message=(
+                            "revision approval must assess every tracked issue exactly once"
+                        ),
+                        path="issue_assessments",
+                    )
+                )
+            for index, assessment in enumerate(
+                revision_response.issue_assessments
+            ):
+                if not set(assessment.evidence_refs).issubset(allowed_evidence):
+                    issues.append(
+                        ValidationIssue(
+                            code="FABRICATED_REVISION_ASSESSMENT_EVIDENCE_REF",
+                            message="revision assessment uses non-allowlisted evidence",
+                            path=f"issue_assessments[{index}].evidence_refs",
+                        )
+                    )
+                if not set(assessment.claim_refs).issubset(allowed_claims):
+                    issues.append(
+                        ValidationIssue(
+                            code="FABRICATED_REVISION_ASSESSMENT_CLAIM_REF",
+                            message="revision assessment uses a non-allowlisted claim",
+                            path=f"issue_assessments[{index}].claim_refs",
+                        )
+                    )
+                if not set(assessment.task_refs).issubset(allowed_tasks):
+                    issues.append(
+                        ValidationIssue(
+                            code="FABRICATED_REVISION_ASSESSMENT_TASK_REF",
+                            message="revision assessment uses a non-allowlisted task",
+                            path=f"issue_assessments[{index}].task_refs",
+                        )
+                    )
+    elif revision_response is not None:
+        issues.append(
+            ValidationIssue(
+                code="UNEXPECTED_REVISION_APPROVAL_RESPONSE",
+                message="initial approval cannot use the revision approval contract",
+            )
+        )
     return ValidationReport(valid=not issues, issues=tuple(issues))
 
 

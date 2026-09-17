@@ -31,11 +31,18 @@ from ..models import (
     KnowledgeSnapshot,
     PlanCompilationReceipt,
     PlanRevisionChain,
+    PlanRevisionAttemptOutcome,
+    PlanRevisionAttemptStart,
+    PlanRevisionAttemptStatus,
+    PlanRevisionInput,
     PlanRevisionRecord,
     PlanRevisionRound,
     PlanValidationRecord,
     PlanningProposalSet,
     ProjectTrustPolicy,
+    RevisionApprovalReviewInput,
+    RevisionApprovalLLMResponse,
+    RevisionIssueStatus,
     ScientificContextPacket,
     ScientificEvidencePacket,
     ScientificProblemRun,
@@ -45,6 +52,7 @@ from ..models import (
     ScientificRunBlockingItem,
     ScientificRunFailure,
     ScientificRunProviderBinding,
+    parse_approval_review_input,
 )
 from ..planning import (
     HTTPJSONLLMTransport,
@@ -63,7 +71,7 @@ from ..repositories import (
     ProjectEvidenceStore,
 )
 from ..retrieval import ScientificContextBuilder
-from ..serialization import content_hash, file_sha256
+from ..serialization import content_hash, file_sha256, load_data
 from ..validators import (
     build_plan_validation_record,
     validate_independent_approval_chain,
@@ -211,6 +219,138 @@ class ScientificProblemWorkflow:
             )
         return value
 
+    def _load_approval_input_binding(
+        self,
+        run_id: str,
+        binding: ScientificRunArtifactBinding,
+    ) -> ApprovalReviewInput | RevisionApprovalReviewInput:
+        value = parse_approval_review_input(
+            load_data(self.runs.resolve_artifact_path(run_id, binding.relative_path))
+        )
+        if content_hash(value) != binding.artifact_hash:
+            raise ValueError(
+                f"workflow artifact hash mismatch: {binding.relative_path}"
+            )
+        return value
+
+    @staticmethod
+    def _attempt_prefix(attempt_index: int) -> str:
+        return f"plan-revisions/attempts/attempt-{attempt_index}"
+
+    def _load_revision_attempts(
+        self, run_id: str
+    ) -> tuple[tuple[PlanRevisionAttemptStart, PlanRevisionAttemptOutcome | None], ...]:
+        attempts_root = self.runs.resolve_artifact_path(
+            run_id, "plan-revisions/attempts"
+        )
+        if not attempts_root.exists():
+            return ()
+        attempts: list[
+            tuple[PlanRevisionAttemptStart, PlanRevisionAttemptOutcome | None]
+        ] = []
+        for expected_index, directory in enumerate(
+            sorted(
+                attempts_root.glob("attempt-*"),
+                key=lambda path: int(path.name.removeprefix("attempt-")),
+            ),
+            start=1,
+        ):
+            if directory.is_symlink() or directory.name != f"attempt-{expected_index}":
+                raise ValueError("revision attempt indices are not contiguous")
+            start = self.runs.load_artifact(
+                run_id,
+                f"{self._attempt_prefix(expected_index)}/start.yaml",
+                PlanRevisionAttemptStart,
+            )
+            if start.attempt_index != expected_index:
+                raise ValueError("revision attempt start index is invalid")
+            outcome_path = directory / "outcome.yaml"
+            outcome = (
+                self.runs.load_artifact(
+                    run_id,
+                    f"{self._attempt_prefix(expected_index)}/outcome.yaml",
+                    PlanRevisionAttemptOutcome,
+                )
+                if outcome_path.exists()
+                else None
+            )
+            if outcome is not None and (
+                outcome.attempt_id != start.attempt_id
+                or outcome.attempt_start_hash != start.content_hash
+            ):
+                raise ValueError("revision attempt outcome does not bind its start")
+            attempts.append((start, outcome))
+        return tuple(attempts)
+
+    def _validate_revision_chain_integrity(self, chain: PlanRevisionChain) -> None:
+        attempts = self._load_revision_attempts(chain.run_id)
+        if attempts and len(attempts) < chain.revisions_used:
+            raise ValueError("revision chain has more versions than started attempts")
+        for round_record in chain.rounds:
+            plan = self._load_bound_artifact(
+                chain.run_id, round_record.candidate_plan, ScientificQuestionPlan
+            )
+            receipt = self._load_bound_artifact(
+                chain.run_id,
+                round_record.compilation_receipt,
+                PlanCompilationReceipt,
+            )
+            validation = self._load_bound_artifact(
+                chain.run_id,
+                round_record.validation_record,
+                PlanValidationRecord,
+            )
+            self._load_bound_artifact(
+                chain.run_id, round_record.planning_proposal, PlanningProposalSet
+            )
+            if not validate_plan_compilation_receipt(plan, receipt).valid:
+                raise ValueError("revision compilation receipt failed integrity validation")
+            if (
+                validation.plan_id != plan.plan_id
+                or validation.plan_content_hash != content_hash(plan)
+            ):
+                raise ValueError("revision validation record does not bind its plan")
+            if round_record.round_index > 0:
+                self._load_bound_artifact(
+                    chain.run_id, round_record.revision_input, PlanRevisionInput
+                )
+                self._load_bound_artifact(
+                    chain.run_id, round_record.revision_record, PlanRevisionRecord
+                )
+            if round_record.approval_receipt is None:
+                continue
+            review_input = self._load_approval_input_binding(
+                chain.run_id, round_record.approval_review_input
+            )
+            review = self._load_bound_artifact(
+                chain.run_id,
+                round_record.approval_review_record,
+                ApprovalReviewRecord,
+            )
+            verdict = self._load_bound_artifact(
+                chain.run_id, round_record.approval_verdict, ApprovalVerdict
+            )
+            approval_receipt = self._load_bound_artifact(
+                chain.run_id,
+                round_record.approval_receipt,
+                IndependentApprovalReceipt,
+            )
+            gate = self._load_bound_artifact(
+                chain.run_id, round_record.gate, GateVerdict
+            )
+            if not validate_independent_approval_chain(
+                plan, verdict, review_input, review, approval_receipt
+            ).valid:
+                raise ValueError("revision approval chain failed integrity validation")
+            if (
+                gate.candidate_id != plan.plan_id
+                or gate.candidate_content_hash != content_hash(plan)
+                or gate.approval_verdict_hash != content_hash(verdict)
+                or gate.independent_approval_receipt_hash
+                != approval_receipt.content_hash
+            ):
+                raise ValueError("revision gate does not bind its approval chain")
+
     def start(
         self,
         request: str,
@@ -248,23 +388,25 @@ class ScientificProblemWorkflow:
                 }
             )
             self.runs.save(run)
-        return self._advance(
-            run,
-            dry_run=dry_run,
-            interpretation_provider=interpretation_provider,
-            planning_provider=planning_provider,
-            approval_provider=approval_provider,
-            selected_candidate_id=selected_candidate_id,
-            llm_endpoint=llm_endpoint,
-            llm_model=llm_model,
-            llm_api_key=llm_api_key,
-            temperature=temperature,
-            max_attempts=max_attempts,
-            max_plan_revisions=max_plan_revisions,
-        )
+        with self.runs.acquire_run_lock(run_id):
+            return self._advance(
+                run,
+                dry_run=dry_run,
+                interpretation_provider=interpretation_provider,
+                planning_provider=planning_provider,
+                approval_provider=approval_provider,
+                selected_candidate_id=selected_candidate_id,
+                llm_endpoint=llm_endpoint,
+                llm_model=llm_model,
+                llm_api_key=llm_api_key,
+                temperature=temperature,
+                max_attempts=max_attempts,
+                max_plan_revisions=max_plan_revisions,
+            )
 
     def resume(self, run_id: str, **options: Any) -> WorkflowResult:
-        return self._advance(self.runs.get(run_id), **options)
+        with self.runs.acquire_run_lock(run_id):
+            return self._advance(self.runs.get(run_id), **options)
 
     def _knowledge(self, domain: str) -> tuple[KnowledgeRepositories, CompositeEvidenceStore]:
         pack = self.domain_loader.load(domain)
@@ -339,6 +481,18 @@ class ScientificProblemWorkflow:
     ) -> WorkflowResult:
         if not 0 <= max_plan_revisions <= 10:
             raise ValueError("max_plan_revisions must be between zero and ten")
+        revision_chain = self._load_revision_chain(run.run_id)
+        if revision_chain is not None and revision_chain.termination_reason is not None:
+            try:
+                self._validate_revision_chain_integrity(revision_chain)
+            except (FileNotFoundError, OSError, ValueError) as error:
+                return self._fail(
+                    run,
+                    "plan_revision_integrity",
+                    error,
+                    retryable=False,
+                )
+            return WorkflowResult(run)
         repositories, evidence = self._knowledge(run.domain)
         try:
             blocking = self._blocking_curations(repositories, evidence, run.domain)
@@ -371,7 +525,6 @@ class ScientificProblemWorkflow:
             )
         except (FileNotFoundError, OSError, ValueError) as error:
             return self._fail(ready, "trusted_retrieval", error, retryable=False)
-        revision_chain = self._load_revision_chain(ready.run_id)
         if revision_chain is not None and (
             revision_chain.context_id != context.context_id
             or revision_chain.context_hash != context.content_hash
@@ -717,6 +870,27 @@ class ScientificProblemWorkflow:
                     "stored revision approval chain failed validation",
                 )
         else:
+            revision_approval = None
+            if (
+                revision_chain is not None
+                and revision_chain.rounds[-1].round_index > 0
+            ):
+                current_round = revision_chain.rounds[-1]
+                revision_input = self._load_bound_artifact(
+                    awaiting.run_id,
+                    current_round.revision_input,
+                    PlanRevisionInput,
+                )
+                revision_record = self._load_bound_artifact(
+                    awaiting.run_id,
+                    current_round.revision_record,
+                    PlanRevisionRecord,
+                )
+                revision_approval = (
+                    revision_input,
+                    revision_record,
+                    revision_input.approval_review_record,
+                )
             approved = self._approve(
                 awaiting,
                 context,
@@ -736,6 +910,7 @@ class ScientificProblemWorkflow:
                     if revision_chain is not None
                     else "approval"
                 ),
+                revision_approval=revision_approval,
             )
             if revision_chain is not None:
                 if approved.approval_receipt_id is None:
@@ -801,10 +976,13 @@ class ScientificProblemWorkflow:
                 repositories,
                 evidence,
             )
-            review_input = self.runs.load_artifact(
-                run.run_id,
-                f"{approval_prefix}/approval-review-input.yaml",
-                ApprovalReviewInput,
+            review_input = parse_approval_review_input(
+                load_data(
+                    self.runs.resolve_artifact_path(
+                        run.run_id,
+                        f"{approval_prefix}/approval-review-input.yaml",
+                    )
+                )
             )
             review = self.runs.load_artifact(
                 run.run_id,
@@ -975,7 +1153,7 @@ class ScientificProblemWorkflow:
             (
                 "approval-review-input.yaml",
                 "approval_review_input",
-                ApprovalReviewInput,
+                None,
                 run.approval_review_id,
             ),
             (
@@ -1008,7 +1186,13 @@ class ScientificProblemWorkflow:
         loaded: list[object] = []
         for filename, artifact_type, model_type, expected_id in values:
             path = f"{prefix}/{filename}"
-            value = self.runs.load_artifact(chain.run_id, path, model_type)
+            value = (
+                parse_approval_review_input(
+                    load_data(self.runs.resolve_artifact_path(chain.run_id, path))
+                )
+                if model_type is None
+                else self.runs.load_artifact(chain.run_id, path, model_type)
+            )
             identifier = expected_id
             if identifier is None:
                 raise ValueError("approval run is missing a required artifact identifier")
@@ -1121,10 +1305,9 @@ class ScientificProblemWorkflow:
                 current_round.compilation_receipt,
                 PlanCompilationReceipt,
             )
-            review_input = self._load_bound_artifact(
+            review_input = self._load_approval_input_binding(
                 current_run.run_id,
                 current_round.approval_review_input,
-                ApprovalReviewInput,
             )
             review = self._load_bound_artifact(
                 current_run.run_id,
@@ -1160,12 +1343,62 @@ class ScientificProblemWorkflow:
                 ).run
             if verdict.decision != ApprovalDecision.REQUEST_REVISION:
                 return current_run
-            if current_chain.revisions_used >= current_chain.max_revisions:
+            attempts = self._load_revision_attempts(current_run.run_id)
+            if attempts and attempts[-1][1] is None:
+                start = attempts[-1][0]
+                completed_round = next(
+                    (
+                        item
+                        for item in current_chain.rounds
+                        if item.revision_input is not None
+                        and item.revision_input.artifact_id == start.revision_input_id
+                        and item.revision_record is not None
+                    ),
+                    None,
+                )
+                if completed_round is None:
+                    return self._revision_block(
+                        current_run,
+                        current_chain,
+                        "REVISION_ATTEMPT_UNCERTAIN",
+                        (
+                            "a revision provider call was claimed but has no complete local "
+                            "outcome; ordinary resume will not invoke it again"
+                        ),
+                    ).run
+                completed_record = self._load_bound_artifact(
+                    current_run.run_id,
+                    completed_round.revision_record,
+                    PlanRevisionRecord,
+                )
+                outcome_payload = {
+                    "attempt_id": start.attempt_id,
+                    "attempt_start_hash": start.content_hash,
+                    "status": PlanRevisionAttemptStatus.COMPLETED,
+                    "revision_record_id": completed_record.revision_id,
+                    "revision_record_hash": completed_record.content_hash,
+                    "round_index": completed_round.round_index,
+                    "failure_category": None,
+                    "failure_message": None,
+                }
+                outcome = PlanRevisionAttemptOutcome(
+                    **outcome_payload,
+                    content_hash=content_hash(outcome_payload),
+                )
+                self.runs.write_immutable_artifact(
+                    current_run.run_id,
+                    f"{self._attempt_prefix(start.attempt_index)}/outcome.yaml",
+                    "plan_revision_attempt_outcome",
+                    start.attempt_id,
+                    outcome,
+                )
+                attempts = (*attempts[:-1], (start, outcome))
+            if len(attempts) >= current_chain.max_revisions:
                 return self._revision_block(
                     current_run,
                     current_chain,
                     "REVISION_BUDGET_EXHAUSTED",
-                    "independent review still requests revision after the configured limit",
+                    "independent review still requests revision after all started attempts",
                 ).run
             block_reason = automatic_revision_block_reason(
                 plan, review, verdict, validation
@@ -1188,7 +1421,28 @@ class ScientificProblemWorkflow:
                 ).plan_id
                 == plan.plan_id
             )
+            attempt: PlanRevisionAttemptStart | None = None
+            attempt_claimed = False
             try:
+                carried_feedback = ()
+                if (
+                    isinstance(review_input, RevisionApprovalReviewInput)
+                    and isinstance(review.response, RevisionApprovalLLMResponse)
+                ):
+                    unresolved_ids = {
+                        item.feedback_id
+                        for item in review.response.issue_assessments
+                        if item.status
+                        in {
+                            RevisionIssueStatus.UNRESOLVED,
+                            RevisionIssueStatus.NEEDS_HUMAN_DECISION,
+                        }
+                    }
+                    carried_feedback = tuple(
+                        item
+                        for item in review_input.revision_context.tracked_feedback
+                        if item.feedback_id in unresolved_ids
+                    )
                 revision_input = build_plan_revision_input(
                     revision_index=current_chain.revisions_used + 1,
                     planning_input=planning_input,
@@ -1202,11 +1456,74 @@ class ScientificProblemWorkflow:
                     approval_review_record=review,
                     approval_verdict=verdict,
                     approval_receipt=receipt,
+                    carried_feedback=carried_feedback,
                 )
+                round_index = revision_input.revision_index
+                prefix = self._round_prefix(round_index)
+                input_binding = self.runs.write_immutable_artifact(
+                    current_run.run_id,
+                    f"{prefix}/revision-input.yaml",
+                    "plan_revision_input",
+                    revision_input.revision_input_id,
+                    revision_input,
+                )
+                attempt_index = len(attempts) + 1
+                provider_binding = _provider_binding("planning", planner)
+                attempt_identity = {
+                    "chain_id": current_chain.chain_id,
+                    "attempt_index": attempt_index,
+                    "revision_input_id": revision_input.revision_input_id,
+                    "revision_input_hash": revision_input.content_hash,
+                    "parent_plan_id": plan.plan_id,
+                    "parent_plan_hash": content_hash(plan),
+                    "trigger_review_id": review.review_id,
+                    "trigger_review_hash": review.content_hash,
+                    "provider_id": planner.provider_id,
+                    "provider_version": planner.provider_version,
+                    "provider_config_hash": provider_binding.configuration_hash,
+                }
+                attempt_id = (
+                    f"plan-revision-attempt-{content_hash(attempt_identity)[:24]}"
+                )
+                attempt_payload = {"attempt_id": attempt_id, **attempt_identity}
+                attempt = PlanRevisionAttemptStart(
+                    **attempt_payload,
+                    content_hash=content_hash(attempt_payload),
+                )
+                self.runs.write_exclusive_artifact(
+                    current_run.run_id,
+                    f"{self._attempt_prefix(attempt_index)}/start.yaml",
+                    "plan_revision_attempt_start",
+                    attempt.attempt_id,
+                    attempt,
+                )
+                attempt_claimed = True
                 revision = ScientificProblemCompiler(
                     planner, evidence_repository=evidence
                 ).revise(revision_input)
             except (FileNotFoundError, OSError, ValueError, TypeError) as error:
+                if attempt is not None and attempt_claimed:
+                    outcome_payload = {
+                        "attempt_id": attempt.attempt_id,
+                        "attempt_start_hash": attempt.content_hash,
+                        "status": PlanRevisionAttemptStatus.TERMINATED,
+                        "revision_record_id": None,
+                        "revision_record_hash": None,
+                        "round_index": None,
+                        "failure_category": type(error).__name__,
+                        "failure_message": _sanitize_failure(error),
+                    }
+                    outcome = PlanRevisionAttemptOutcome(
+                        **outcome_payload,
+                        content_hash=content_hash(outcome_payload),
+                    )
+                    self.runs.write_immutable_artifact(
+                        current_run.run_id,
+                        f"{self._attempt_prefix(attempt.attempt_index)}/outcome.yaml",
+                        "plan_revision_attempt_outcome",
+                        attempt.attempt_id,
+                        outcome,
+                    )
                 return self._revision_block(
                     current_run,
                     current_chain,
@@ -1248,15 +1565,6 @@ class ScientificProblemWorkflow:
             revision_record = PlanRevisionRecord(
                 **record_payload,
                 content_hash=content_hash(record_payload),
-            )
-            round_index = revision_input.revision_index
-            prefix = self._round_prefix(round_index)
-            input_binding = self.runs.write_immutable_artifact(
-                current_run.run_id,
-                f"{prefix}/revision-input.yaml",
-                "plan_revision_input",
-                revision_input.revision_input_id,
-                revision_input,
             )
             proposal_binding = self.runs.write_immutable_artifact(
                 current_run.run_id,
@@ -1313,6 +1621,27 @@ class ScientificProblemWorkflow:
             )
             current_chain = _make_revision_chain(chain_payload)
             self._save_revision_chain(current_chain)
+            outcome_payload = {
+                "attempt_id": attempt.attempt_id,
+                "attempt_start_hash": attempt.content_hash,
+                "status": PlanRevisionAttemptStatus.COMPLETED,
+                "revision_record_id": revision_record.revision_id,
+                "revision_record_hash": revision_record.content_hash,
+                "round_index": round_index,
+                "failure_category": None,
+                "failure_message": None,
+            }
+            outcome = PlanRevisionAttemptOutcome(
+                **outcome_payload,
+                content_hash=content_hash(outcome_payload),
+            )
+            self.runs.write_immutable_artifact(
+                current_run.run_id,
+                f"{self._attempt_prefix(attempt.attempt_index)}/outcome.yaml",
+                "plan_revision_attempt_outcome",
+                attempt.attempt_id,
+                outcome,
+            )
             current_run = _update_run(
                 current_run,
                 status=ScientificProblemRunStatus.AWAITING_APPROVAL,
@@ -1353,6 +1682,7 @@ class ScientificProblemWorkflow:
                 temperature,
                 max_attempts,
                 artifact_prefix=f"{prefix}/approval",
+                revision_approval=(revision_input, revision_record, review),
             )
             if current_run.approval_receipt_id is None:
                 return current_run
@@ -1397,6 +1727,7 @@ class ScientificProblemWorkflow:
         temperature,
         max_attempts,
         artifact_prefix="approval",
+        revision_approval=None,
     ) -> ScientificProblemRun:
         if selected_candidate_id is None:
             if len(run.candidate_plans) != 1:
@@ -1414,8 +1745,30 @@ class ScientificProblemWorkflow:
         compilation_receipt = self.runs.load_artifact(
             run.run_id, receipt_binding.relative_path, PlanCompilationReceipt
         )
-        review_input = ApprovalContextResolver(self.domain_loader).resolve(
-            context, packet, planning_input, plan, validation, repositories, evidence
+        resolver = ApprovalContextResolver(self.domain_loader)
+        review_input = (
+            resolver.resolve_revision(
+                context,
+                packet,
+                planning_input,
+                plan,
+                validation,
+                repositories,
+                evidence,
+                revision_input=revision_approval[0],
+                revision_record=revision_approval[1],
+                trigger_review=revision_approval[2],
+            )
+            if revision_approval is not None
+            else resolver.resolve(
+                context,
+                packet,
+                planning_input,
+                plan,
+                validation,
+                repositories,
+                evidence,
+            )
         )
         if provider_name == "mock":
             provider = MockApprovalProvider()
@@ -1576,8 +1929,12 @@ class ScientificProblemWorkflow:
             run_id, run.candidate_compilation_receipts[index].relative_path, PlanCompilationReceipt
         )
         approval_prefix = self._approval_prefix(run_id)
-        review_input = self.runs.load_artifact(
-            run_id, f"{approval_prefix}/approval-review-input.yaml", ApprovalReviewInput
+        review_input = parse_approval_review_input(
+            load_data(
+                self.runs.resolve_artifact_path(
+                    run_id, f"{approval_prefix}/approval-review-input.yaml"
+                )
+            )
         )
         review = self.runs.load_artifact(
             run_id, f"{approval_prefix}/approval-review.yaml", ApprovalReviewRecord
@@ -1707,9 +2064,61 @@ def scientific_run_status(
         except FileNotFoundError:
             revision_chain = None
     if revision_chain is not None:
+        attempt_states: list[dict[str, object]] = []
+        attempts_root = repository.resolve_artifact_path(
+            run.run_id, "plan-revisions/attempts"
+        )
+        if attempts_root.exists():
+            attempt_directories = sorted(
+                attempts_root.glob("attempt-*"),
+                key=lambda path: int(path.name.removeprefix("attempt-")),
+            )
+            for expected_index, directory in enumerate(
+                attempt_directories, start=1
+            ):
+                if directory.is_symlink() or directory.name != (
+                    f"attempt-{expected_index}"
+                ):
+                    raise ValueError("revision attempt indices are not contiguous")
+                start = repository.load_artifact(
+                    run.run_id,
+                    f"plan-revisions/attempts/attempt-{expected_index}/start.yaml",
+                    PlanRevisionAttemptStart,
+                )
+                outcome_path = directory / "outcome.yaml"
+                outcome = (
+                    repository.load_artifact(
+                        run.run_id,
+                        (
+                            "plan-revisions/attempts/"
+                            f"attempt-{expected_index}/outcome.yaml"
+                        ),
+                        PlanRevisionAttemptOutcome,
+                    )
+                    if outcome_path.exists()
+                    else None
+                )
+                if outcome is not None and (
+                    outcome.attempt_id != start.attempt_id
+                    or outcome.attempt_start_hash != start.content_hash
+                ):
+                    raise ValueError("revision attempt outcome does not bind its start")
+                attempt_states.append(
+                    {
+                        "attempt_index": expected_index,
+                        "attempt_id": start.attempt_id,
+                        "status": (
+                            outcome.status.value
+                            if outcome is not None
+                            else PlanRevisionAttemptStatus.UNCERTAIN.value
+                        ),
+                    }
+                )
         revision_state = {
             "max_revisions": revision_chain.max_revisions,
             "revisions_used": revision_chain.revisions_used,
+            "attempts_started": len(attempt_states),
+            "attempts": attempt_states,
             "current_round": revision_chain.rounds[-1].round_index,
             "termination_reason": revision_chain.termination_reason,
             "round_plan_ids": [

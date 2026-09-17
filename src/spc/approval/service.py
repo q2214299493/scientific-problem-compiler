@@ -8,6 +8,8 @@ from ..models import (
     ApprovalScores,
     ApprovalVerdict,
     IndependentApprovalReceipt,
+    RevisionApprovalLLMResponse,
+    RevisionApprovalReviewInput,
 )
 from ..serialization import content_hash, to_primitive
 from .materializer import ScientificPlanApprover
@@ -37,7 +39,10 @@ class IndependentApprovalService:
         self.approver_id = approver_id
         self.policy = policy or ApprovalPolicy()
 
-    def review(self, review_input: ApprovalReviewInput) -> ApprovalResult:
+    def review(
+        self,
+        review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
+    ) -> ApprovalResult:
         candidate_before = review_input.candidate_plan
         candidate_hash_before = content_hash(candidate_before)
         response = self.provider.review(review_input)
@@ -64,7 +69,12 @@ class IndependentApprovalService:
         review_id = f"approval-review-{content_hash(identity)[:24]}"
         payload = {"review_id": review_id, **identity}
         review = ApprovalReviewRecord(**payload, content_hash=content_hash(payload))
-        detailed_scores = response.scores
+        base_response = (
+            response.review
+            if isinstance(response, RevisionApprovalLLMResponse)
+            else response
+        )
+        detailed_scores = base_response.scores
         scores = ApprovalScores(
             **{
                 name: getattr(detailed_scores, name).score
@@ -86,8 +96,8 @@ class IndependentApprovalService:
             verdict_id=verdict_id,
             scores=scores,
             decision=policy_result.decision,
-            hard_red_flags=tuple(flag.code for flag in response.hard_red_flags),
-            required_fixes=response.required_fixes,
+            hard_red_flags=tuple(flag.code for flag in base_response.hard_red_flags),
+            required_fixes=base_response.required_fixes,
             human_decisions_required=tuple(
                 decision.decision_id
                 for decision in candidate_before.required_human_decisions

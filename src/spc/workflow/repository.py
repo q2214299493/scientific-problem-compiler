@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import tempfile
 from pathlib import Path, PurePosixPath
+from typing import Iterator
+
+import yaml
 
 from ..models import ScientificProblemRun, ScientificRunArtifactBinding
 from ..serialization import (
@@ -12,6 +16,7 @@ from ..serialization import (
     load_data,
     load_model,
     require_safe_path_component,
+    to_primitive,
 )
 
 
@@ -96,6 +101,51 @@ class ScientificProblemRunRepository:
             artifact_hash=expected_hash,
             relative_path=relative_path,
         )
+
+    def write_exclusive_artifact(
+        self,
+        run_id: str,
+        relative_path: str,
+        artifact_type: str,
+        artifact_id: str,
+        value: object,
+    ) -> ScientificRunArtifactBinding:
+        path = self.resolve_artifact_path(run_id, relative_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = yaml.safe_dump(
+            to_primitive(value), sort_keys=True, allow_unicode=True
+        ).encode("utf-8")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return ScientificRunArtifactBinding(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            artifact_hash=content_hash(value),
+            relative_path=relative_path,
+        )
+
+    @contextmanager
+    def acquire_run_lock(self, run_id: str) -> Iterator[None]:
+        run_directory = self.run_dir(run_id)
+        run_directory.mkdir(parents=True, exist_ok=True)
+        lock_path = run_directory / ".resume.lock"
+        try:
+            os.mkdir(lock_path)
+        except FileExistsError as error:
+            raise RuntimeError(
+                "scientific run is already being resumed or has an unreconciled stale lock"
+            ) from error
+        try:
+            yield
+        finally:
+            os.rmdir(lock_path)
 
     def resolve_artifact_path(self, run_id: str, relative_path: str) -> Path:
         relative = PurePosixPath(relative_path)

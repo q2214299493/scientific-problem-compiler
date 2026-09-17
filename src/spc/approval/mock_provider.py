@@ -13,6 +13,10 @@ from ..models import (
     ApprovalReviewScores,
     EpistemicStatus,
     EvidenceClassification,
+    RevisionApprovalLLMResponse,
+    RevisionApprovalReviewInput,
+    RevisionIssueAssessment,
+    RevisionIssueStatus,
     SourceRole,
 )
 
@@ -75,7 +79,10 @@ class MockApprovalProvider:
     provider_version = MOCK_APPROVAL_PROVIDER_VERSION
     provider_config = {"mode": "deterministic", "network": False}
 
-    def review(self, review_input: ApprovalReviewInput) -> ApprovalLLMResponse:
+    def review(
+        self,
+        review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
+    ) -> ApprovalLLMResponse | RevisionApprovalLLMResponse:
         plan = review_input.candidate_plan
         flags: list[ApprovalHardRedFlag] = []
         plan_claim_ids = tuple(
@@ -452,7 +459,7 @@ class MockApprovalProvider:
                 else ApprovalDecision.APPROVE
             )
         )
-        return ApprovalLLMResponse(
+        base_response = ApprovalLLMResponse(
             scores=scores,
             decision_recommendation=recommendation,
             summary=(
@@ -463,4 +470,40 @@ class MockApprovalProvider:
             evidence_basis=tuple(dict.fromkeys((*plan_evidence, *plan_claim_ids))),
             hard_red_flags=tuple(flags),
             unresolved_human_decisions=unresolved_decisions,
+        )
+        if not isinstance(review_input, RevisionApprovalReviewInput):
+            return base_response
+        current_codes = {flag.code for flag in flags}
+        assessments = tuple(
+            RevisionIssueAssessment(
+                feedback_id=feedback.feedback_id,
+                status=(
+                    RevisionIssueStatus.UNRESOLVED
+                    if feedback.code in current_codes
+                    else RevisionIssueStatus.RESOLVED
+                ),
+                rationale=(
+                    "The revised plan still exhibits the independently detected issue."
+                    if feedback.code in current_codes
+                    else (
+                        "Independent re-evaluation did not reproduce the prior issue "
+                        "in the revised plan."
+                    )
+                ),
+                evidence_refs=tuple(
+                    ref
+                    for ref in feedback.evidence_refs
+                    if ref in review_input.allowed_evidence_ids
+                ),
+                claim_refs=tuple(
+                    ref
+                    for ref in feedback.claim_refs
+                    if ref in review_input.allowed_claim_ids
+                ),
+            )
+            for feedback in review_input.revision_context.tracked_feedback
+        )
+        return RevisionApprovalLLMResponse(
+            review=base_response,
+            issue_assessments=assessments,
         )

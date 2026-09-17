@@ -3,12 +3,18 @@ from __future__ import annotations
 from ..domains import DomainPackLoader
 from ..models import (
     ApprovalReviewInput,
+    ApprovalReviewRecord,
+    PlanRevisionRecord,
+    RevisionApprovalContext,
+    RevisionApprovalReviewInput,
+    PlanRevisionInput,
     PlanValidationRecord,
     ScientificContextPacket,
     ScientificEvidencePacket,
     ScientificPlanningInput,
     ScientificQuestionPlan,
 )
+from ..planning.revision import compute_revision_actual_changes
 from ..planning.context_resolver import PlanningContextError, PlanningContextResolver
 from ..repositories import KnowledgeRepositories
 from ..serialization import content_hash, to_primitive
@@ -204,3 +210,69 @@ class ApprovalContextResolver:
                 "; ".join(issue.message for issue in coherence.issues),
             )
         return review_input
+
+    def resolve_revision(
+        self,
+        context: ScientificContextPacket,
+        evidence_packet: ScientificEvidencePacket,
+        planning_input: ScientificPlanningInput,
+        candidate_plan: ScientificQuestionPlan,
+        validation_record: PlanValidationRecord,
+        knowledge: KnowledgeRepositories,
+        evidence_repository: EvidenceSpanRepository,
+        *,
+        revision_input: PlanRevisionInput,
+        revision_record: PlanRevisionRecord,
+        trigger_review: ApprovalReviewRecord,
+    ) -> RevisionApprovalReviewInput:
+        base = self.resolve(
+            context,
+            evidence_packet,
+            planning_input,
+            candidate_plan,
+            validation_record,
+            knowledge,
+            evidence_repository,
+        )
+        actual_changes = compute_revision_actual_changes(
+            revision_input,
+            revision_record.response,
+        )
+        if not actual_changes:
+            raise ApprovalContextError(
+                "MISSING_ACTUAL_REVISION_CHANGE",
+                "revision approval requires a program-computed scientific change",
+            )
+        context_payload = {
+            "contract_version": "1.0.0",
+            "parent_plan": revision_input.parent_plan,
+            "parent_plan_hash": revision_input.parent_plan_hash,
+            "revised_plan": candidate_plan,
+            "revised_plan_hash": content_hash(candidate_plan),
+            "trigger_review": trigger_review,
+            "trigger_review_hash": trigger_review.content_hash,
+            "revision_input": revision_input,
+            "revision_input_hash": revision_input.content_hash,
+            "revision_record": revision_record,
+            "revision_record_hash": revision_record.content_hash,
+            "tracked_feedback": revision_input.feedback,
+            "planner_responses": revision_record.response.feedback_responses,
+            "actual_changes": actual_changes,
+        }
+        revision_context = RevisionApprovalContext(
+            **context_payload,
+            content_hash=content_hash(context_payload),
+        )
+        identity = {
+            "contract_version": "1.0.0",
+            "base_review_input": base,
+            "revision_context": revision_context,
+        }
+        review_input_id = (
+            f"revision-approval-input-{content_hash(identity)[:24]}"
+        )
+        payload = {"review_input_id": review_input_id, **identity}
+        return RevisionApprovalReviewInput(
+            **payload,
+            content_hash=content_hash(payload),
+        )

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from collections.abc import Mapping
 import unicodedata
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AfterValidator,
@@ -4052,6 +4052,42 @@ class ApprovalLLMResponse(StrictModel):
     unresolved_human_decisions: tuple[NonBlankStr, ...] = ()
 
 
+class PlanChangeOperation(StrEnum):
+    ADDED = "added"
+    REMOVED = "removed"
+    MODIFIED = "modified"
+    REORDERED = "reordered"
+
+
+class PlanRevisionActualChange(StrictModel):
+    path: NonBlankStr
+    operation: PlanChangeOperation
+    parent_value_hash: Sha256Str | None = None
+    revised_value_hash: Sha256Str | None = None
+
+
+class RevisionIssueStatus(StrEnum):
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+    NOT_APPLICABLE = "not_applicable"
+    NEEDS_HUMAN_DECISION = "needs_human_decision"
+
+
+class RevisionIssueAssessment(StrictModel):
+    feedback_id: NonBlankStr
+    status: RevisionIssueStatus
+    rationale: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    claim_refs: tuple[NonBlankStr, ...] = ()
+    task_refs: tuple[NonBlankStr, ...] = ()
+
+
+class RevisionApprovalLLMResponse(StrictModel):
+    contract_version: Literal["1.0.0"] = "1.0.0"
+    review: ApprovalLLMResponse
+    issue_assessments: tuple[RevisionIssueAssessment, ...] = Field(min_length=1)
+
+
 class ApprovalReviewInput(StrictModel):
     review_input_id: NonBlankStr
     original_request: NonBlankStr
@@ -4167,7 +4203,7 @@ class ApprovalReviewRecord(StrictModel):
     provider_id: NonBlankStr
     provider_version: NonBlankStr
     provider_config: FrozenDict = Field(default_factory=FrozenDict)
-    response: ApprovalLLMResponse
+    response: ApprovalLLMResponse | RevisionApprovalLLMResponse
     policy_decision: ApprovalDecision
     policy_reasons: tuple[NonBlankStr, ...] = ()
     content_hash: Sha256Str
@@ -4285,7 +4321,7 @@ class PlanRevisionInput(StrictModel):
     parent_compilation_receipt: PlanCompilationReceipt
     plan_validation_record: PlanValidationRecord
     plan_validation_hash: Sha256Str
-    approval_review_input: ApprovalReviewInput
+    approval_review_input: ApprovalReviewInput | RevisionApprovalReviewInput
     approval_review_record: ApprovalReviewRecord
     approval_verdict: ApprovalVerdict
     approval_receipt: IndependentApprovalReceipt
@@ -4484,6 +4520,274 @@ class PlanRevisionRecord(StrictModel):
         payload = {"revision_id": expected_id, **identity}
         if self.content_hash != content_hash(payload):
             raise ValueError("PlanRevisionRecord content_hash is invalid")
+        return self
+
+
+class RevisionApprovalContext(StrictModel):
+    contract_version: Literal["1.0.0"] = "1.0.0"
+    parent_plan: ScientificQuestionPlan
+    parent_plan_hash: Sha256Str
+    revised_plan: ScientificQuestionPlan
+    revised_plan_hash: Sha256Str
+    trigger_review: ApprovalReviewRecord
+    trigger_review_hash: Sha256Str
+    revision_input: PlanRevisionInput
+    revision_input_hash: Sha256Str
+    revision_record: PlanRevisionRecord
+    revision_record_hash: Sha256Str
+    tracked_feedback: tuple[PlanRevisionFeedback, ...] = Field(min_length=1)
+    planner_responses: tuple[PlanRevisionFeedbackResponse, ...] = Field(min_length=1)
+    actual_changes: tuple[PlanRevisionActualChange, ...] = Field(min_length=1)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> RevisionApprovalContext:
+        from .serialization import content_hash
+
+        if self.parent_plan_hash != content_hash(self.parent_plan):
+            raise ValueError("revision approval parent_plan_hash is invalid")
+        if self.revised_plan_hash != content_hash(self.revised_plan):
+            raise ValueError("revision approval revised_plan_hash is invalid")
+        if self.trigger_review_hash != self.trigger_review.content_hash:
+            raise ValueError("revision approval trigger_review_hash is invalid")
+        if self.revision_input_hash != self.revision_input.content_hash:
+            raise ValueError("revision approval revision_input_hash is invalid")
+        if self.revision_record_hash != self.revision_record.content_hash:
+            raise ValueError("revision approval revision_record_hash is invalid")
+        bindings = {
+            "revision_input.parent_plan": (
+                self.revision_input.parent_plan_hash,
+                self.parent_plan_hash,
+            ),
+            "revision_input.trigger_review_id": (
+                self.revision_input.approval_review_record.review_id,
+                self.trigger_review.review_id,
+            ),
+            "revision_input.trigger_review_hash": (
+                self.revision_input.approval_review_record.content_hash,
+                self.trigger_review_hash,
+            ),
+            "revision_record.input_id": (
+                self.revision_record.revision_input_id,
+                self.revision_input.revision_input_id,
+            ),
+            "revision_record.input_hash": (
+                self.revision_record.revision_input_hash,
+                self.revision_input_hash,
+            ),
+            "revision_record.parent_id": (
+                self.revision_record.parent_plan_id,
+                self.parent_plan.plan_id,
+            ),
+            "revision_record.parent_hash": (
+                self.revision_record.parent_plan_hash,
+                self.parent_plan_hash,
+            ),
+            "revision_record.revised_id": (
+                self.revision_record.revised_plan_id,
+                self.revised_plan.plan_id,
+            ),
+            "revision_record.revised_hash": (
+                self.revision_record.revised_plan_hash,
+                self.revised_plan_hash,
+            ),
+        }
+        mismatches = tuple(
+            name for name, (actual, expected) in bindings.items() if actual != expected
+        )
+        if mismatches:
+            raise ValueError(
+                "revision approval context has cross-object bindings: "
+                + ", ".join(mismatches)
+            )
+        feedback_ids = tuple(item.feedback_id for item in self.tracked_feedback)
+        if len(set(feedback_ids)) != len(feedback_ids):
+            raise ValueError("revision approval tracked feedback IDs must be unique")
+        response_ids = tuple(item.feedback_id for item in self.planner_responses)
+        if set(response_ids) != set(feedback_ids) or len(response_ids) != len(
+            feedback_ids
+        ):
+            raise ValueError("planner responses must cover tracked feedback exactly once")
+        if self.revision_input.feedback != self.tracked_feedback:
+            raise ValueError("tracked feedback must match the bound revision input")
+        if self.revision_record.response.feedback_responses != self.planner_responses:
+            raise ValueError("planner responses must match the bound revision record")
+        payload = self.model_dump(
+            mode="json", exclude={"content_hash"}, exclude_none=True
+        )
+        if self.content_hash != content_hash(payload):
+            raise ValueError("RevisionApprovalContext content_hash is invalid")
+        return self
+
+
+class RevisionApprovalReviewInput(StrictModel):
+    contract_version: Literal["1.0.0"] = "1.0.0"
+    review_input_id: NonBlankStr
+    base_review_input: ApprovalReviewInput
+    revision_context: RevisionApprovalContext
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> RevisionApprovalReviewInput:
+        from .serialization import content_hash
+
+        if (
+            self.base_review_input.candidate_plan_hash
+            != self.revision_context.revised_plan_hash
+            or self.base_review_input.candidate_plan
+            != self.revision_context.revised_plan
+        ):
+            raise ValueError("revision approval input does not bind the revised plan")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"review_input_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"revision-approval-input-{content_hash(identity)[:24]}"
+        if self.review_input_id != expected_id:
+            raise ValueError("RevisionApprovalReviewInput ID is not content-bound")
+        payload = {"review_input_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("RevisionApprovalReviewInput content_hash is invalid")
+        return self
+
+    @property
+    def candidate_plan(self) -> ScientificQuestionPlan:
+        return self.base_review_input.candidate_plan
+
+    @property
+    def candidate_plan_hash(self) -> str:
+        return self.base_review_input.candidate_plan_hash
+
+    @property
+    def plan_validation_record(self) -> PlanValidationRecord:
+        return self.base_review_input.plan_validation_record
+
+    @property
+    def original_request(self) -> str:
+        return self.base_review_input.original_request
+
+    @property
+    def source_claims(self) -> tuple[SourceClaim, ...]:
+        return self.base_review_input.source_claims
+
+    @property
+    def reported_results(self) -> tuple[ReportedResult, ...]:
+        return self.base_review_input.reported_results
+
+    @property
+    def comparison_constraints(self) -> tuple[ComparisonConstraint, ...]:
+        return self.base_review_input.comparison_constraints
+
+    @property
+    def conflict_sets(self) -> tuple[ConflictSet, ...]:
+        return self.base_review_input.conflict_sets
+
+    @property
+    def evidence_gaps(self) -> tuple[EvidenceGap, ...]:
+        return self.base_review_input.evidence_gaps
+
+    @property
+    def allowed_evidence_ids(self) -> tuple[str, ...]:
+        return self.base_review_input.allowed_evidence_ids
+
+    @property
+    def allowed_claim_ids(self) -> tuple[str, ...]:
+        return self.base_review_input.allowed_claim_ids
+
+    @property
+    def allowed_task_ids(self) -> tuple[str, ...]:
+        return self.base_review_input.allowed_task_ids
+
+    @property
+    def allowed_capability_ids(self) -> tuple[str, ...]:
+        return self.base_review_input.allowed_capability_ids
+
+
+def parse_approval_review_input(
+    value: object,
+) -> ApprovalReviewInput | RevisionApprovalReviewInput:
+    if isinstance(value, (ApprovalReviewInput, RevisionApprovalReviewInput)):
+        return value
+    if isinstance(value, dict) and "revision_context" in value:
+        return RevisionApprovalReviewInput.model_validate(value)
+    return ApprovalReviewInput.model_validate(value)
+
+
+PlanRevisionInput.model_rebuild()
+
+
+class PlanRevisionAttemptStatus(StrEnum):
+    COMPLETED = "completed"
+    TERMINATED = "terminated"
+    UNCERTAIN = "uncertain"
+
+
+class PlanRevisionAttemptStart(StrictModel):
+    attempt_id: NonBlankStr
+    chain_id: NonBlankStr
+    attempt_index: int = Field(ge=1)
+    revision_input_id: NonBlankStr
+    revision_input_hash: Sha256Str
+    parent_plan_id: NonBlankStr
+    parent_plan_hash: Sha256Str
+    trigger_review_id: NonBlankStr
+    trigger_review_hash: Sha256Str
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanRevisionAttemptStart:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"attempt_id", "content_hash"}
+        )
+        expected_id = f"plan-revision-attempt-{content_hash(identity)[:24]}"
+        if self.attempt_id != expected_id:
+            raise ValueError("PlanRevisionAttemptStart ID is not content-bound")
+        payload = {"attempt_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("PlanRevisionAttemptStart content_hash is invalid")
+        return self
+
+
+class PlanRevisionAttemptOutcome(StrictModel):
+    attempt_id: NonBlankStr
+    attempt_start_hash: Sha256Str
+    status: PlanRevisionAttemptStatus
+    revision_record_id: NonBlankStr | None = None
+    revision_record_hash: Sha256Str | None = None
+    round_index: int | None = Field(default=None, ge=1)
+    failure_category: NonBlankStr | None = None
+    failure_message: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> PlanRevisionAttemptOutcome:
+        from .serialization import content_hash
+
+        completed = self.status == PlanRevisionAttemptStatus.COMPLETED
+        completion_values = (
+            self.revision_record_id,
+            self.revision_record_hash,
+            self.round_index,
+        )
+        if completed != all(value is not None for value in completion_values):
+            raise ValueError("completed revision attempt requires round bindings")
+        if completed and any(
+            value is not None for value in (self.failure_category, self.failure_message)
+        ):
+            raise ValueError("completed revision attempt cannot contain failure details")
+        if not completed and (
+            self.failure_category is None or self.failure_message is None
+        ):
+            raise ValueError("non-completed revision attempt requires failure details")
+        payload = self.model_dump(mode="json", exclude={"content_hash"})
+        if self.content_hash != content_hash(payload):
+            raise ValueError("PlanRevisionAttemptOutcome content_hash is invalid")
         return self
 
 

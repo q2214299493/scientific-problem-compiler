@@ -5,7 +5,12 @@ import math
 
 from pydantic import ValidationError
 
-from ..models import ApprovalLLMResponse, ApprovalReviewInput
+from ..models import (
+    ApprovalLLMResponse,
+    ApprovalReviewInput,
+    RevisionApprovalLLMResponse,
+    RevisionApprovalReviewInput,
+)
 from ..planning.llm_transport import LLMTransport
 
 STRUCTURED_APPROVAL_PROVIDER_VERSION = "structured-llm-approval-1.0.0"
@@ -17,6 +22,11 @@ Judge the candidate independently against the original request and primary evide
 Use only allowlisted evidence, claim, task, capability, and human-decision IDs.
 Do not use tools, shell commands, scientific software, or external actions.
 SPC assigns authoritative verdict identity, candidate bindings, approver identity, and timestamps.
+"""
+REVISION_APPROVAL_SYSTEM_PROMPT = APPROVAL_SYSTEM_PROMPT + """
+This is a revision review. Independently assess every tracked prior issue exactly once.
+The planner's addressed label is not authoritative. Preserve issue IDs and explain whether each
+issue is resolved, unresolved, not applicable based on evidence, or needs a human decision.
 """
 
 
@@ -52,14 +62,27 @@ class StructuredLLMApprovalProvider:
             "structured_output": True,
         }
 
-    def review(self, review_input: ApprovalReviewInput) -> ApprovalLLMResponse:
-        schema = ApprovalLLMResponse.model_json_schema()
+    def review(
+        self,
+        review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
+    ) -> ApprovalLLMResponse | RevisionApprovalLLMResponse:
+        response_type = (
+            RevisionApprovalLLMResponse
+            if isinstance(review_input, RevisionApprovalReviewInput)
+            else ApprovalLLMResponse
+        )
+        schema = response_type.model_json_schema()
         payload = review_input.model_dump(mode="json")
+        system_prompt = (
+            REVISION_APPROVAL_SYSTEM_PROMPT
+            if isinstance(review_input, RevisionApprovalReviewInput)
+            else APPROVAL_SYSTEM_PROMPT
+        )
         last_error: Exception | None = None
         for _ in range(self.max_attempts):
             try:
                 raw = self.transport.generate_structured(
-                    system_prompt=APPROVAL_SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                     input_payload=payload,
                     response_schema=schema,
                     temperature=self.temperature,
@@ -67,7 +90,7 @@ class StructuredLLMApprovalProvider:
                 data = json.loads(raw)
                 if not isinstance(data, dict):
                     raise TypeError("structured response must be a JSON object")
-                return ApprovalLLMResponse.model_validate(data)
+                return response_type.model_validate(data)
             except (json.JSONDecodeError, TypeError, ValueError, ValidationError) as error:
                 last_error = error
         raise ApprovalStructuredOutputError(

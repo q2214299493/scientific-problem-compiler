@@ -16,6 +16,10 @@ from .models import (
     ApprovalReviewRecord,
     ApprovalScores,
     ApprovalVerdict,
+    RevisionApprovalLLMResponse,
+    RevisionApprovalReviewInput,
+    RevisionIssueStatus,
+    parse_approval_review_input,
     DAGTask,
     EvidenceClassification,
     EvidenceSpan,
@@ -338,7 +342,7 @@ def validate_plan_compilation_receipt(
 
 def validate_approval_claim_evidence_coherence(
     plan: ScientificQuestionPlan,
-    review_input: ApprovalReviewInput,
+    review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
 ) -> ValidationReport:
     issues: list[ValidationIssue] = []
     claim_ids = {
@@ -376,20 +380,98 @@ def validate_approval_claim_evidence_coherence(
 def validate_independent_approval_chain(
     plan: ScientificQuestionPlan,
     verdict: ApprovalVerdict,
-    review_input: ApprovalReviewInput,
+    review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
     review: ApprovalReviewRecord,
     receipt: IndependentApprovalReceipt,
 ) -> ValidationReport:
     issues: list[ValidationIssue] = []
     plan_hash = content_hash(plan)
+    requires_revision_review = any(
+        entry.startswith("revision-input:")
+        for entry in plan.source_query_manifest
+    )
+    if requires_revision_review and not isinstance(
+        review_input, RevisionApprovalReviewInput
+    ):
+        issues.append(
+            ValidationIssue(
+                code="MISSING_REVISION_APPROVAL_CONTEXT",
+                message="revised plan approval requires the versioned revision review contract",
+            )
+        )
+    if isinstance(review_input, RevisionApprovalReviewInput):
+        if review_input.revision_context.revised_plan_hash != plan_hash:
+            issues.append(
+                ValidationIssue(
+                    code="REVISION_APPROVAL_PLAN_MISMATCH",
+                    message="revision approval context does not bind the supplied plan",
+                )
+            )
+        if not isinstance(review.response, RevisionApprovalLLMResponse):
+            issues.append(
+                ValidationIssue(
+                    code="MISSING_REVISION_ISSUE_ASSESSMENTS",
+                    message="revision review record lacks item-by-item issue assessments",
+                )
+            )
+        else:
+            expected_issue_ids = {
+                item.feedback_id
+                for item in review_input.revision_context.tracked_feedback
+            }
+            assessed_issue_ids = tuple(
+                item.feedback_id for item in review.response.issue_assessments
+            )
+            if (
+                len(set(assessed_issue_ids)) != len(assessed_issue_ids)
+                or set(assessed_issue_ids) != expected_issue_ids
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="REVISION_ISSUE_ASSESSMENT_MISMATCH",
+                        message=(
+                            "revision review record must assess every tracked issue "
+                            "exactly once"
+                        ),
+                    )
+                )
+            blocking_by_id = {
+                item.feedback_id: item.blocking
+                for item in review_input.revision_context.tracked_feedback
+            }
+            unresolved = tuple(
+                item
+                for item in review.response.issue_assessments
+                if blocking_by_id.get(item.feedback_id, True)
+                and item.status
+                in {
+                    RevisionIssueStatus.UNRESOLVED,
+                    RevisionIssueStatus.NEEDS_HUMAN_DECISION,
+                }
+            )
+            if verdict.decision in {
+                ApprovalDecision.APPROVE,
+                ApprovalDecision.APPROVE_WITH_CONDITIONS,
+            } and unresolved:
+                issues.append(
+                    ValidationIssue(
+                        code="UNRESOLVED_REVISION_ISSUE_APPROVED",
+                        message="approval verdict cannot pass unresolved tracked issues",
+                    )
+                )
 
     review_input_identity = review_input.model_dump(
         mode="json",
         exclude={"review_input_id", "content_hash"},
         exclude_none=True,
     )
+    review_input_prefix = (
+        "revision-approval-input"
+        if isinstance(review_input, RevisionApprovalReviewInput)
+        else "approval-review-input"
+    )
     expected_review_input_id = (
-        f"approval-review-input-{content_hash(review_input_identity)[:24]}"
+        f"{review_input_prefix}-{content_hash(review_input_identity)[:24]}"
     )
     expected_review_input_hash = content_hash(
         {"review_input_id": expected_review_input_id, **review_input_identity}
@@ -527,7 +609,12 @@ def validate_independent_approval_chain(
             }
         )[:24]
     )
-    detailed_scores = review.response.scores
+    base_review_response = (
+        review.response.review
+        if isinstance(review.response, RevisionApprovalLLMResponse)
+        else review.response
+    )
+    detailed_scores = base_review_response.scores
     expected_scores = ApprovalScores(
         **{
             name: getattr(detailed_scores, name).score
@@ -542,8 +629,8 @@ def validate_independent_approval_chain(
         or verdict.decision != review.policy_decision
         or verdict.scores != expected_scores
         or verdict.hard_red_flags
-        != tuple(flag.code for flag in review.response.hard_red_flags)
-        or verdict.required_fixes != review.response.required_fixes
+        != tuple(flag.code for flag in base_review_response.hard_red_flags)
+        or verdict.required_fixes != base_review_response.required_fixes
         or verdict.human_decisions_required != expected_human_decisions
     ):
         issues.append(
@@ -968,7 +1055,7 @@ def _semantic_export_issues(export_dir: Path) -> list[ValidationIssue]:
         receipt = None
         compilation_receipt = None
         if trust_policy.approval_mode == ApprovalMode.INDEPENDENT_REQUIRED:
-            review_input = ApprovalReviewInput.model_validate(
+            review_input = parse_approval_review_input(
                 load_data(export_dir / "approvals/approval-review-input.yaml")
             )
             review = ApprovalReviewRecord.model_validate(
