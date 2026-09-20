@@ -74,6 +74,7 @@ from ..planning.hierarchical import (
     build_hierarchical_expansion,
     build_hierarchical_stage_attempt,
     build_research_direction_set,
+    unresolved_human_choice_items,
     validate_direction_triage,
     validate_hierarchical_expansion,
     validate_research_direction_set,
@@ -1274,6 +1275,9 @@ class ScientificProblemWorkflow:
             raise HierarchicalPlanningBlocked(
                 tuple(item.code for item in triage_report.issues)
             )
+        human_choice_items = unresolved_human_choice_items(triage)
+        if human_choice_items:
+            raise HierarchicalPlanningBlocked(human_choice_items)
         if not any(
             item.disposition == DirectionDisposition.RETAIN
             for item in triage.dispositions

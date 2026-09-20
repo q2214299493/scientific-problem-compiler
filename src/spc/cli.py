@@ -182,6 +182,7 @@ from .planning import (
     build_direction_triage_record,
     build_hierarchical_expansion,
     build_research_direction_set,
+    unresolved_human_choice_items,
     validate_direction_triage,
     validate_research_direction_set,
 )
@@ -1290,6 +1291,12 @@ def plan(
             if not triage_report.valid:
                 raise HierarchicalPlanningError(
                     ", ".join(item.code for item in triage_report.issues)
+                )
+            human_choice_items = unresolved_human_choice_items(triage)
+            if human_choice_items:
+                raise HierarchicalPlanningError(
+                    "hierarchical planning blocked: "
+                    + "; ".join(human_choice_items)
                 )
             if not any(
                 item.disposition == DirectionDisposition.RETAIN

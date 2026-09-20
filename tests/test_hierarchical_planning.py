@@ -13,6 +13,7 @@ from spc.models import (
     ApprovalRedFlagSeverity,
     DirectionDisposition,
     DirectionExpansionLLMResponse,
+    DirectionTriageRecord,
     DirectionTriageLLMResponse,
     DirectionTriageProposal,
     ResearchDirectionLLMResponse,
@@ -21,6 +22,7 @@ from spc.models import (
 )
 from spc.planning import (
     FakeLLMTransport,
+    HierarchicalPlanningError,
     MockPlanningProvider,
     PlanMaterializer,
     StructuredLLMPlanningProvider,
@@ -29,6 +31,7 @@ from spc.planning import (
     build_research_direction_set,
     derive_candidate_task_id,
     validate_hierarchical_expansion,
+    validate_direction_triage,
     validate_research_direction_set,
 )
 from spc.planning.mock_provider import build_proposal_set
@@ -62,6 +65,33 @@ def _hierarchy(
         planning_input, directions, triage, expansion_response, provider
     )
     return planning_input, provider, direction_response, directions, triage, expansion
+
+
+def _two_direction_response(
+    response: ResearchDirectionLLMResponse,
+) -> ResearchDirectionLLMResponse:
+    first = response.directions[0]
+    second = first.model_copy(
+        update={
+            "direction_key": "direction-2",
+            "scientific_question": (
+                "Which independent pathway control distinguishes the competing explanation?"
+            ),
+            "hypothesis_or_claim_to_test": (
+                "An independent pathway control separates the competing explanation."
+            ),
+            "competing_explanations": (
+                "The control does not distinguish the competing explanation.",
+            ),
+            "distinguishing_observation": (
+                "A matched control gives a different response for the two explanations."
+            ),
+            "rationale": (
+                "The independent control supplies a second decision-relevant contrast."
+            ),
+        }
+    )
+    return ResearchDirectionLLMResponse(directions=(first, second))
 
 
 def test_shared_task_identity_preserves_existing_materialized_ids(tmp_path: Path) -> None:
@@ -236,6 +266,192 @@ def test_direction_fabricated_references_are_rejected(
     assert code in {item.code for item in report.issues}
 
 
+def test_synonymous_direction_without_request_token_overlap_is_allowed(
+    tmp_path: Path,
+) -> None:
+    planning_input, provider, response, *_ = _hierarchy(tmp_path)
+    first = response.directions[0].model_copy(
+        update={
+            "scientific_question": (
+                "Which measured signal separates dissociative carbon monoxide chemistry "
+                "from associative chain propagation?"
+            ),
+            "hypothesis_or_claim_to_test": (
+                "Dissociative carbon monoxide chemistry yields a distinct signal."
+            ),
+            "competing_explanations": (
+                "Associative chain propagation yields the alternative signal.",
+            ),
+            "distinguishing_observation": (
+                "A measured signal separates the dissociative and associative routes."
+            ),
+            "rationale": (
+                "The contrast discriminates the two evidence-grounded explanations."
+            ),
+        }
+    )
+    directions = build_research_direction_set(
+        planning_input,
+        ResearchDirectionLLMResponse(directions=(first,)),
+        provider,
+    )
+
+    report = validate_research_direction_set(directions, planning_input)
+
+    assert report.valid
+
+
+@pytest.mark.parametrize(
+    ("original_request", "question"),
+    (
+        (
+            "The catalytic mechanism needs a decisive comparison.",
+            "Which mechanism controls lunar crater erosion?",
+        ),
+        (
+            "CO activation pathway comparison plan",
+            "How should coastal salinity be mapped from satellite images?",
+        ),
+    ),
+)
+def test_unrelated_direction_is_not_accepted_by_generic_or_absent_overlap(
+    tmp_path: Path,
+    original_request: str,
+    question: str,
+) -> None:
+    planning_input, provider, response, *_ = _hierarchy(
+        tmp_path, request=original_request
+    )
+    first = response.directions[0].model_copy(
+        update={
+            "scientific_question": question,
+            "hypothesis_or_claim_to_test": "The unrelated phenomenon has a remote cause.",
+            "competing_explanations": ("A local cause explains the phenomenon.",),
+            "distinguishing_observation": (
+                "A remote measurement separates the two unrelated causes."
+            ),
+            "rationale": "The unrelated observation distinguishes the two causes.",
+        }
+    )
+    directions = build_research_direction_set(
+        planning_input,
+        ResearchDirectionLLMResponse(directions=(first,)),
+        provider,
+    )
+
+    codes = {
+        issue.code
+        for issue in validate_research_direction_set(
+            directions, planning_input
+        ).issues
+    }
+
+    assert "DIRECTION_RELEVANCE_REQUIRES_HUMAN_REVIEW" in codes
+
+
+def test_triage_rejects_unknown_duplicate_and_missing_direction_keys(
+    tmp_path: Path,
+) -> None:
+    planning_input, provider, response, *_ = _hierarchy(tmp_path)
+    directions = build_research_direction_set(
+        planning_input,
+        _two_direction_response(response),
+        provider,
+    )
+    valid = tuple(
+        DirectionTriageProposal(
+            direction_key=item.direction_key,
+            disposition=DirectionDisposition.RETAIN,
+            reason="Direction is grounded and suitable for expansion.",
+        )
+        for item in directions.directions
+    )
+
+    with pytest.raises(HierarchicalPlanningError, match="UNKNOWN_TRIAGE_DIRECTION_KEY"):
+        build_direction_triage_record(
+            planning_input,
+            directions,
+            DirectionTriageLLMResponse(
+                dispositions=(
+                    *valid,
+                    DirectionTriageProposal(
+                        direction_key="direction-fake",
+                        disposition=DirectionDisposition.EXCLUDE,
+                        reason="Fabricated direction must not be silently discarded.",
+                    ),
+                )
+            ),
+            provider,
+        )
+    with pytest.raises(HierarchicalPlanningError, match="DUPLICATE_TRIAGE_DIRECTION_KEY"):
+        build_direction_triage_record(
+            planning_input,
+            directions,
+            DirectionTriageLLMResponse(dispositions=(valid[0], valid[0])),
+            provider,
+        )
+    with pytest.raises(HierarchicalPlanningError, match="DIRECTION_TRIAGE_INCOMPLETE"):
+        build_direction_triage_record(
+            planning_input,
+            directions,
+            DirectionTriageLLMResponse(dispositions=(valid[0],)),
+            provider,
+        )
+
+    triage = build_direction_triage_record(
+        planning_input,
+        directions,
+        DirectionTriageLLMResponse(dispositions=valid),
+        provider,
+    )
+    assert validate_direction_triage(triage, directions, planning_input).valid
+
+
+@pytest.mark.parametrize(
+    "non_retained_disposition",
+    (DirectionDisposition.DEFER, DirectionDisposition.EXCLUDE),
+)
+def test_defer_and_exclude_are_audit_dispositions_not_blocking_items(
+    tmp_path: Path,
+    non_retained_disposition: DirectionDisposition,
+) -> None:
+    planning_input, provider, response, *_ = _hierarchy(tmp_path)
+    directions = build_research_direction_set(
+        planning_input,
+        _two_direction_response(response),
+        provider,
+    )
+    triage = build_direction_triage_record(
+        planning_input,
+        directions,
+        DirectionTriageLLMResponse(
+            dispositions=(
+                DirectionTriageProposal(
+                    direction_key="direction-1",
+                    disposition=DirectionDisposition.RETAIN,
+                    reason="Retain the grounded primary direction.",
+                ),
+                DirectionTriageProposal(
+                    direction_key="direction-2",
+                    disposition=non_retained_disposition,
+                    reason="Keep this non-selected direction for audit.",
+                ),
+            )
+        ),
+        provider,
+    )
+
+    assert triage.blocking_items == ()
+    expansion = build_hierarchical_expansion(
+        planning_input,
+        directions,
+        triage,
+        provider.expand_directions(planning_input, directions, triage),
+        provider,
+    )
+    assert len(expansion.planning_proposal.candidates) == 1
+
+
 def test_conflict_and_blocking_gap_cannot_disappear_in_hierarchy(tmp_path: Path) -> None:
     *_, planning_input, _, _ = build_grounded_inputs(
         tmp_path,
@@ -255,6 +471,33 @@ def test_conflict_and_blocking_gap_cannot_disappear_in_hierarchy(tmp_path: Path)
     assert any(item.blocking for item in planning_input.evidence_gaps)
     provider = MockPlanningProvider()
     response = provider.propose_directions(planning_input)
+    grounded_directions = build_research_direction_set(
+        planning_input, response, provider
+    )
+    excluded_triage = build_direction_triage_record(
+        planning_input,
+        grounded_directions,
+        DirectionTriageLLMResponse(
+            dispositions=tuple(
+                DirectionTriageProposal(
+                    direction_key=item.direction_key,
+                    disposition=DirectionDisposition.EXCLUDE,
+                    reason="Excluded only to exercise blocking-item semantics.",
+                )
+                for item in grounded_directions.directions
+            )
+        ),
+        provider,
+    )
+    assert any(
+        item.startswith("unresolved_conflict:")
+        for item in excluded_triage.blocking_items
+    )
+    assert any(
+        item.startswith("blocking_evidence_gap:")
+        for item in excluded_triage.blocking_items
+    )
+    assert all(":exclude" not in item for item in excluded_triage.blocking_items)
     stripped = ResearchDirectionLLMResponse(
         directions=tuple(
             item.model_copy(update={"conflict_refs": (), "blocking_gaps": ()})
@@ -287,6 +530,105 @@ class ExcludingProvider(CountingHierarchicalProvider):
                 for item in directions.directions
             )
         )
+
+
+class RetainAndHumanChoiceProvider(CountingHierarchicalProvider):
+    def propose_directions(self, planning_input):
+        response = super().propose_directions(planning_input)
+        return _two_direction_response(response)
+
+    def triage_directions(self, planning_input, directions):
+        type(self).triage_calls += 1
+        del planning_input
+        return DirectionTriageLLMResponse(
+            dispositions=(
+                DirectionTriageProposal(
+                    direction_key=directions.directions[0].direction_key,
+                    disposition=DirectionDisposition.RETAIN,
+                    reason="The primary direction is grounded.",
+                ),
+                DirectionTriageProposal(
+                    direction_key=directions.directions[1].direction_key,
+                    disposition=DirectionDisposition.REQUIRES_HUMAN_CHOICE,
+                    reason="The user must choose whether the independent control is in scope.",
+                ),
+            )
+        )
+
+
+class HumanChoiceOnlyProvider(CountingHierarchicalProvider):
+    def triage_directions(self, planning_input, directions):
+        type(self).triage_calls += 1
+        del planning_input
+        return DirectionTriageLLMResponse(
+            dispositions=tuple(
+                DirectionTriageProposal(
+                    direction_key=item.direction_key,
+                    disposition=DirectionDisposition.REQUIRES_HUMAN_CHOICE,
+                    reason="The user must select the scientific scope.",
+                )
+                for item in directions.directions
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "provider_class",
+    (RetainAndHumanChoiceProvider, HumanChoiceOnlyProvider),
+)
+def test_unresolved_human_choice_blocks_expansion_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_class: type[CountingHierarchicalProvider],
+) -> None:
+    repositories, *_ = _prepare(tmp_path)
+    provider_class.directions_calls = 0
+    provider_class.triage_calls = 0
+    provider_class.expansion_calls = 0
+    monkeypatch.setattr(workflow_service, "MockPlanningProvider", provider_class)
+    workflow = ScientificProblemWorkflow(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+
+    first = workflow.start(
+        REQUEST, "base", planning_strategy="hierarchical"
+    ).run
+
+    assert first.status == ScientificProblemRunStatus.HIERARCHICAL_PLANNING_BLOCKED
+    assert provider_class.expansion_calls == 0
+    assert first.failure is not None
+    assert "requires_human_choice" in first.failure.message
+    triage = workflow.runs.load_artifact(
+        first.run_id,
+        "hierarchical-planning/triage.yaml",
+        DirectionTriageRecord,
+    )
+    human_items = tuple(
+        item
+        for item in triage.dispositions
+        if item.disposition == DirectionDisposition.REQUIRES_HUMAN_CHOICE
+    )
+    assert human_items
+    serialized_blockers = " ".join(triage.blocking_items)
+    assert all(
+        item.direction_id in serialized_blockers
+        and item.direction_key in serialized_blockers
+        and item.reason in serialized_blockers
+        for item in human_items
+    )
+    calls = (
+        provider_class.directions_calls,
+        provider_class.triage_calls,
+        provider_class.expansion_calls,
+    )
+
+    repeated = workflow.resume(first.run_id).run
+    assert repeated.status == ScientificProblemRunStatus.HIERARCHICAL_PLANNING_BLOCKED
+    assert (
+        provider_class.directions_calls,
+        provider_class.triage_calls,
+        provider_class.expansion_calls,
+    ) == calls
 
 
 def test_all_directions_unavailable_is_blocked_and_resume_does_not_reinvoke(

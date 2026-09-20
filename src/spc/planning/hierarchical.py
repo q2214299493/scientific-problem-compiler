@@ -25,6 +25,47 @@ from .validators import validate_planning_proposal_set
 
 HIERARCHICAL_PLANNING_STRATEGY_VERSION = "hierarchical-planning-1.0.0"
 
+_GENERIC_RELEVANCE_TOKENS = frozenset(
+    {
+        "analysis",
+        "and",
+        "compare",
+        "comparison",
+        "distinguish",
+        "distinguishes",
+        "does",
+        "evidence",
+        "explanation",
+        "explanations",
+        "further",
+        "from",
+        "has",
+        "have",
+        "how",
+        "hypothesis",
+        "mechanism",
+        "mechanisms",
+        "observation",
+        "observable",
+        "one",
+        "plan",
+        "proposed",
+        "research",
+        "scientific",
+        "study",
+        "the",
+        "test",
+        "testing",
+        "that",
+        "this",
+        "two",
+        "under",
+        "which",
+        "with",
+        "without",
+    }
+)
+
 
 class HierarchicalPlanningError(ValueError):
     pass
@@ -124,6 +165,46 @@ def _normalized_tokens(value: str) -> frozenset[str]:
     )
 
 
+def _meaningful_tokens(value: str) -> frozenset[str]:
+    return _normalized_tokens(value) - _GENERIC_RELEVANCE_TOKENS
+
+
+def _direction_anchor_tokens(
+    planning_input: ScientificPlanningInput,
+    direction: ResearchDirection,
+) -> frozenset[str]:
+    claims = {item.claim_id: item for item in planning_input.source_claims}
+    capabilities = {
+        item.capability_id: item for item in planning_input.scientific_capabilities
+    }
+    conflicts = {item.conflict_id: item for item in planning_input.conflict_sets}
+    gaps = {item.gap_id: item for item in planning_input.evidence_gaps}
+    values = [
+        claims[item].text for item in direction.claim_refs if item in claims
+    ]
+    values.extend(
+        capabilities[item].scientific_goal
+        for item in direction.capability_refs
+        if item in capabilities
+    )
+    for conflict_ref in direction.conflict_refs:
+        conflict = conflicts.get(conflict_ref)
+        if conflict is not None:
+            values.extend((conflict.topic, *conflict.required_discrimination))
+    for gap_ref in direction.blocking_gaps:
+        gap = gaps.get(gap_ref)
+        if gap is not None:
+            values.extend(
+                (gap.scientific_question, gap.missing_evidence, gap.why_it_matters)
+            )
+    for expert_case in planning_input.expert_cases:
+        values.extend(expert_case.translated_questions)
+        values.extend(expert_case.atomic_questions)
+        if expert_case.latent_concern is not None:
+            values.append(expert_case.latent_concern)
+    return _meaningful_tokens(" ".join(values))
+
+
 def validate_research_direction_set(
     directions: ResearchDirectionSet,
     planning_input: ScientificPlanningInput,
@@ -155,7 +236,7 @@ def validate_research_direction_set(
         if item.resolution_status == "unresolved"
     }
     blocking_gaps = {item.gap_id for item in planning_input.evidence_gaps if item.blocking}
-    request_tokens = _normalized_tokens(planning_input.original_request)
+    request_tokens = _meaningful_tokens(planning_input.original_request)
     signatures: dict[tuple[object, ...], int] = {}
     generic_observations = {
         "do more calculations",
@@ -205,20 +286,28 @@ def validate_research_direction_set(
                     path=f"{path}.distinguishing_observation",
                 )
             )
-        direction_tokens = _normalized_tokens(
+        direction_tokens = _meaningful_tokens(
             " ".join(
                 (
                     direction.scientific_question,
                     direction.hypothesis_or_claim_to_test,
+                    *direction.competing_explanations,
+                    direction.distinguishing_observation,
                     direction.rationale,
                 )
             )
         )
-        if request_tokens and not request_tokens.intersection(direction_tokens):
+        anchor_tokens = _direction_anchor_tokens(planning_input, direction)
+        request_aligned = bool(request_tokens.intersection(direction_tokens))
+        structured_context_aligned = bool(anchor_tokens.intersection(direction_tokens))
+        if anchor_tokens and not (request_aligned or structured_context_aligned):
             issues.append(
                 ValidationIssue(
-                    code="ORIGINAL_REQUEST_DROPPED",
-                    message="direction does not preserve the subject of the original request",
+                    code="DIRECTION_RELEVANCE_REQUIRES_HUMAN_REVIEW",
+                    message=(
+                        "direction has no verifiable alignment with the original request or "
+                        "its referenced structured planning context"
+                    ),
                     path=f"{path}.scientific_question",
                 )
             )
@@ -268,6 +357,24 @@ def build_direction_triage_record(
     provider: Any,
 ) -> DirectionTriageRecord:
     by_key = {item.direction_key: item for item in directions.directions}
+    supplied_keys = tuple(item.direction_key for item in response.dispositions)
+    unknown_keys = tuple(sorted(set(supplied_keys) - set(by_key)))
+    if unknown_keys:
+        raise HierarchicalPlanningError(
+            "UNKNOWN_TRIAGE_DIRECTION_KEY: " + ", ".join(unknown_keys)
+        )
+    duplicate_keys = tuple(
+        sorted(key for key in set(supplied_keys) if supplied_keys.count(key) > 1)
+    )
+    if duplicate_keys:
+        raise HierarchicalPlanningError(
+            "DUPLICATE_TRIAGE_DIRECTION_KEY: " + ", ".join(duplicate_keys)
+        )
+    missing_keys = tuple(sorted(set(by_key) - set(supplied_keys)))
+    if missing_keys:
+        raise HierarchicalPlanningError(
+            "DIRECTION_TRIAGE_INCOMPLETE: " + ", ".join(missing_keys)
+        )
     items = tuple(
         DirectionTriageItem(
             **item.model_dump(mode="python"),
@@ -275,12 +382,9 @@ def build_direction_triage_record(
             direction_hash=by_key[item.direction_key].content_hash,
         )
         for item in response.dispositions
-        if item.direction_key in by_key
     )
-    blocking_items = tuple(
-        f"{item.direction_key}:{item.disposition.value}"
-        for item in items
-        if item.disposition != DirectionDisposition.RETAIN
+    blocking_items = _direction_triage_blocking_items(
+        planning_input, directions, items
     )
     provenance = dict(planning_input.provenance_manifest)
     identity = {
@@ -303,6 +407,52 @@ def build_direction_triage_record(
     triage_id = f"direction-triage-{content_hash(identity)[:24]}"
     payload = {"triage_id": triage_id, **identity}
     return DirectionTriageRecord(**payload, content_hash=content_hash(payload))
+
+
+def _direction_triage_blocking_items(
+    planning_input: ScientificPlanningInput,
+    directions: ResearchDirectionSet,
+    dispositions: tuple[DirectionTriageItem, ...],
+) -> tuple[str, ...]:
+    blocking = [
+        (
+            "requires_human_choice:"
+            f"{item.direction_id}:{item.direction_key}:{item.reason}"
+        )
+        for item in dispositions
+        if item.disposition == DirectionDisposition.REQUIRES_HUMAN_CHOICE
+    ]
+    by_key = {item.direction_key: item for item in directions.directions}
+    active = tuple(
+        by_key[item.direction_key]
+        for item in dispositions
+        if item.disposition
+        in {DirectionDisposition.RETAIN, DirectionDisposition.REQUIRES_HUMAN_CHOICE}
+    )
+    for conflict in planning_input.conflict_sets:
+        if conflict.resolution_status == "unresolved" and not any(
+            conflict.conflict_id in direction.conflict_refs for direction in active
+        ):
+            blocking.append(f"unresolved_conflict:{conflict.conflict_id}")
+    for gap in planning_input.evidence_gaps:
+        if gap.blocking and not any(
+            gap.gap_id in direction.blocking_gaps for direction in active
+        ):
+            blocking.append(f"blocking_evidence_gap:{gap.gap_id}")
+    return tuple(blocking)
+
+
+def unresolved_human_choice_items(
+    triage: DirectionTriageRecord,
+) -> tuple[str, ...]:
+    return tuple(
+        (
+            "requires_human_choice:"
+            f"{item.direction_id}:{item.direction_key}:{item.reason}"
+        )
+        for item in triage.dispositions
+        if item.disposition == DirectionDisposition.REQUIRES_HUMAN_CHOICE
+    )
 
 
 def validate_direction_triage(
