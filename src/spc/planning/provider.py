@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Protocol
 
 from ..models import (
+    ApprovalReviewRecord,
     DirectionExpansionLLMResponse,
     DirectionTriageLLMResponse,
     DirectionTriageRecord,
     PlanRevisionInput,
     PlanRevisionLLMResponse,
+    PlanningEvidenceRequestLLMResponse,
     PlanningProposalSet,
     ResearchDirectionLLMResponse,
     ResearchDirectionSet,
@@ -20,6 +22,12 @@ class PlanningProvider(Protocol):
     provider_version: str
 
     def propose(self, planning_input: ScientificPlanningInput) -> PlanningProposalSet: ...
+
+    def propose_evidence_requests(
+        self,
+        planning_input: ScientificPlanningInput,
+        triggering_review: ApprovalReviewRecord | None = None,
+    ) -> PlanningEvidenceRequestLLMResponse: ...
 
     def propose_directions(
         self, planning_input: ScientificPlanningInput

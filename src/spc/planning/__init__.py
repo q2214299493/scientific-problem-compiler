@@ -1,5 +1,16 @@
 from .context_resolver import PlanningContextError, PlanningContextResolver
 from .identity import derive_candidate_task_id
+from .evidence_resolution import (
+    PlanningEvidenceError,
+    augment_scientific_context,
+    build_evidence_resolution_set,
+    build_planning_evidence_request_set,
+    classify_evidence_gap,
+    proposal_for_gap,
+    proposal_for_review,
+    resolve_planning_evidence_requests,
+    retrieval_resolvable_gaps,
+)
 from .hierarchical import (
     HIERARCHICAL_PLANNING_STRATEGY_VERSION,
     HierarchicalPlanningBlocked,
@@ -34,6 +45,7 @@ __all__ = (
     "PlanMaterializer",
     "PlanningContextError",
     "PlanningContextResolver",
+    "PlanningEvidenceError",
     "PlanningProposalError",
     "PlanningProvider",
     "StructuredLLMPlanningProvider",
@@ -41,8 +53,16 @@ __all__ = (
     "validate_planning_proposal_set",
     "automatic_revision_block_reason",
     "build_plan_revision_input",
+    "build_evidence_resolution_set",
+    "build_planning_evidence_request_set",
     "build_revision_proposal_set",
     "derive_candidate_task_id",
+    "augment_scientific_context",
+    "classify_evidence_gap",
+    "proposal_for_gap",
+    "proposal_for_review",
+    "resolve_planning_evidence_requests",
+    "retrieval_resolvable_gaps",
     "HIERARCHICAL_PLANNING_STRATEGY_VERSION",
     "HierarchicalPlanningBlocked",
     "HierarchicalPlanningError",

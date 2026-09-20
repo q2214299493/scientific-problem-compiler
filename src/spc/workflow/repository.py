@@ -72,6 +72,7 @@ class ScientificProblemRunRepository:
         value: object,
     ) -> ScientificRunArtifactBinding:
         path = self.resolve_artifact_path(run_id, relative_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         dump_yaml(path, value)  # deterministic, derived workflow artifact
         return ScientificRunArtifactBinding(
             artifact_type=artifact_type,
@@ -94,6 +95,7 @@ class ScientificProblemRunRepository:
             if path.is_symlink() or content_hash(load_data(path)) != expected_hash:
                 raise FileExistsError(f"conflicting immutable workflow artifact: {path}")
         else:
+            path.parent.mkdir(parents=True, exist_ok=True)
             dump_yaml(path, value)
         return ScientificRunArtifactBinding(
             artifact_type=artifact_type,

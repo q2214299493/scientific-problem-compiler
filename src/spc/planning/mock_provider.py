@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..models import (
     AmbiguityAssessment,
+    ApprovalReviewRecord,
     CandidatePlanDraft,
     CandidateTaskDraft,
     ComparisonBaselineDraft,
@@ -17,6 +18,7 @@ from ..models import (
     PlanRevisionFeedbackResponse,
     PlanRevisionInput,
     PlanRevisionLLMResponse,
+    PlanningEvidenceRequestLLMResponse,
     PlanningProposalSet,
     PlanningStrategyClass,
     ResearchDirectionLLMResponse,
@@ -27,6 +29,11 @@ from ..models import (
     SourceRole,
 )
 from ..serialization import content_hash
+from .evidence_resolution import (
+    classify_evidence_gap,
+    proposal_for_gap,
+    proposal_for_review,
+)
 
 MOCK_PLANNING_PROVIDER_VERSION = "mock-planning-1.1.0"
 
@@ -63,6 +70,26 @@ def build_proposal_set(
 class MockPlanningProvider:
     provider_id = "mock-planning"
     provider_version = MOCK_PLANNING_PROVIDER_VERSION
+
+    def propose_evidence_requests(
+        self,
+        planning_input: ScientificPlanningInput,
+        triggering_review: ApprovalReviewRecord | None = None,
+    ) -> PlanningEvidenceRequestLLMResponse:
+        if triggering_review is not None:
+            return PlanningEvidenceRequestLLMResponse(
+                requests=(proposal_for_review(triggering_review, planning_input),)
+            )
+        proposals = tuple(
+            proposal_for_gap(gap, planning_input)
+            for gap in planning_input.evidence_gaps
+            if gap.blocking
+            and classify_evidence_gap(gap).resolution_kind.value
+            == "retrieval_resolvable"
+        )
+        if not proposals:
+            raise ValueError("no retrieval-resolvable blocking evidence gap")
+        return PlanningEvidenceRequestLLMResponse(requests=proposals[:5])
 
     def propose_directions(
         self, planning_input: ScientificPlanningInput

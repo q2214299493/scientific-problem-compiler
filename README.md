@@ -786,6 +786,47 @@ SPC stops and records that state without automatically starting another
 hierarchical run. Offline mock comparison demonstrates control flow and
 provenance only, not superior scientific quality.
 
+Planning-directed evidence retrieval is optional and bounded. The default
+`--max-evidence-resolution-cycles 0` preserves the existing planning path.
+Values from `1` to `3` allow planning to turn a specific blocking
+`EvidenceGap`, or a source-specific independent `INSUFFICIENT_EVIDENCE`
+review, into at most five structured evidence requests per cycle. Each request
+must state which planning judgment the missing information could change.
+Calculation-required gaps, new experiments, scope choices, and undetermined
+needs do not enter literature retrieval.
+
+SPC always queries the existing trusted K1H view first. A trusted match means
+only that an integrity-checked, curated record matched the declared query and
+source scope; its ranking score is relevance, not scientific confidence.
+`NO_MATCH` means only that the declared snapshot, query policy, and source
+scope returned no trusted match—it is not a novelty claim. Conflicting records
+remain explicit. Machine-extracted or otherwise untrusted matches stop at
+`BLOCKED_SOURCE_CURATION`; SPC never accepts them automatically. The optional
+`--allow-evidence-source-acquisition` flag creates an immutable acquisition
+proposal only after both trusted and audit lookup find no match. Planning never
+executes that proposal, browses the web, or substitutes retrieval for a new
+DFT calculation or experiment.
+
+```powershell
+spc compile-scientific-request `
+  --request "Which matched method conditions distinguish the two explanations?" `
+  --domain base --knowledge-dir knowledge --state-dir .spc-evidence `
+  --planning-strategy hierarchical `
+  --interpretation-provider mock --planning-provider mock `
+  --max-evidence-resolution-cycles 1
+```
+
+Every attempt is stored under `planning-evidence/cycle-N/` with its request
+set, resolution set, snapshot/domain/provider bindings, and parent/child
+context, evidence-packet, and planning-input hashes. A trusted new match causes
+a new context and planning input, followed by a fresh hierarchy when selected;
+old directions, candidates, reviews, and receipts remain audit history and are
+not reused. Resume reuses complete records, refuses uncertain retrieval
+attempts, and does not repeat an equivalent request against the same snapshot.
+`scientific-run-status` reports cycle use, request and match counts, conflicts,
+no-match/curation outcomes, and unresolved request IDs. This offline mock flow
+demonstrates orchestration and binding only, not improved scientific quality.
+
 Independent-review-driven plan revision is explicit and bounded. The default
 `--max-plan-revisions 0` preserves the one-pass workflow. Setting it to `1` or
 `2` permits a revision only after a fully bound independent
@@ -833,9 +874,13 @@ They are audit-compatible only: a revised plan whose lineage contains a
 revision input requires the new revision-approval contract and cannot reuse a
 legacy approval record or receipt.
 
-Automatic revision stops on rejection, insufficient evidence, a required human
-choice or external evidence, invalid bindings, changed trusted context, no
+Automatic revision stops on rejection, a required human choice or external
+evidence, invalid bindings, changed trusted context, no
 substantive scientific-plan change, or budget exhaustion.
+`INSUFFICIENT_EVIDENCE` never enters the revision loop; when evidence cycles
+are explicitly enabled and the bound review identifies a retrieval-resolvable
+source gap, it may instead start a new evidence/planning cycle. Otherwise it
+remains terminal.
 `APPROVE_WITH_CONDITIONS` retains its existing handling. A revised downstream
 export also requires `--candidate-id` naming the exact final approved plan; old
 review receipts cannot approve a new version. Revision feedback remains review

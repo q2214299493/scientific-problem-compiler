@@ -3678,6 +3678,344 @@ class EvidenceGap(StrictModel):
     evidence_refs: tuple[NonBlankStr, ...] = ()
 
 
+class PlanningEvidenceType(StrEnum):
+    REPORTED_RESULT = "reported_result"
+    METHOD_FACT = "method_fact"
+    MODEL_FACT = "model_fact"
+    SOURCE_CLAIM = "source_claim"
+    EXPERIMENTAL_CONDITION = "experimental_condition"
+    COMPARISON_CONTEXT = "comparison_context"
+    PRIOR_MECHANISTIC_EVIDENCE = "prior_mechanistic_evidence"
+
+
+class EvidenceGapResolutionKind(StrEnum):
+    RETRIEVAL_RESOLVABLE = "retrieval_resolvable"
+    CALCULATION_REQUIRED = "calculation_required"
+    EXPERIMENT_REQUIRED = "experiment_required"
+    HUMAN_DECISION_REQUIRED = "human_decision_required"
+    UNDETERMINED = "undetermined"
+
+
+class EvidenceResolutionStatus(StrEnum):
+    RESOLVED_TRUSTED = "resolved_trusted"
+    PARTIALLY_RESOLVED = "partially_resolved"
+    CONFLICTING_EVIDENCE = "conflicting_evidence"
+    NO_MATCH = "no_match"
+    REQUIRES_SOURCE_CURATION = "requires_source_curation"
+    NOT_RETRIEVAL_RESOLVABLE = "not_retrieval_resolvable"
+    HUMAN_DECISION_REQUIRED = "human_decision_required"
+
+
+class PlanningEvidenceRequestProposal(StrictModel):
+    request_key: NonBlankStr
+    scientific_question: NonBlankStr
+    gap_id: NonBlankStr | None = None
+    triggering_question: NonBlankStr | None = None
+    why_needed: NonBlankStr
+    evidence_type_needed: PlanningEvidenceType
+    target_entities: tuple[NonBlankStr, ...]
+    concepts: tuple[NonBlankStr, ...]
+    comparison_conditions: tuple[NonBlankStr, ...]
+    acceptable_source_classes: tuple[NonBlankStr, ...]
+    evidence_that_would_resolve_gap: NonBlankStr
+    evidence_that_would_not_resolve_gap: NonBlankStr
+    related_claim_refs: tuple[NonBlankStr, ...]
+    related_evidence_refs: tuple[NonBlankStr, ...]
+    related_direction_refs: tuple[NonBlankStr, ...]
+    related_candidate_refs: tuple[NonBlankStr, ...]
+    priority_reason: NonBlankStr
+    blocking: bool
+
+    @model_validator(mode="after")
+    def validate_trigger(self) -> PlanningEvidenceRequestProposal:
+        if (self.gap_id is None) == (self.triggering_question is None):
+            raise ValueError(
+                "evidence request requires exactly one gap_id or triggering_question"
+            )
+        return self
+
+
+class PlanningEvidenceRequestLLMResponse(StrictModel):
+    requests: tuple[PlanningEvidenceRequestProposal, ...] = Field(
+        min_length=1, max_length=5
+    )
+
+
+class PlanningEvidenceGapClassification(StrictModel):
+    gap_id: NonBlankStr
+    resolution_kind: EvidenceGapResolutionKind
+    rationale: NonBlankStr
+
+
+class PlanningEvidenceRequest(PlanningEvidenceRequestProposal):
+    request_id: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanningEvidenceRequest:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"request_id", "content_hash"}
+        )
+        expected = f"planning-evidence-request-{content_hash(identity)[:24]}"
+        if self.request_id != expected:
+            raise ValueError("PlanningEvidenceRequest request_id is not content-bound")
+        if self.content_hash != content_hash({"request_id": expected, **identity}):
+            raise ValueError("PlanningEvidenceRequest content_hash is invalid")
+        return self
+
+
+class PlanningEvidenceRequestSet(StrictModel):
+    request_set_id: NonBlankStr
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    domain: NonBlankStr
+    knowledge_snapshot_id: NonBlankStr
+    knowledge_snapshot_hash: Sha256Str
+    domain_pack_version: NonBlankStr
+    planning_strategy: PlanningStrategy
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict
+    source_acquisition_allowed: bool
+    direction_set_id: NonBlankStr | None = None
+    direction_set_hash: Sha256Str | None = None
+    triage_id: NonBlankStr | None = None
+    triage_hash: Sha256Str | None = None
+    triggering_review_id: NonBlankStr | None = None
+    triggering_review_hash: Sha256Str | None = None
+    gap_classifications: tuple[PlanningEvidenceGapClassification, ...]
+    requests: tuple[PlanningEvidenceRequest, ...] = Field(max_length=5)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanningEvidenceRequestSet:
+        from .serialization import content_hash
+
+        for left, right, name in (
+            (self.direction_set_id, self.direction_set_hash, "direction set"),
+            (self.triage_id, self.triage_hash, "triage"),
+            (self.triggering_review_id, self.triggering_review_hash, "review"),
+        ):
+            if (left is None) != (right is None):
+                raise ValueError(f"{name} ID and hash must be supplied together")
+        if len({item.request_key for item in self.requests}) != len(self.requests):
+            raise ValueError("planning evidence request keys must be unique")
+        if len({item.request_id for item in self.requests}) != len(self.requests):
+            raise ValueError("planning evidence request IDs must be unique")
+        identity = self.model_dump(
+            mode="json", exclude={"request_set_id", "content_hash"}
+        )
+        expected = f"planning-evidence-request-set-{content_hash(identity)[:24]}"
+        if self.request_set_id != expected:
+            raise ValueError("PlanningEvidenceRequestSet ID is not content-bound")
+        if self.content_hash != content_hash({"request_set_id": expected, **identity}):
+            raise ValueError("PlanningEvidenceRequestSet content_hash is invalid")
+        return self
+
+
+class EvidenceAcquisitionProposal(StrictModel):
+    proposal_id: NonBlankStr
+    request_id: NonBlankStr
+    request_hash: Sha256Str
+    query: RetrievalQuery
+    acceptable_source_classes: tuple[NonBlankStr, ...]
+    rationale: NonBlankStr
+    status: Literal["proposed_not_executed"] = "proposed_not_executed"
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> EvidenceAcquisitionProposal:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"proposal_id", "content_hash"}
+        )
+        expected = f"evidence-acquisition-proposal-{content_hash(identity)[:24]}"
+        if self.proposal_id != expected:
+            raise ValueError("EvidenceAcquisitionProposal ID is not content-bound")
+        if self.content_hash != content_hash({"proposal_id": expected, **identity}):
+            raise ValueError("EvidenceAcquisitionProposal content_hash is invalid")
+        return self
+
+
+class EvidenceResolutionRecord(StrictModel):
+    resolution_id: NonBlankStr
+    request_id: NonBlankStr
+    request_hash: Sha256Str
+    status: EvidenceResolutionStatus
+    retrieval_context_id: NonBlankStr | None = None
+    retrieval_context_hash: Sha256Str | None = None
+    retrieval_context: KnowledgeRetrievalContext | None = None
+    matched_hits: tuple[RetrievalHit, ...] = ()
+    evidence_refs: tuple[NonBlankStr, ...] = ()
+    source_refs: tuple[NonBlankStr, ...] = ()
+    record_refs: tuple[NonBlankStr, ...] = ()
+    resolution_rationale: NonBlankStr
+    remaining_uncertainty: tuple[NonBlankStr, ...]
+    acquisition_proposal_id: NonBlankStr | None = None
+    acquisition_proposal_hash: Sha256Str | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> EvidenceResolutionRecord:
+        from .serialization import content_hash
+
+        if (self.retrieval_context_id is None) != (
+            self.retrieval_context_hash is None
+        ):
+            raise ValueError("retrieval context ID and hash must be supplied together")
+        if self.retrieval_context is not None and (
+            self.retrieval_context_id != self.retrieval_context.retrieval_context_id
+            or self.retrieval_context_hash != self.retrieval_context.content_hash
+        ):
+            raise ValueError("embedded retrieval context does not match its binding")
+        if self.retrieval_context is None and self.retrieval_context_id is not None:
+            raise ValueError("bound retrieval context must be embedded for audit")
+        if (self.acquisition_proposal_id is None) != (
+            self.acquisition_proposal_hash is None
+        ):
+            raise ValueError("acquisition proposal ID and hash must be supplied together")
+        identity = self.model_dump(
+            mode="json", exclude={"resolution_id", "content_hash"}
+        )
+        expected = f"evidence-resolution-{content_hash(identity)[:24]}"
+        if self.resolution_id != expected:
+            raise ValueError("EvidenceResolutionRecord ID is not content-bound")
+        if self.content_hash != content_hash({"resolution_id": expected, **identity}):
+            raise ValueError("EvidenceResolutionRecord content_hash is invalid")
+        return self
+
+
+class EvidenceResolutionSet(StrictModel):
+    resolution_set_id: NonBlankStr
+    request_set_id: NonBlankStr
+    request_set_hash: Sha256Str
+    records: tuple[EvidenceResolutionRecord, ...]
+    acquisition_proposals: tuple[EvidenceAcquisitionProposal, ...] = ()
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> EvidenceResolutionSet:
+        from .serialization import content_hash
+
+        if len({item.request_id for item in self.records}) != len(self.records):
+            raise ValueError("evidence resolution request IDs must be unique")
+        identity = self.model_dump(
+            mode="json", exclude={"resolution_set_id", "content_hash"}
+        )
+        expected = f"evidence-resolution-set-{content_hash(identity)[:24]}"
+        if self.resolution_set_id != expected:
+            raise ValueError("EvidenceResolutionSet ID is not content-bound")
+        if self.content_hash != content_hash({"resolution_set_id": expected, **identity}):
+            raise ValueError("EvidenceResolutionSet content_hash is invalid")
+        return self
+
+
+class PlanningEvidenceCyclePolicy(StrictModel):
+    policy_id: NonBlankStr
+    run_id: NonBlankStr
+    max_cycles: int = Field(ge=1, le=3)
+    source_acquisition_allowed: bool
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanningEvidenceCyclePolicy:
+        from .serialization import content_hash
+
+        identity = self.model_dump(mode="json", exclude={"policy_id", "content_hash"})
+        expected = f"planning-evidence-policy-{content_hash(identity)[:24]}"
+        if self.policy_id != expected:
+            raise ValueError("PlanningEvidenceCyclePolicy ID is not content-bound")
+        if self.content_hash != content_hash({"policy_id": expected, **identity}):
+            raise ValueError("PlanningEvidenceCyclePolicy content_hash is invalid")
+        return self
+
+
+class PlanningEvidenceRequestAttempt(StrictModel):
+    attempt_id: NonBlankStr
+    run_id: NonBlankStr
+    cycle_index: int = Field(ge=1)
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config_hash: Sha256Str
+    triggering_review_id: NonBlankStr | None = None
+    triggering_review_hash: Sha256Str | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanningEvidenceRequestAttempt:
+        from .serialization import content_hash
+
+        if (self.triggering_review_id is None) != (
+            self.triggering_review_hash is None
+        ):
+            raise ValueError("triggering review ID and hash must be supplied together")
+        identity = self.model_dump(
+            mode="json", exclude={"attempt_id", "content_hash"}
+        )
+        expected = f"planning-evidence-attempt-{content_hash(identity)[:24]}"
+        if self.attempt_id != expected:
+            raise ValueError("PlanningEvidenceRequestAttempt ID is not content-bound")
+        if self.content_hash != content_hash({"attempt_id": expected, **identity}):
+            raise ValueError("PlanningEvidenceRequestAttempt content_hash is invalid")
+        return self
+
+
+class PlanningEvidenceCycleRecord(StrictModel):
+    cycle_id: NonBlankStr
+    cycle_index: int = Field(ge=1)
+    parent_context_id: NonBlankStr
+    parent_context_hash: Sha256Str
+    parent_planning_input_id: NonBlankStr
+    parent_planning_input_hash: Sha256Str
+    request_set_id: NonBlankStr
+    request_set_hash: Sha256Str
+    resolution_set_id: NonBlankStr
+    resolution_set_hash: Sha256Str
+    knowledge_snapshot_id: NonBlankStr
+    knowledge_snapshot_hash: Sha256Str
+    child_context_id: NonBlankStr | None = None
+    child_context_hash: Sha256Str | None = None
+    child_evidence_packet_id: NonBlankStr | None = None
+    child_evidence_packet_hash: Sha256Str | None = None
+    child_planning_input_id: NonBlankStr | None = None
+    child_planning_input_hash: Sha256Str | None = None
+    terminal_reason: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> PlanningEvidenceCycleRecord:
+        from .serialization import content_hash
+
+        child_pairs = (
+            (self.child_context_id, self.child_context_hash),
+            (self.child_evidence_packet_id, self.child_evidence_packet_hash),
+            (self.child_planning_input_id, self.child_planning_input_hash),
+        )
+        if any((left is None) != (right is None) for left, right in child_pairs):
+            raise ValueError("evidence-cycle child IDs and hashes must be paired")
+        has_child = tuple(left is not None for left, _ in child_pairs)
+        if len(set(has_child)) != 1:
+            raise ValueError("evidence-cycle child artifacts must be supplied together")
+        if has_child[0] == (self.terminal_reason is not None):
+            raise ValueError("evidence cycle requires either child artifacts or terminal_reason")
+        identity = self.model_dump(mode="json", exclude={"cycle_id", "content_hash"})
+        expected = f"planning-evidence-cycle-{content_hash(identity)[:24]}"
+        if self.cycle_id != expected:
+            raise ValueError("PlanningEvidenceCycleRecord ID is not content-bound")
+        if self.content_hash != content_hash({"cycle_id": expected, **identity}):
+            raise ValueError("PlanningEvidenceCycleRecord content_hash is invalid")
+        return self
+
+
 class InterpretationProposal(StrictModel):
     proposal_id: NonBlankStr
     context_id: NonBlankStr
@@ -5336,6 +5674,7 @@ class ScientificProblemRunStatus(StrEnum):
     REJECTED = "REJECTED"
     REVISION_BLOCKED = "REVISION_BLOCKED"
     HIERARCHICAL_PLANNING_BLOCKED = "HIERARCHICAL_PLANNING_BLOCKED"
+    EVIDENCE_RESOLUTION_BLOCKED = "EVIDENCE_RESOLUTION_BLOCKED"
     REQUIRES_REPLANNING = "REQUIRES_REPLANNING"
     EXPORTED = "EXPORTED"
     FAILED = "FAILED"

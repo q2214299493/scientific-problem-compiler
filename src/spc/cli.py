@@ -1704,6 +1704,8 @@ def _workflow_options(
     temperature: float,
     max_attempts: int,
     max_plan_revisions: int,
+    max_evidence_resolution_cycles: int,
+    allow_evidence_source_acquisition: bool,
     planning_strategy: str,
 ) -> dict[str, object]:
     if planning_strategy not in {"direct", "hierarchical"}:
@@ -1722,6 +1724,8 @@ def _workflow_options(
         "temperature": temperature,
         "max_attempts": max_attempts,
         "max_plan_revisions": max_plan_revisions,
+        "max_evidence_resolution_cycles": max_evidence_resolution_cycles,
+        "allow_evidence_source_acquisition": allow_evidence_source_acquisition,
         "planning_strategy": planning_strategy,
     }
 
@@ -1751,6 +1755,12 @@ def compile_scientific_request(
     max_plan_revisions: Annotated[
         int, typer.Option("--max-plan-revisions", min=0, max=10)
     ] = 0,
+    max_evidence_resolution_cycles: Annotated[
+        int, typer.Option("--max-evidence-resolution-cycles", min=0, max=3)
+    ] = 0,
+    allow_evidence_source_acquisition: Annotated[
+        bool, typer.Option("--allow-evidence-source-acquisition")
+    ] = False,
     planning_strategy: Annotated[
         str, typer.Option("--planning-strategy")
     ] = "direct",
@@ -1778,6 +1788,8 @@ def compile_scientific_request(
             temperature=temperature,
             max_attempts=max_attempts,
             max_plan_revisions=max_plan_revisions,
+            max_evidence_resolution_cycles=max_evidence_resolution_cycles,
+            allow_evidence_source_acquisition=allow_evidence_source_acquisition,
             planning_strategy=planning_strategy,
         ),
     )
@@ -1787,6 +1799,7 @@ def compile_scientific_request(
         "BLOCKED_SOURCE_CURATION",
         "REVISION_BLOCKED",
         "HIERARCHICAL_PLANNING_BLOCKED",
+        "EVIDENCE_RESOLUTION_BLOCKED",
         "REQUIRES_REPLANNING",
         "FAILED",
     }:
@@ -1812,6 +1825,12 @@ def resume_scientific_run(
     max_plan_revisions: Annotated[
         int, typer.Option("--max-plan-revisions", min=0, max=10)
     ] = 0,
+    max_evidence_resolution_cycles: Annotated[
+        int, typer.Option("--max-evidence-resolution-cycles", min=0, max=3)
+    ] = 0,
+    allow_evidence_source_acquisition: Annotated[
+        bool, typer.Option("--allow-evidence-source-acquisition")
+    ] = False,
     planning_strategy: Annotated[
         str, typer.Option("--planning-strategy")
     ] = "direct",
@@ -1836,6 +1855,8 @@ def resume_scientific_run(
             temperature=temperature,
             max_attempts=max_attempts,
             max_plan_revisions=max_plan_revisions,
+            max_evidence_resolution_cycles=max_evidence_resolution_cycles,
+            allow_evidence_source_acquisition=allow_evidence_source_acquisition,
             planning_strategy=planning_strategy,
         ),
     )
@@ -1850,6 +1871,7 @@ def resume_scientific_run(
         "BLOCKED_SOURCE_CURATION",
         "REVISION_BLOCKED",
         "HIERARCHICAL_PLANNING_BLOCKED",
+        "EVIDENCE_RESOLUTION_BLOCKED",
         "REQUIRES_REPLANNING",
         "FAILED",
     }:

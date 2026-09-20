@@ -26,6 +26,9 @@ from ..models import (
     ApprovalReviewRecord,
     ApprovalVerdict,
     CurationStatus,
+    EvidenceGapResolutionKind,
+    EvidenceResolutionSet,
+    EvidenceResolutionStatus,
     GateVerdict,
     IndependentApprovalReceipt,
     KnowledgeSnapshot,
@@ -40,12 +43,17 @@ from ..models import (
     PlanValidationRecord,
     PlanningStrategy,
     PlanningProposalSet,
+    PlanningEvidenceCyclePolicy,
+    PlanningEvidenceCycleRecord,
+    PlanningEvidenceRequestAttempt,
+    PlanningEvidenceRequestSet,
     ProjectTrustPolicy,
     RevisionApprovalReviewInput,
     RevisionApprovalLLMResponse,
     RevisionIssueStatus,
     ScientificContextPacket,
     ScientificEvidencePacket,
+    ScientificPlanningInput,
     ScientificProblemRun,
     ScientificProblemRunStatus,
     ScientificQuestionPlan,
@@ -64,9 +72,15 @@ from ..planning import (
     MockPlanningProvider,
     PlanMaterializer,
     PlanningContextResolver,
+    PlanningEvidenceError,
     StructuredLLMPlanningProvider,
     automatic_revision_block_reason,
+    augment_scientific_context,
+    build_evidence_resolution_set,
+    build_planning_evidence_request_set,
     build_plan_revision_input,
+    resolve_planning_evidence_requests,
+    retrieval_resolvable_gaps,
 )
 from ..planning.hierarchical import (
     HierarchicalPlanningBlocked,
@@ -121,6 +135,19 @@ class WorkflowResult:
     dry_run_report: dict[str, Any] | None = None
 
 
+class EvidenceResolutionBlocked(ValueError):
+    def __init__(
+        self,
+        category: str,
+        message: str,
+        *,
+        curation_items: tuple[ScientificRunBlockingItem, ...] = (),
+    ) -> None:
+        self.category = category
+        self.curation_items = curation_items
+        super().__init__(message)
+
+
 def _snapshot_hash(snapshot: KnowledgeSnapshot) -> str:
     return content_hash(snapshot.model_dump(mode="json", exclude={"created_at"}))
 
@@ -152,6 +179,56 @@ def _make_revision_chain(payload: dict[str, Any]) -> PlanRevisionChain:
     )
     normalized = draft.model_dump(mode="json", exclude={"content_hash"})
     return PlanRevisionChain(**normalized, content_hash=content_hash(normalized))
+
+
+def _make_evidence_cycle_policy(
+    run_id: str,
+    max_cycles: int,
+    source_acquisition_allowed: bool,
+) -> PlanningEvidenceCyclePolicy:
+    identity = {
+        "run_id": run_id,
+        "max_cycles": max_cycles,
+        "source_acquisition_allowed": source_acquisition_allowed,
+    }
+    policy_id = f"planning-evidence-policy-{content_hash(identity)[:24]}"
+    return PlanningEvidenceCyclePolicy(
+        policy_id=policy_id,
+        **identity,
+        content_hash=content_hash({"policy_id": policy_id, **identity}),
+    )
+
+
+def _make_evidence_cycle_record(
+    payload: dict[str, Any],
+) -> PlanningEvidenceCycleRecord:
+    payload = PlanningEvidenceCycleRecord.model_construct(
+        cycle_id="pending",
+        **payload,
+        content_hash="0" * 64,
+    ).model_dump(mode="json", exclude={"cycle_id", "content_hash"})
+    cycle_id = f"planning-evidence-cycle-{content_hash(payload)[:24]}"
+    return PlanningEvidenceCycleRecord(
+        cycle_id=cycle_id,
+        **payload,
+        content_hash=content_hash({"cycle_id": cycle_id, **payload}),
+    )
+
+
+def _make_evidence_request_attempt(
+    payload: dict[str, Any],
+) -> PlanningEvidenceRequestAttempt:
+    payload = PlanningEvidenceRequestAttempt.model_construct(
+        attempt_id="pending",
+        **payload,
+        content_hash="0" * 64,
+    ).model_dump(mode="json", exclude={"attempt_id", "content_hash"})
+    attempt_id = f"planning-evidence-attempt-{content_hash(payload)[:24]}"
+    return PlanningEvidenceRequestAttempt(
+        attempt_id=attempt_id,
+        **payload,
+        content_hash=content_hash({"attempt_id": attempt_id, **payload}),
+    )
 
 
 def _provider_binding(stage: str, provider: Any) -> ScientificRunProviderBinding:
@@ -218,14 +295,149 @@ class ScientificProblemWorkflow:
         )
 
     @staticmethod
-    def _round_prefix(round_index: int) -> str:
-        return f"plan-revisions/round-{round_index}"
+    def _evidence_policy_path() -> str:
+        return "planning-evidence/policy.yaml"
+
+    @staticmethod
+    def _evidence_cycle_prefix(cycle_index: int) -> str:
+        return f"planning-evidence/cycle-{cycle_index}"
+
+    def _load_evidence_policy(
+        self, run_id: str
+    ) -> PlanningEvidenceCyclePolicy | None:
+        try:
+            return self.runs.load_artifact(
+                run_id,
+                self._evidence_policy_path(),
+                PlanningEvidenceCyclePolicy,
+            )
+        except FileNotFoundError:
+            return None
+
+    def _ensure_evidence_policy(
+        self,
+        run_id: str,
+        max_cycles: int,
+        source_acquisition_allowed: bool,
+    ) -> PlanningEvidenceCyclePolicy | None:
+        persisted = self._load_evidence_policy(run_id)
+        if persisted is not None:
+            if max_cycles not in {0, persisted.max_cycles}:
+                raise ValueError(
+                    "persisted evidence-resolution budget cannot be changed during resume"
+                )
+            if (
+                max_cycles != 0
+                and source_acquisition_allowed
+                != persisted.source_acquisition_allowed
+            ):
+                raise ValueError(
+                    "persisted evidence acquisition policy cannot be changed during resume"
+                )
+            return persisted
+        if max_cycles == 0:
+            return None
+        policy = _make_evidence_cycle_policy(
+            run_id, max_cycles, source_acquisition_allowed
+        )
+        self.runs.write_immutable_artifact(
+            run_id,
+            self._evidence_policy_path(),
+            "planning_evidence_cycle_policy",
+            policy.policy_id,
+            policy,
+        )
+        return policy
+
+    def _load_evidence_cycles(
+        self, run_id: str
+    ) -> tuple[PlanningEvidenceCycleRecord, ...]:
+        root = self.runs.resolve_artifact_path(run_id, "planning-evidence")
+        if not root.exists():
+            return ()
+        records: list[PlanningEvidenceCycleRecord] = []
+        directories = sorted(
+            root.glob("cycle-*"),
+            key=lambda path: int(path.name.removeprefix("cycle-")),
+        )
+        for expected_index, directory in enumerate(directories, start=1):
+            if directory.is_symlink() or directory.name != f"cycle-{expected_index}":
+                raise ValueError("planning evidence cycle indices are not contiguous")
+            cycle_path = directory / "cycle.yaml"
+            if cycle_path.exists():
+                record = self.runs.load_artifact(
+                    run_id,
+                    f"{self._evidence_cycle_prefix(expected_index)}/cycle.yaml",
+                    PlanningEvidenceCycleRecord,
+                )
+                if record.cycle_index != expected_index:
+                    raise ValueError("planning evidence cycle index is invalid")
+                records.append(record)
+        return tuple(records)
+
+    def _evidence_attempt_count(self, run_id: str) -> int:
+        root = self.runs.resolve_artifact_path(run_id, "planning-evidence")
+        if not root.exists():
+            return 0
+        return sum(
+            (directory / "request-attempt.yaml").exists()
+            or (directory / "request-set.yaml").exists()
+            for directory in root.glob("cycle-*")
+            if directory.is_dir() and not directory.is_symlink()
+        )
+
+    def _reuse_evidence_cycle_context(
+        self,
+        run_id: str,
+        base_context: ScientificContextPacket,
+    ) -> ScientificContextPacket:
+        cycles = self._load_evidence_cycles(run_id)
+        if not cycles:
+            return base_context
+        latest = cycles[-1]
+        if latest.child_context_id is None:
+            return base_context
+        if (
+            latest.knowledge_snapshot_id
+            != base_context.knowledge_snapshot.snapshot_id
+            or latest.knowledge_snapshot_hash
+            != _snapshot_hash(base_context.knowledge_snapshot)
+        ):
+            return base_context
+        child = self.runs.load_artifact(
+            run_id,
+            f"{self._evidence_cycle_prefix(latest.cycle_index)}/context.yaml",
+            ScientificContextPacket,
+        )
+        if (
+            child.context_id != latest.child_context_id
+            or child.content_hash != latest.child_context_hash
+        ):
+            raise ValueError("stored planning evidence child context binding is invalid")
+        return child
+
+    def _revision_artifact_root(self, run_id: str) -> str:
+        cycles = self._load_evidence_cycles(run_id)
+        if cycles and cycles[-1].child_context_id is not None:
+            return f"evidence-replan-{cycles[-1].cycle_index}"
+        return "plan-revisions"
+
+    def _hierarchical_root(self, run_id: str) -> str:
+        cycles = self._load_evidence_cycles(run_id)
+        if cycles and cycles[-1].child_context_id is not None:
+            return f"evidence-hierarchy-{cycles[-1].cycle_index}"
+        return "hierarchical-planning"
+
+    def _round_prefix(self, run_id: str, round_index: int) -> str:
+        root = self._revision_artifact_root(run_id)
+        name = f"round-{round_index}" if root == "plan-revisions" else f"r-{round_index}"
+        return f"{root}/{name}"
 
     def _approval_prefix(self, run_id: str) -> str:
         chain = self._load_revision_chain(run_id)
         if chain is None:
             return "approval"
-        return f"{self._round_prefix(chain.rounds[-1].round_index)}/approval"
+        return f"{self._round_prefix(run_id, chain.rounds[-1].round_index)}/approval"
 
     def _load_bound_artifact(self, run_id: str, binding, model_type):
         value = self.runs.load_artifact(run_id, binding.relative_path, model_type)
@@ -249,15 +461,20 @@ class ScientificProblemWorkflow:
             )
         return value
 
-    @staticmethod
-    def _attempt_prefix(attempt_index: int) -> str:
-        return f"plan-revisions/attempts/attempt-{attempt_index}"
+    def _attempt_prefix(self, run_id: str, attempt_index: int) -> str:
+        root = self._revision_artifact_root(run_id)
+        if root == "plan-revisions":
+            return f"{root}/attempts/attempt-{attempt_index}"
+        return f"{root}/a-{attempt_index}"
 
     def _load_revision_attempts(
         self, run_id: str
     ) -> tuple[tuple[PlanRevisionAttemptStart, PlanRevisionAttemptOutcome | None], ...]:
+        root = self._revision_artifact_root(run_id)
+        relative_root = f"{root}/attempts" if root == "plan-revisions" else root
+        name_prefix = "attempt-" if root == "plan-revisions" else "a-"
         attempts_root = self.runs.resolve_artifact_path(
-            run_id, "plan-revisions/attempts"
+            run_id, relative_root
         )
         if not attempts_root.exists():
             return ()
@@ -266,16 +483,16 @@ class ScientificProblemWorkflow:
         ] = []
         for expected_index, directory in enumerate(
             sorted(
-                attempts_root.glob("attempt-*"),
-                key=lambda path: int(path.name.removeprefix("attempt-")),
+                attempts_root.glob(f"{name_prefix}*"),
+                key=lambda path: int(path.name.removeprefix(name_prefix)),
             ),
             start=1,
         ):
-            if directory.is_symlink() or directory.name != f"attempt-{expected_index}":
+            if directory.is_symlink() or directory.name != f"{name_prefix}{expected_index}":
                 raise ValueError("revision attempt indices are not contiguous")
             start = self.runs.load_artifact(
                 run_id,
-                f"{self._attempt_prefix(expected_index)}/start.yaml",
+                f"{self._attempt_prefix(run_id, expected_index)}/start.yaml",
                 PlanRevisionAttemptStart,
             )
             if start.attempt_index != expected_index:
@@ -284,7 +501,7 @@ class ScientificProblemWorkflow:
             outcome = (
                 self.runs.load_artifact(
                     run_id,
-                    f"{self._attempt_prefix(expected_index)}/outcome.yaml",
+                    f"{self._attempt_prefix(run_id, expected_index)}/outcome.yaml",
                     PlanRevisionAttemptOutcome,
                 )
                 if outcome_path.exists()
@@ -383,6 +600,8 @@ class ScientificProblemWorkflow:
         temperature: float = 0.0,
         max_attempts: int = 1,
         max_plan_revisions: int = 0,
+        max_evidence_resolution_cycles: int = 0,
+        allow_evidence_source_acquisition: bool = False,
         planning_strategy: str = "direct",
     ) -> WorkflowResult:
         if not request.strip():
@@ -419,6 +638,8 @@ class ScientificProblemWorkflow:
                 temperature=temperature,
                 max_attempts=max_attempts,
                 max_plan_revisions=max_plan_revisions,
+                max_evidence_resolution_cycles=max_evidence_resolution_cycles,
+                allow_evidence_source_acquisition=allow_evidence_source_acquisition,
                 planning_strategy=planning_strategy,
             )
 
@@ -496,6 +717,8 @@ class ScientificProblemWorkflow:
         temperature: float = 0.0,
         max_attempts: int = 1,
         max_plan_revisions: int = 0,
+        max_evidence_resolution_cycles: int = 0,
+        allow_evidence_source_acquisition: bool = False,
         planning_strategy: str = "direct",
     ) -> WorkflowResult:
         try:
@@ -504,7 +727,22 @@ class ScientificProblemWorkflow:
             raise ValueError("planning_strategy must be 'direct' or 'hierarchical'") from error
         if not 0 <= max_plan_revisions <= 10:
             raise ValueError("max_plan_revisions must be between zero and ten")
+        if not 0 <= max_evidence_resolution_cycles <= 3:
+            raise ValueError(
+                "max_evidence_resolution_cycles must be between zero and three"
+            )
+        evidence_policy = self._ensure_evidence_policy(
+            run.run_id,
+            max_evidence_resolution_cycles,
+            allow_evidence_source_acquisition,
+        )
         revision_chain = self._load_revision_chain(run.run_id)
+        if (
+            revision_chain is not None
+            and run.context_id is not None
+            and run.context_id != revision_chain.context_id
+        ):
+            revision_chain = None
         if revision_chain is not None and revision_chain.termination_reason is not None:
             try:
                 self._validate_revision_chain_integrity(revision_chain)
@@ -540,11 +778,14 @@ class ScientificProblemWorkflow:
         )
         self.runs.save(ready)
         try:
-            context = ScientificContextBuilder(self.domain_loader).build(
+            base_context = ScientificContextBuilder(self.domain_loader).build(
                 ready.original_request,
                 ready.domain,
                 state_dir=self.state_dir,
                 knowledge_dir=self.knowledge_dir,
+            )
+            context = self._reuse_evidence_cycle_context(
+                ready.run_id, base_context
             )
         except (FileNotFoundError, OSError, ValueError) as error:
             return self._fail(ready, "trusted_retrieval", error, retryable=False)
@@ -660,6 +901,27 @@ class ScientificProblemWorkflow:
                 temperature=temperature,
                 max_attempts=max_attempts,
             )
+            if revision_chain is None:
+                while True:
+                    parent_context_id = context.context_id
+                    (
+                        interpreted,
+                        context,
+                        packet,
+                        planning_input,
+                    ) = self._maybe_resolve_planning_evidence(
+                        interpreted,
+                        context,
+                        packet,
+                        planning_input,
+                        repositories,
+                        evidence,
+                        planner,
+                        strategy,
+                        evidence_policy,
+                    )
+                    if context.context_id == parent_context_id:
+                        break
             if revision_chain is not None:
                 if max_plan_revisions not in {0, revision_chain.max_revisions}:
                     raise ValueError(
@@ -680,7 +942,8 @@ class ScientificProblemWorkflow:
                 )
             else:
                 hierarchical_root = self.runs.resolve_artifact_path(
-                    interpreted.run_id, "hierarchical-planning"
+                    interpreted.run_id,
+                    self._hierarchical_root(interpreted.run_id),
                 )
                 if hierarchical_root.exists():
                     strategy = PlanningStrategy.HIERARCHICAL
@@ -709,6 +972,30 @@ class ScientificProblemWorkflow:
                         compilation = ScientificProblemCompiler(
                             planner, evidence_repository=evidence
                         ).compile(planning_input)
+        except EvidenceResolutionBlocked as error:
+            status = (
+                ScientificProblemRunStatus.BLOCKED_SOURCE_CURATION
+                if error.curation_items
+                else ScientificProblemRunStatus.EVIDENCE_RESOLUTION_BLOCKED
+            )
+            blocked = _update_run(
+                interpreted,
+                status=status,
+                last_successful_status=interpreted.status,
+                blocking_items=error.curation_items,
+                failure=(
+                    None
+                    if error.curation_items
+                    else ScientificRunFailure(
+                        stage="planning_evidence_resolution",
+                        category=error.category,
+                        message=_sanitize_failure(error),
+                        retryable=False,
+                    )
+                ),
+            )
+            self.runs.save(blocked)
+            return WorkflowResult(blocked)
         except HierarchicalPlanningBlocked as error:
             blocked = _update_run(
                 interpreted,
@@ -744,7 +1031,7 @@ class ScientificProblemWorkflow:
             validation_bindings = [current_round.validation_record]
         else:
             revision_enabled = max_plan_revisions > 0
-            prefix = self._round_prefix(0) if revision_enabled else ""
+            prefix = self._round_prefix(run.run_id, 0) if revision_enabled else ""
             proposal_path = (
                 f"{prefix}/planning-proposal.yaml"
                 if prefix
@@ -966,7 +1253,7 @@ class ScientificProblemWorkflow:
                 temperature,
                 max_attempts,
                 artifact_prefix=(
-                    f"{self._round_prefix(revision_chain.rounds[-1].round_index)}/approval"
+                    f"{self._round_prefix(run.run_id, revision_chain.rounds[-1].round_index)}/approval"
                     if revision_chain is not None
                     else "approval"
                 ),
@@ -976,6 +1263,85 @@ class ScientificProblemWorkflow:
                 if approved.approval_receipt_id is None:
                     return WorkflowResult(approved)
                 revision_chain = self._record_round_approval(revision_chain, approved)
+        if approved.approval_verdict_id is not None and evidence_policy is not None:
+            approval_prefix = self._approval_prefix(approved.run_id)
+            verdict = self.runs.load_artifact(
+                approved.run_id,
+                f"{approval_prefix}/approval-verdict.yaml",
+                ApprovalVerdict,
+            )
+            if verdict.decision == ApprovalDecision.INSUFFICIENT_EVIDENCE:
+                review = self.runs.load_artifact(
+                    approved.run_id,
+                    f"{approval_prefix}/approval-review.yaml",
+                    ApprovalReviewRecord,
+                )
+                cycle_index = self._evidence_attempt_count(approved.run_id) + 1
+                self._archive_evidence_trigger_artifacts(
+                    approved, cycle_index, approval_prefix
+                )
+                try:
+                    (
+                        evidence_run,
+                        child_context,
+                        _child_packet,
+                        _child_input,
+                    ) = self._maybe_resolve_planning_evidence(
+                        approved,
+                        context,
+                        packet,
+                        planning_input,
+                        repositories,
+                        evidence,
+                        planner,
+                        strategy,
+                        evidence_policy,
+                        triggering_review=review,
+                    )
+                except EvidenceResolutionBlocked as error:
+                    status = (
+                        ScientificProblemRunStatus.BLOCKED_SOURCE_CURATION
+                        if error.curation_items
+                        else ScientificProblemRunStatus.EVIDENCE_RESOLUTION_BLOCKED
+                    )
+                    blocked = _update_run(
+                        approved,
+                        status=status,
+                        last_successful_status=approved.status,
+                        blocking_items=error.curation_items,
+                        failure=(
+                            None
+                            if error.curation_items
+                            else ScientificRunFailure(
+                                stage="planning_evidence_resolution",
+                                category=error.category,
+                                message=_sanitize_failure(error),
+                                retryable=False,
+                            )
+                        ),
+                    )
+                    self.runs.save(blocked)
+                    return WorkflowResult(blocked)
+                if child_context.context_id != context.context_id:
+                    return self._advance(
+                        evidence_run,
+                        dry_run=False,
+                        interpretation_provider=interpretation_provider,
+                        planning_provider=planning_provider,
+                        approval_provider=approval_provider,
+                        selected_candidate_id=None,
+                        llm_endpoint=llm_endpoint,
+                        llm_model=llm_model,
+                        llm_api_key=llm_api_key,
+                        temperature=temperature,
+                        max_attempts=max_attempts,
+                        max_plan_revisions=max_plan_revisions,
+                        max_evidence_resolution_cycles=max_evidence_resolution_cycles,
+                        allow_evidence_source_acquisition=(
+                            allow_evidence_source_acquisition
+                        ),
+                        planning_strategy=strategy.value,
+                    )
         if revision_chain is None:
             return WorkflowResult(approved)
         return WorkflowResult(
@@ -1161,6 +1527,580 @@ class ScientificProblemWorkflow:
         except (FileNotFoundError, OSError, ValueError):
             return None
 
+    def _record_evidence_cycle(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> PlanningEvidenceCycleRecord:
+        record = _make_evidence_cycle_record(payload)
+        self.runs.write_immutable_artifact(
+            run_id,
+            f"{self._evidence_cycle_prefix(record.cycle_index)}/cycle.yaml",
+            "planning_evidence_cycle_record",
+            record.cycle_id,
+            record,
+        )
+        return record
+
+    def _archive_evidence_trigger_artifacts(
+        self,
+        run: ScientificProblemRun,
+        cycle_index: int,
+        approval_prefix: str,
+    ) -> None:
+        prefix = f"{self._evidence_cycle_prefix(cycle_index)}/trigger"
+        planning_input = self.runs.load_artifact(
+            run.run_id, "planning-input.yaml", ScientificPlanningInput
+        )
+        self.runs.write_immutable_artifact(
+            run.run_id,
+            f"{prefix}/planning-input.yaml",
+            "scientific_planning_input",
+            planning_input.planning_input_id,
+            planning_input,
+        )
+        chain = self._load_revision_chain(run.run_id)
+        proposal_path = (
+            chain.rounds[-1].planning_proposal.relative_path
+            if chain is not None
+            else "planning-proposal.yaml"
+        )
+        proposal = self.runs.load_artifact(
+            run.run_id, proposal_path, PlanningProposalSet
+        )
+        self.runs.write_immutable_artifact(
+            run.run_id,
+            f"{prefix}/planning-proposal.yaml",
+            "planning_proposal_set",
+            proposal.proposal_id,
+            proposal,
+        )
+        approval_models = (
+            (
+                "approval-review.yaml",
+                "approval_review_record",
+                ApprovalReviewRecord,
+                "review_id",
+            ),
+            (
+                "approval-verdict.yaml",
+                "approval_verdict",
+                ApprovalVerdict,
+                "verdict_id",
+            ),
+            (
+                "independent-approval-receipt.yaml",
+                "independent_approval_receipt",
+                IndependentApprovalReceipt,
+                "receipt_id",
+            ),
+            ("plan-gate.yaml", "gate_verdict", GateVerdict, "gate_id"),
+        )
+        for filename, artifact_type, model_type, id_field in approval_models:
+            value = self.runs.load_artifact(
+                run.run_id, f"{approval_prefix}/{filename}", model_type
+            )
+            self.runs.write_immutable_artifact(
+                run.run_id,
+                f"{prefix}/{filename}",
+                artifact_type,
+                getattr(value, id_field),
+                value,
+            )
+
+    def _maybe_resolve_planning_evidence(
+        self,
+        run: ScientificProblemRun,
+        context: ScientificContextPacket,
+        packet: ScientificEvidencePacket,
+        planning_input: ScientificPlanningInput,
+        repositories: KnowledgeRepositories,
+        evidence: CompositeEvidenceStore,
+        planner: Any,
+        strategy: PlanningStrategy,
+        policy: PlanningEvidenceCyclePolicy | None,
+        triggering_review: ApprovalReviewRecord | None = None,
+    ) -> tuple[
+        ScientificProblemRun,
+        ScientificContextPacket,
+        ScientificEvidencePacket,
+        ScientificPlanningInput,
+    ]:
+        if policy is None:
+            return run, context, packet, planning_input
+        completed = self._load_evidence_cycles(run.run_id)
+        if completed:
+            latest = completed[-1]
+            same_snapshot = (
+                latest.knowledge_snapshot_id == context.knowledge_snapshot.snapshot_id
+                and latest.knowledge_snapshot_hash
+                == _snapshot_hash(context.knowledge_snapshot)
+            )
+            if same_snapshot and latest.terminal_reason is not None:
+                raise EvidenceResolutionBlocked(
+                    "EVIDENCE_RESOLUTION_TERMINATED",
+                    latest.terminal_reason,
+                )
+        blocking_gaps = tuple(gap for gap in planning_input.evidence_gaps if gap.blocking)
+        if not blocking_gaps and triggering_review is None:
+            return run, context, packet, planning_input
+        attempt_count = self._evidence_attempt_count(run.run_id)
+        if attempt_count:
+            previous_prefix = self._evidence_cycle_prefix(attempt_count)
+            previous_attempt = self.runs.resolve_artifact_path(
+                run.run_id, f"{previous_prefix}/request-attempt.yaml"
+            )
+            previous_request = self.runs.resolve_artifact_path(
+                run.run_id, f"{previous_prefix}/request-set.yaml"
+            )
+            previous_resolution = self.runs.resolve_artifact_path(
+                run.run_id, f"{previous_prefix}/resolutions.yaml"
+            )
+            if previous_attempt.exists() and not previous_request.exists():
+                raise EvidenceResolutionBlocked(
+                    "EVIDENCE_REQUEST_OUTCOME_UNCERTAIN",
+                    "an evidence-request provider call was claimed without a complete request set",
+                )
+            if previous_request.exists() and not previous_resolution.exists():
+                raise EvidenceResolutionBlocked(
+                    "EVIDENCE_RETRIEVAL_OUTCOME_UNCERTAIN",
+                    "evidence retrieval was started but no complete resolution was saved",
+                )
+        cycle_index = attempt_count + 1
+        if cycle_index > policy.max_cycles:
+            raise EvidenceResolutionBlocked(
+                "EVIDENCE_RESOLUTION_BUDGET_EXHAUSTED",
+                "planning evidence-resolution cycle budget is exhausted",
+            )
+        prefix = self._evidence_cycle_prefix(cycle_index)
+        request_path = self.runs.resolve_artifact_path(
+            run.run_id, f"{prefix}/request-set.yaml"
+        )
+        attempt_path = self.runs.resolve_artifact_path(
+            run.run_id, f"{prefix}/request-attempt.yaml"
+        )
+        resolution_path = self.runs.resolve_artifact_path(
+            run.run_id, f"{prefix}/resolutions.yaml"
+        )
+        direction_set = None
+        provider_block_reason: str | None = None
+        if request_path.exists():
+            request_set = self.runs.load_artifact(
+                run.run_id,
+                f"{prefix}/request-set.yaml",
+                PlanningEvidenceRequestSet,
+            )
+            if not resolution_path.exists():
+                raise EvidenceResolutionBlocked(
+                    "EVIDENCE_RETRIEVAL_OUTCOME_UNCERTAIN",
+                    "evidence retrieval was started but no complete resolution was saved",
+                )
+            resolutions = self.runs.load_artifact(
+                run.run_id,
+                f"{prefix}/resolutions.yaml",
+                EvidenceResolutionSet,
+            )
+        else:
+            if attempt_path.exists():
+                raise EvidenceResolutionBlocked(
+                    "EVIDENCE_REQUEST_OUTCOME_UNCERTAIN",
+                    "an evidence-request provider call was claimed without a complete request set",
+                )
+            provider_binding = _provider_binding("planning_evidence_request", planner)
+            attempt = _make_evidence_request_attempt(
+                {
+                    "run_id": run.run_id,
+                    "cycle_index": cycle_index,
+                    "planning_input_id": planning_input.planning_input_id,
+                    "planning_input_hash": planning_input.content_hash,
+                    "context_id": context.context_id,
+                    "context_hash": context.content_hash,
+                    "provider_id": planner.provider_id,
+                    "provider_version": planner.provider_version,
+                    "provider_config_hash": provider_binding.configuration_hash,
+                    "triggering_review_id": (
+                        triggering_review.review_id if triggering_review else None
+                    ),
+                    "triggering_review_hash": (
+                        triggering_review.content_hash if triggering_review else None
+                    ),
+                }
+            )
+            try:
+                self.runs.write_exclusive_artifact(
+                    run.run_id,
+                    f"{prefix}/request-attempt.yaml",
+                    "planning_evidence_request_attempt",
+                    attempt.attempt_id,
+                    attempt,
+                )
+            except FileExistsError as error:
+                raise EvidenceResolutionBlocked(
+                    "EVIDENCE_REQUEST_OUTCOME_UNCERTAIN",
+                    "another process already claimed this evidence-request cycle",
+                ) from error
+            if strategy == PlanningStrategy.HIERARCHICAL and triggering_review is None:
+                method = getattr(planner, "propose_directions", None)
+                if not callable(method):
+                    raise EvidenceResolutionBlocked(
+                        "EVIDENCE_DIRECTION_CONTEXT_UNAVAILABLE",
+                        "hierarchical provider cannot propose trigger directions",
+                    )
+                direction_set = build_research_direction_set(
+                    planning_input, method(planning_input), planner
+                )
+                report = validate_research_direction_set(
+                    direction_set, planning_input
+                )
+                if not report.valid:
+                    raise EvidenceResolutionBlocked(
+                        "EVIDENCE_DIRECTION_CONTEXT_INVALID",
+                        ", ".join(item.code for item in report.issues),
+                    )
+                self.runs.write_immutable_artifact(
+                    run.run_id,
+                    f"{prefix}/trigger-directions.yaml",
+                    "research_direction_set",
+                    direction_set.direction_set_id,
+                    direction_set,
+                )
+            retrievable = retrieval_resolvable_gaps(planning_input)
+            response = None
+            if triggering_review is not None or (
+                retrievable and len(retrievable) == len(blocking_gaps)
+            ):
+                method = getattr(planner, "propose_evidence_requests", None)
+                if not callable(method):
+                    raise EvidenceResolutionBlocked(
+                        "EVIDENCE_REQUEST_PROVIDER_UNAVAILABLE",
+                        "planning provider cannot produce bounded evidence requests",
+                    )
+                try:
+                    response = (
+                        method(planning_input, triggering_review)
+                        if triggering_review is not None
+                        else method(planning_input)
+                    )
+                except (PlanningEvidenceError, ValueError) as error:
+                    provider_block_reason = str(error)
+            request_set = build_planning_evidence_request_set(
+                planning_input,
+                response,
+                planner,
+                planning_strategy=strategy,
+                knowledge_snapshot_hash=_snapshot_hash(
+                    context.knowledge_snapshot
+                ),
+                source_acquisition_allowed=policy.source_acquisition_allowed,
+                direction_set=direction_set,
+                triggering_review_id=(
+                    triggering_review.review_id if triggering_review else None
+                ),
+                triggering_review_hash=(
+                    triggering_review.content_hash if triggering_review else None
+                ),
+            )
+            for prior in completed:
+                if prior.knowledge_snapshot_id != request_set.knowledge_snapshot_id:
+                    continue
+                prior_requests = self.runs.load_artifact(
+                    run.run_id,
+                    f"{self._evidence_cycle_prefix(prior.cycle_index)}/request-set.yaml",
+                    PlanningEvidenceRequestSet,
+                )
+                if tuple(item.request_id for item in prior_requests.requests) == tuple(
+                    item.request_id for item in request_set.requests
+                ):
+                    raise EvidenceResolutionBlocked(
+                        "EQUIVALENT_EVIDENCE_REQUEST_REPEATED",
+                        "an equivalent request already ran against this knowledge snapshot",
+                    )
+            self.runs.write_exclusive_artifact(
+                run.run_id,
+                f"{prefix}/request-set.yaml",
+                "planning_evidence_request_set",
+                request_set.request_set_id,
+                request_set,
+            )
+            nonretrieval = tuple(
+                item
+                for item in request_set.gap_classifications
+                if item.resolution_kind
+                != EvidenceGapResolutionKind.RETRIEVAL_RESOLVABLE
+            )
+            if nonretrieval or provider_block_reason is not None:
+                resolutions = build_evidence_resolution_set(request_set)
+            else:
+                pack = self.domain_loader.load(run.domain)
+                resolutions = resolve_planning_evidence_requests(
+                    request_set,
+                    repositories,
+                    evidence,
+                    pack.profile,
+                    context.knowledge_snapshot,
+                )
+            self.runs.write_immutable_artifact(
+                run.run_id,
+                f"{prefix}/resolutions.yaml",
+                "evidence_resolution_set",
+                resolutions.resolution_set_id,
+                resolutions,
+            )
+            for acquisition in resolutions.acquisition_proposals:
+                self.runs.write_immutable_artifact(
+                    run.run_id,
+                    f"{prefix}/acquisition/{acquisition.proposal_id}.yaml",
+                    "evidence_acquisition_proposal",
+                    acquisition.proposal_id,
+                    acquisition,
+                )
+        nonretrieval = tuple(
+            item
+            for item in request_set.gap_classifications
+            if item.resolution_kind
+            != EvidenceGapResolutionKind.RETRIEVAL_RESOLVABLE
+        )
+        terminal_reason = None
+        if (
+            provider_block_reason is None
+            and triggering_review is not None
+            and not request_set.requests
+        ):
+            provider_block_reason = (
+                "the triggering review does not identify a retrieval-resolvable source gap"
+            )
+        if provider_block_reason is not None:
+            terminal_reason = provider_block_reason
+            category = "NOT_RETRIEVAL_RESOLVABLE"
+            curation_items = ()
+        elif nonretrieval:
+            human = tuple(
+                item
+                for item in nonretrieval
+                if item.resolution_kind
+                == EvidenceGapResolutionKind.HUMAN_DECISION_REQUIRED
+            )
+            terminal_reason = "; ".join(
+                f"{item.gap_id}:{item.resolution_kind.value}:{item.rationale}"
+                for item in nonretrieval
+            )
+            category = (
+                "HUMAN_DECISION_REQUIRED"
+                if human
+                else "NOT_RETRIEVAL_RESOLVABLE"
+            )
+        else:
+            curation_records = tuple(
+                record
+                for record in resolutions.records
+                if record.status
+                == EvidenceResolutionStatus.REQUIRES_SOURCE_CURATION
+            )
+            if curation_records:
+                curation_items = tuple(
+                    ScientificRunBlockingItem(
+                        target_type=hit.source_type.value,
+                        target_id=hit.record_id,
+                        current_status=hit.curation_status,
+                        message=(
+                            f"{hit.source_type.value} {hit.record_id} requires "
+                            "ACCEPTED curation before planning use"
+                        ),
+                    )
+                    for record in curation_records
+                    for hit in record.matched_hits
+                )
+                terminal_reason = "matching evidence requires source curation"
+                category = "REQUIRES_SOURCE_CURATION"
+            else:
+                curation_items = ()
+                no_matches = tuple(
+                    record
+                    for record in resolutions.records
+                    if record.status == EvidenceResolutionStatus.NO_MATCH
+                )
+                if no_matches:
+                    terminal_reason = "; ".join(
+                        record.resolution_rationale for record in no_matches
+                    )
+                    category = "NO_TRUSTED_MATCH"
+        if terminal_reason is not None:
+            cycle = self._record_evidence_cycle(
+                run.run_id,
+                {
+                    "cycle_index": cycle_index,
+                    "parent_context_id": context.context_id,
+                    "parent_context_hash": context.content_hash,
+                    "parent_planning_input_id": planning_input.planning_input_id,
+                    "parent_planning_input_hash": planning_input.content_hash,
+                    "request_set_id": request_set.request_set_id,
+                    "request_set_hash": request_set.content_hash,
+                    "resolution_set_id": resolutions.resolution_set_id,
+                    "resolution_set_hash": resolutions.content_hash,
+                    "knowledge_snapshot_id": context.knowledge_snapshot.snapshot_id,
+                    "knowledge_snapshot_hash": _snapshot_hash(
+                        context.knowledge_snapshot
+                    ),
+                    "terminal_reason": terminal_reason,
+                },
+            )
+            del cycle
+            raise EvidenceResolutionBlocked(
+                category,
+                terminal_reason,
+                curation_items=(
+                    curation_items if category == "REQUIRES_SOURCE_CURATION" else ()
+                ),
+            )
+        existing_hit_ids = {
+            hit.hit_id
+            for hits in (
+                context.literature_knowledge_hits,
+                context.expert_opinion_hits,
+                context.expert_case_hits,
+                context.graph_expanded_hits,
+            )
+            for hit in hits
+        }
+        new_hit_ids = {
+            hit.hit_id
+            for record in resolutions.records
+            for hit in record.matched_hits
+            if hit.authority_status == "trusted_current"
+        } - existing_hit_ids
+        if not new_hit_ids:
+            terminal_reason = (
+                "trusted retrieval returned no new evidence beyond the current planning context"
+            )
+            self._record_evidence_cycle(
+                run.run_id,
+                {
+                    "cycle_index": cycle_index,
+                    "parent_context_id": context.context_id,
+                    "parent_context_hash": context.content_hash,
+                    "parent_planning_input_id": planning_input.planning_input_id,
+                    "parent_planning_input_hash": planning_input.content_hash,
+                    "request_set_id": request_set.request_set_id,
+                    "request_set_hash": request_set.content_hash,
+                    "resolution_set_id": resolutions.resolution_set_id,
+                    "resolution_set_hash": resolutions.content_hash,
+                    "knowledge_snapshot_id": context.knowledge_snapshot.snapshot_id,
+                    "knowledge_snapshot_hash": _snapshot_hash(
+                        context.knowledge_snapshot
+                    ),
+                    "terminal_reason": terminal_reason,
+                },
+            )
+            raise EvidenceResolutionBlocked(
+                "NO_NEW_TRUSTED_EVIDENCE", terminal_reason
+            )
+        child_context = augment_scientific_context(context, resolutions, evidence)
+        interpretation = MockInterpretationProvider()
+        child_packet = ScientificEvidencePacketBuilder(interpretation).build(
+            child_context, evidence
+        )
+        child_input = PlanningContextResolver(self.domain_loader).resolve(
+            child_context,
+            child_packet,
+            repositories,
+            evidence,
+        )
+        for filename, artifact_type, artifact_id, value in (
+            (
+                "context.yaml",
+                "scientific_context_packet",
+                child_context.context_id,
+                child_context,
+            ),
+            (
+                "evidence-packet.yaml",
+                "scientific_evidence_packet",
+                child_packet.packet_id,
+                child_packet,
+            ),
+            (
+                "planning-input.yaml",
+                "scientific_planning_input",
+                child_input.planning_input_id,
+                child_input,
+            ),
+        ):
+            self.runs.write_immutable_artifact(
+                run.run_id,
+                f"{prefix}/{filename}",
+                artifact_type,
+                artifact_id,
+                value,
+            )
+        self._record_evidence_cycle(
+            run.run_id,
+            {
+                "cycle_index": cycle_index,
+                "parent_context_id": context.context_id,
+                "parent_context_hash": context.content_hash,
+                "parent_planning_input_id": planning_input.planning_input_id,
+                "parent_planning_input_hash": planning_input.content_hash,
+                "request_set_id": request_set.request_set_id,
+                "request_set_hash": request_set.content_hash,
+                "resolution_set_id": resolutions.resolution_set_id,
+                "resolution_set_hash": resolutions.content_hash,
+                "knowledge_snapshot_id": context.knowledge_snapshot.snapshot_id,
+                "knowledge_snapshot_hash": _snapshot_hash(context.knowledge_snapshot),
+                "child_context_id": child_context.context_id,
+                "child_context_hash": child_context.content_hash,
+                "child_evidence_packet_id": child_packet.packet_id,
+                "child_evidence_packet_hash": child_packet.content_hash,
+                "child_planning_input_id": child_input.planning_input_id,
+                "child_planning_input_hash": child_input.content_hash,
+            },
+        )
+        self.runs.write_artifact(
+            run.run_id,
+            "context.yaml",
+            "scientific_context_packet",
+            child_context.context_id,
+            child_context,
+        )
+        self.runs.write_artifact(
+            run.run_id,
+            "evidence-packet.yaml",
+            "scientific_evidence_packet",
+            child_packet.packet_id,
+            child_packet,
+        )
+        updated = _update_run(
+            run,
+            status=ScientificProblemRunStatus.INTERPRETED,
+            knowledge_snapshot_id=child_context.knowledge_snapshot.snapshot_id,
+            knowledge_snapshot_hash=_snapshot_hash(child_context.knowledge_snapshot),
+            retrieval_context_id=child_context.retrieval_manifest.retrieval_id,
+            retrieval_context_hash=content_hash(child_context.retrieval_manifest),
+            context_id=child_context.context_id,
+            context_hash=child_context.content_hash,
+            evidence_packet_id=child_packet.packet_id,
+            evidence_packet_hash=child_packet.content_hash,
+            planning_input_id=None,
+            planning_input_hash=None,
+            planning_proposal_id=None,
+            planning_proposal_hash=None,
+            candidate_plans=(),
+            candidate_compilation_receipts=(),
+            plan_validation_records=(),
+            selected_candidate_id=None,
+            approval_review_id=None,
+            approval_review_hash=None,
+            approval_verdict_id=None,
+            approval_verdict_hash=None,
+            approval_receipt_id=None,
+            approval_receipt_hash=None,
+            gate_id=None,
+            gate_hash=None,
+            export_path=None,
+            export_hash=None,
+        )
+        self.runs.save(updated)
+        return updated, child_context, child_packet, child_input
+
     def _hierarchical_compilation(
         self,
         run: ScientificProblemRun,
@@ -1168,7 +2108,7 @@ class ScientificProblemWorkflow:
         evidence,
         planner,
     ) -> CompilationResult:
-        root = "hierarchical-planning"
+        root = self._hierarchical_root(run.run_id)
 
         def existing(path: str) -> bool:
             return self.runs.resolve_artifact_path(run.run_id, path).exists()
@@ -1386,7 +2326,7 @@ class ScientificProblemWorkflow:
         run: ScientificProblemRun,
     ) -> PlanRevisionChain:
         current = chain.rounds[-1]
-        prefix = f"{self._round_prefix(current.round_index)}/approval"
+        prefix = f"{self._round_prefix(chain.run_id, current.round_index)}/approval"
         values = (
             (
                 "approval-review-input.yaml",
@@ -1627,7 +2567,7 @@ class ScientificProblemWorkflow:
                 )
                 self.runs.write_immutable_artifact(
                     current_run.run_id,
-                    f"{self._attempt_prefix(start.attempt_index)}/outcome.yaml",
+                    f"{self._attempt_prefix(run.run_id, start.attempt_index)}/outcome.yaml",
                     "plan_revision_attempt_outcome",
                     start.attempt_id,
                     outcome,
@@ -1699,7 +2639,7 @@ class ScientificProblemWorkflow:
                     carried_feedback=carried_feedback,
                 )
                 round_index = revision_input.revision_index
-                prefix = self._round_prefix(round_index)
+                prefix = self._round_prefix(current_run.run_id, round_index)
                 input_binding = self.runs.write_immutable_artifact(
                     current_run.run_id,
                     f"{prefix}/revision-input.yaml",
@@ -1732,7 +2672,7 @@ class ScientificProblemWorkflow:
                 )
                 self.runs.write_exclusive_artifact(
                     current_run.run_id,
-                    f"{self._attempt_prefix(attempt_index)}/start.yaml",
+                    f"{self._attempt_prefix(current_run.run_id, attempt_index)}/start.yaml",
                     "plan_revision_attempt_start",
                     attempt.attempt_id,
                     attempt,
@@ -1759,7 +2699,7 @@ class ScientificProblemWorkflow:
                     )
                     self.runs.write_immutable_artifact(
                         current_run.run_id,
-                        f"{self._attempt_prefix(attempt.attempt_index)}/outcome.yaml",
+                        f"{self._attempt_prefix(current_run.run_id, attempt.attempt_index)}/outcome.yaml",
                         "plan_revision_attempt_outcome",
                         attempt.attempt_id,
                         outcome,
@@ -1877,7 +2817,7 @@ class ScientificProblemWorkflow:
             )
             self.runs.write_immutable_artifact(
                 current_run.run_id,
-                f"{self._attempt_prefix(attempt.attempt_index)}/outcome.yaml",
+                f"{self._attempt_prefix(current_run.run_id, attempt.attempt_index)}/outcome.yaml",
                 "plan_revision_attempt_outcome",
                 attempt.attempt_id,
                 outcome,
@@ -2296,6 +3236,7 @@ def scientific_run_status(
     evidence_gaps: list[dict[str, Any]] = []
     revision_state: dict[str, Any] | None = None
     hierarchical_state: dict[str, Any] | None = None
+    evidence_resolution_state: dict[str, Any] | None = None
     revision_chain: PlanRevisionChain | None = None
     if repository is not None:
         try:
@@ -2308,34 +3249,52 @@ def scientific_run_status(
             revision_chain = None
     if revision_chain is not None:
         attempt_states: list[dict[str, object]] = []
+        run_root = repository.run_dir(run.run_id)
+        evidence_replan_roots = sorted(
+            run_root.glob("evidence-replan-*"),
+            key=lambda path: int(path.name.removeprefix("evidence-replan-")),
+        )
+        revision_root = (
+            evidence_replan_roots[-1].name
+            if evidence_replan_roots
+            and revision_chain.context_id == run.context_id
+            else "plan-revisions"
+        )
+        attempts_relative_root = (
+            f"{revision_root}/attempts"
+            if revision_root == "plan-revisions"
+            else revision_root
+        )
+        attempt_name_prefix = (
+            "attempt-" if revision_root == "plan-revisions" else "a-"
+        )
         attempts_root = repository.resolve_artifact_path(
-            run.run_id, "plan-revisions/attempts"
+            run.run_id, attempts_relative_root
         )
         if attempts_root.exists():
             attempt_directories = sorted(
-                attempts_root.glob("attempt-*"),
-                key=lambda path: int(path.name.removeprefix("attempt-")),
+                attempts_root.glob(f"{attempt_name_prefix}*"),
+                key=lambda path: int(path.name.removeprefix(attempt_name_prefix)),
             )
             for expected_index, directory in enumerate(
                 attempt_directories, start=1
             ):
                 if directory.is_symlink() or directory.name != (
-                    f"attempt-{expected_index}"
+                    f"{attempt_name_prefix}{expected_index}"
                 ):
                     raise ValueError("revision attempt indices are not contiguous")
                 start = repository.load_artifact(
                     run.run_id,
-                    f"plan-revisions/attempts/attempt-{expected_index}/start.yaml",
+                    f"{attempts_relative_root}/{attempt_name_prefix}{expected_index}"
+                    "/start.yaml",
                     PlanRevisionAttemptStart,
                 )
                 outcome_path = directory / "outcome.yaml"
                 outcome = (
                     repository.load_artifact(
                         run.run_id,
-                        (
-                            "plan-revisions/attempts/"
-                            f"attempt-{expected_index}/outcome.yaml"
-                        ),
+                        f"{attempts_relative_root}/{attempt_name_prefix}{expected_index}"
+                        "/outcome.yaml",
                         PlanRevisionAttemptOutcome,
                     )
                     if outcome_path.exists()
@@ -2369,25 +3328,121 @@ def scientific_run_status(
             ],
         }
     if repository is not None:
+        policy_path = repository.resolve_artifact_path(
+            run.run_id, "planning-evidence/policy.yaml"
+        )
+        if policy_path.exists():
+            policy = repository.load_artifact(
+                run.run_id,
+                "planning-evidence/policy.yaml",
+                PlanningEvidenceCyclePolicy,
+            )
+            requests_generated = 0
+            status_counts = {
+                status: 0
+                for status in EvidenceResolutionStatus
+            }
+            unresolved_requests: list[str] = []
+            cycle_index = 1
+            while True:
+                attempt_path = repository.resolve_artifact_path(
+                    run.run_id,
+                    f"planning-evidence/cycle-{cycle_index}/request-attempt.yaml",
+                )
+                request_path = repository.resolve_artifact_path(
+                    run.run_id,
+                    f"planning-evidence/cycle-{cycle_index}/request-set.yaml",
+                )
+                if not attempt_path.exists() and not request_path.exists():
+                    break
+                if not request_path.exists():
+                    attempt = repository.load_artifact(
+                        run.run_id,
+                        f"planning-evidence/cycle-{cycle_index}/request-attempt.yaml",
+                        PlanningEvidenceRequestAttempt,
+                    )
+                    unresolved_requests.append(attempt.attempt_id)
+                    cycle_index += 1
+                    continue
+                request_set = repository.load_artifact(
+                    run.run_id,
+                    f"planning-evidence/cycle-{cycle_index}/request-set.yaml",
+                    PlanningEvidenceRequestSet,
+                )
+                requests_generated += len(request_set.requests)
+                resolution_path = repository.resolve_artifact_path(
+                    run.run_id,
+                    f"planning-evidence/cycle-{cycle_index}/resolutions.yaml",
+                )
+                if resolution_path.exists():
+                    resolutions = repository.load_artifact(
+                        run.run_id,
+                        f"planning-evidence/cycle-{cycle_index}/resolutions.yaml",
+                        EvidenceResolutionSet,
+                    )
+                    for item in resolutions.records:
+                        status_counts[item.status] += 1
+                        if item.status != EvidenceResolutionStatus.RESOLVED_TRUSTED:
+                            unresolved_requests.append(item.request_id)
+                else:
+                    unresolved_requests.extend(
+                        item.request_id for item in request_set.requests
+                    )
+                cycle_index += 1
+            evidence_resolution_state = {
+                "max_cycles": policy.max_cycles,
+                "cycles_used": cycle_index - 1,
+                "requests_generated": requests_generated,
+                "trusted_matches": status_counts[
+                    EvidenceResolutionStatus.RESOLVED_TRUSTED
+                ],
+                "conflicting_matches": status_counts[
+                    EvidenceResolutionStatus.CONFLICTING_EVIDENCE
+                ],
+                "no_matches": status_counts[EvidenceResolutionStatus.NO_MATCH],
+                "curation_required": status_counts[
+                    EvidenceResolutionStatus.REQUIRES_SOURCE_CURATION
+                ],
+                "unresolved_requests": sorted(set(unresolved_requests)),
+            }
+        hierarchy_roots = ["hierarchical-planning"]
+        run_root = repository.run_dir(run.run_id)
+        hierarchy_roots.extend(
+            path.name
+            for path in sorted(
+                run_root.glob("evidence-hierarchy-*"),
+                key=lambda path: int(path.name.removeprefix("evidence-hierarchy-")),
+            )
+        )
+        hierarchy_root = next(
+            (
+                root
+                for root in reversed(hierarchy_roots)
+                if repository.resolve_artifact_path(
+                    run.run_id, f"{root}/directions.yaml"
+                ).exists()
+            ),
+            hierarchy_roots[0],
+        )
         directions_path = repository.resolve_artifact_path(
-            run.run_id, "hierarchical-planning/directions.yaml"
+            run.run_id, f"{hierarchy_root}/directions.yaml"
         )
         triage_path = repository.resolve_artifact_path(
-            run.run_id, "hierarchical-planning/triage.yaml"
+            run.run_id, f"{hierarchy_root}/triage.yaml"
         )
         expansion_path = repository.resolve_artifact_path(
-            run.run_id, "hierarchical-planning/expansion.yaml"
+            run.run_id, f"{hierarchy_root}/expansion.yaml"
         )
         if directions_path.exists():
             directions = repository.load_artifact(
                 run.run_id,
-                "hierarchical-planning/directions.yaml",
+                f"{hierarchy_root}/directions.yaml",
                 ResearchDirectionSet,
             )
             triage = (
                 repository.load_artifact(
                     run.run_id,
-                    "hierarchical-planning/triage.yaml",
+                    f"{hierarchy_root}/triage.yaml",
                     DirectionTriageRecord,
                 )
                 if triage_path.exists()
@@ -2396,7 +3451,7 @@ def scientific_run_status(
             expansion = (
                 repository.load_artifact(
                     run.run_id,
-                    "hierarchical-planning/expansion.yaml",
+                    f"{hierarchy_root}/expansion.yaml",
                     HierarchicalPlanningExpansion,
                 )
                 if expansion_path.exists()
@@ -2458,6 +3513,7 @@ def scientific_run_status(
         "approval_state": run.approval_verdict_id,
         "revision_state": revision_state,
         "hierarchical_planning": hierarchical_state,
+        "evidence_resolution": evidence_resolution_state,
         "export_state": run.export_path,
         "failure": run.failure.model_dump(mode="json") if run.failure else None,
     }
