@@ -30,6 +30,7 @@ from ..models import (
     UnknownRecord,
 )
 from ..serialization import content_hash
+from .identity import derive_candidate_task_id
 
 MATERIALIZER_VERSION = "plan-materializer-1.2.0"
 
@@ -333,12 +334,9 @@ class PlanMaterializer:
         )
 
         task_ids = {
-            task.task_key: _entity_id(
-                "task",
-                {
-                    "candidate_key": candidate.candidate_key,
-                    **task.model_dump(mode="json"),
-                },
+            task.task_key: derive_candidate_task_id(
+                candidate.candidate_key,
+                task.model_dump(mode="json"),
             )
             for task in candidate.task_drafts
         }

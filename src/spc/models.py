@@ -3751,6 +3751,18 @@ class PlanningStrategyClass(StrEnum):
     EVIDENCE_GAP_RESOLUTION = "evidence_gap_resolution"
 
 
+class PlanningStrategy(StrEnum):
+    DIRECT = "direct"
+    HIERARCHICAL = "hierarchical"
+
+
+class DirectionDisposition(StrEnum):
+    RETAIN = "retain"
+    DEFER = "defer"
+    EXCLUDE = "exclude"
+    REQUIRES_HUMAN_CHOICE = "requires_human_choice"
+
+
 class ScientificPlanningInput(StrictModel):
     planning_input_id: NonBlankStr
     original_request: NonBlankStr
@@ -3937,6 +3949,226 @@ class PlanningLLMResponse(StrictModel):
     intent: IntentInterpretation
     ambiguity_assessment: AmbiguityAssessment
     candidates: tuple[CandidatePlanDraft, ...] = Field(min_length=1, max_length=4)
+
+
+class ResearchDirectionProposal(StrictModel):
+    direction_key: NonBlankStr
+    scientific_question: NonBlankStr
+    hypothesis_or_claim_to_test: NonBlankStr
+    competing_explanations: tuple[NonBlankStr, ...] = Field(min_length=1)
+    distinguishing_observation: NonBlankStr
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    claim_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    capability_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    conflict_refs: tuple[NonBlankStr, ...] = ()
+    assumptions: tuple[NonBlankStr, ...] = ()
+    blocking_gaps: tuple[NonBlankStr, ...] = ()
+    limitations: tuple[NonBlankStr, ...] = ()
+    rationale: NonBlankStr
+
+
+class ResearchDirectionLLMResponse(StrictModel):
+    directions: tuple[ResearchDirectionProposal, ...] = Field(min_length=1, max_length=6)
+
+
+class ResearchDirection(ResearchDirectionProposal):
+    direction_id: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ResearchDirection:
+        from .serialization import content_hash
+
+        payload = self.model_dump(
+            mode="json", exclude={"direction_id", "content_hash"}
+        )
+        expected = f"research-direction-{content_hash(payload)[:24]}"
+        if self.direction_id != expected:
+            raise ValueError("ResearchDirection direction_id is not content-bound")
+        if self.content_hash != content_hash({"direction_id": expected, **payload}):
+            raise ValueError("ResearchDirection content_hash is invalid")
+        return self
+
+
+class ResearchDirectionSet(StrictModel):
+    direction_set_id: NonBlankStr
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    domain_pack_version: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    knowledge_snapshot_id: NonBlankStr
+    retrieval_id: NonBlankStr
+    strategy_version: NonBlankStr
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict
+    directions: tuple[ResearchDirection, ...] = Field(min_length=1, max_length=6)
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> ResearchDirectionSet:
+        from .serialization import content_hash
+
+        keys = tuple(item.direction_key for item in self.directions)
+        if len(set(keys)) != len(keys):
+            raise ValueError("research direction keys must be unique")
+        identity = self.model_dump(
+            mode="json", exclude={"direction_set_id", "content_hash"}
+        )
+        expected = f"research-direction-set-{content_hash(identity)[:24]}"
+        if self.direction_set_id != expected:
+            raise ValueError("ResearchDirectionSet direction_set_id is not content-bound")
+        payload = {"direction_set_id": expected, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("ResearchDirectionSet content_hash is invalid")
+        return self
+
+
+class DirectionTriageProposal(StrictModel):
+    direction_key: NonBlankStr
+    disposition: DirectionDisposition
+    reason: NonBlankStr
+
+
+class DirectionTriageLLMResponse(StrictModel):
+    dispositions: tuple[DirectionTriageProposal, ...] = Field(min_length=1, max_length=6)
+
+
+class DirectionTriageItem(DirectionTriageProposal):
+    direction_id: NonBlankStr
+    direction_hash: Sha256Str
+
+
+class DirectionTriageRecord(StrictModel):
+    triage_id: NonBlankStr
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    domain_pack_version: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    knowledge_snapshot_id: NonBlankStr
+    retrieval_id: NonBlankStr
+    strategy_version: NonBlankStr
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict
+    direction_set_id: NonBlankStr
+    direction_set_hash: Sha256Str
+    dispositions: tuple[DirectionTriageItem, ...] = Field(min_length=1, max_length=6)
+    blocking_items: tuple[NonBlankStr, ...] = ()
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DirectionTriageRecord:
+        from .serialization import content_hash
+
+        keys = tuple(item.direction_key for item in self.dispositions)
+        if len(set(keys)) != len(keys):
+            raise ValueError("direction triage keys must be unique")
+        identity = self.model_dump(mode="json", exclude={"triage_id", "content_hash"})
+        expected = f"direction-triage-{content_hash(identity)[:24]}"
+        if self.triage_id != expected:
+            raise ValueError("DirectionTriageRecord triage_id is not content-bound")
+        payload = {"triage_id": expected, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("DirectionTriageRecord content_hash is invalid")
+        return self
+
+
+class DirectionExpansionCandidate(StrictModel):
+    direction_key: NonBlankStr
+    candidate: CandidatePlanDraft
+
+
+class DirectionExpansionLLMResponse(StrictModel):
+    intent: IntentInterpretation
+    candidates: tuple[DirectionExpansionCandidate, ...] = Field(min_length=1, max_length=4)
+
+
+class DirectionCandidateBinding(StrictModel):
+    candidate_key: NonBlankStr
+    candidate_hash: Sha256Str
+    direction_id: NonBlankStr
+    direction_hash: Sha256Str
+    triage_item_hash: Sha256Str
+
+
+class HierarchicalPlanningExpansion(StrictModel):
+    expansion_id: NonBlankStr
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    domain_pack_version: NonBlankStr
+    context_id: NonBlankStr
+    context_hash: Sha256Str
+    knowledge_snapshot_id: NonBlankStr
+    retrieval_id: NonBlankStr
+    strategy_version: NonBlankStr
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict
+    direction_set_id: NonBlankStr
+    direction_set_hash: Sha256Str
+    triage_id: NonBlankStr
+    triage_hash: Sha256Str
+    candidate_bindings: tuple[DirectionCandidateBinding, ...] = Field(min_length=1)
+    planning_proposal: PlanningProposalSet
+    planning_proposal_hash: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> HierarchicalPlanningExpansion:
+        from .serialization import content_hash
+
+        if self.planning_proposal.planning_input_id != self.planning_input_id:
+            raise ValueError("hierarchical expansion proposal has wrong planning input")
+        if self.planning_proposal.planning_input_hash != self.planning_input_hash:
+            raise ValueError("hierarchical expansion proposal has wrong planning input hash")
+        if self.planning_proposal_hash != content_hash(self.planning_proposal):
+            raise ValueError("hierarchical expansion proposal hash is invalid")
+        candidate_keys = tuple(item.candidate_key for item in self.candidate_bindings)
+        if candidate_keys != tuple(
+            item.candidate_key for item in self.planning_proposal.candidates
+        ):
+            raise ValueError("hierarchical candidate bindings do not match proposal")
+        identity = self.model_dump(mode="json", exclude={"expansion_id", "content_hash"})
+        expected = f"hierarchical-expansion-{content_hash(identity)[:24]}"
+        if self.expansion_id != expected:
+            raise ValueError("HierarchicalPlanningExpansion expansion_id is not content-bound")
+        payload = {"expansion_id": expected, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("HierarchicalPlanningExpansion content_hash is invalid")
+        return self
+
+
+class HierarchicalPlanningStageAttempt(StrictModel):
+    attempt_id: NonBlankStr
+    stage: Literal["directions", "triage", "expansion"]
+    planning_input_id: NonBlankStr
+    planning_input_hash: Sha256Str
+    knowledge_snapshot_id: NonBlankStr
+    retrieval_id: NonBlankStr
+    previous_stage_id: NonBlankStr | None = None
+    previous_stage_hash: Sha256Str | None = None
+    provider_id: NonBlankStr
+    provider_version: NonBlankStr
+    provider_config: FrozenDict
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> HierarchicalPlanningStageAttempt:
+        from .serialization import content_hash
+
+        if (self.previous_stage_id is None) != (self.previous_stage_hash is None):
+            raise ValueError("hierarchical stage previous binding must be complete")
+        identity = self.model_dump(mode="json", exclude={"attempt_id", "content_hash"})
+        expected = f"hierarchical-attempt-{content_hash(identity)[:24]}"
+        if self.attempt_id != expected:
+            raise ValueError("HierarchicalPlanningStageAttempt attempt_id is not content-bound")
+        payload = {"attempt_id": expected, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("HierarchicalPlanningStageAttempt content_hash is invalid")
+        return self
 
 
 class PlanningProposalSet(StrictModel):
@@ -4314,17 +4546,12 @@ def _candidate_task_ids_by_key(
     candidate: CandidatePlanDraft,
     plan: ScientificQuestionPlan,
 ) -> dict[str, str]:
-    from .serialization import content_hash
+    from .planning.identity import derive_candidate_task_id
 
     task_ids = {
-        task.task_key: (
-            "task-"
-            + content_hash(
-                {
-                    "candidate_key": candidate.candidate_key,
-                    **task.model_dump(mode="json"),
-                }
-            )[:24]
+        task.task_key: derive_candidate_task_id(
+            candidate.candidate_key,
+            task.model_dump(mode="json"),
         )
         for task in candidate.task_drafts
     }
@@ -5108,6 +5335,8 @@ class ScientificProblemRunStatus(StrEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     REVISION_BLOCKED = "REVISION_BLOCKED"
+    HIERARCHICAL_PLANNING_BLOCKED = "HIERARCHICAL_PLANNING_BLOCKED"
+    REQUIRES_REPLANNING = "REQUIRES_REPLANNING"
     EXPORTED = "EXPORTED"
     FAILED = "FAILED"
 

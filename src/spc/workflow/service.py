@@ -38,6 +38,7 @@ from ..models import (
     PlanRevisionRecord,
     PlanRevisionRound,
     PlanValidationRecord,
+    PlanningStrategy,
     PlanningProposalSet,
     ProjectTrustPolicy,
     RevisionApprovalReviewInput,
@@ -52,6 +53,10 @@ from ..models import (
     ScientificRunBlockingItem,
     ScientificRunFailure,
     ScientificRunProviderBinding,
+    DirectionDisposition,
+    DirectionTriageRecord,
+    HierarchicalPlanningExpansion,
+    ResearchDirectionSet,
     parse_approval_review_input,
 )
 from ..planning import (
@@ -62,6 +67,16 @@ from ..planning import (
     StructuredLLMPlanningProvider,
     automatic_revision_block_reason,
     build_plan_revision_input,
+)
+from ..planning.hierarchical import (
+    HierarchicalPlanningBlocked,
+    build_direction_triage_record,
+    build_hierarchical_expansion,
+    build_hierarchical_stage_attempt,
+    build_research_direction_set,
+    validate_direction_triage,
+    validate_hierarchical_expansion,
+    validate_research_direction_set,
 )
 from ..planning.validators import validate_planning_proposal_set
 from ..repositories import (
@@ -367,6 +382,7 @@ class ScientificProblemWorkflow:
         temperature: float = 0.0,
         max_attempts: int = 1,
         max_plan_revisions: int = 0,
+        planning_strategy: str = "direct",
     ) -> WorkflowResult:
         if not request.strip():
             raise ValueError("scientific request must not be blank")
@@ -402,6 +418,7 @@ class ScientificProblemWorkflow:
                 temperature=temperature,
                 max_attempts=max_attempts,
                 max_plan_revisions=max_plan_revisions,
+                planning_strategy=planning_strategy,
             )
 
     def resume(self, run_id: str, **options: Any) -> WorkflowResult:
@@ -478,7 +495,12 @@ class ScientificProblemWorkflow:
         temperature: float = 0.0,
         max_attempts: int = 1,
         max_plan_revisions: int = 0,
+        planning_strategy: str = "direct",
     ) -> WorkflowResult:
+        try:
+            strategy = PlanningStrategy(planning_strategy)
+        except ValueError as error:
+            raise ValueError("planning_strategy must be 'direct' or 'hierarchical'") from error
         if not 0 <= max_plan_revisions <= 10:
             raise ValueError("max_plan_revisions must be between zero and ten")
         revision_chain = self._load_revision_chain(run.run_id)
@@ -656,13 +678,50 @@ class ScientificProblemWorkflow:
                     revision_chain, planning_input, evidence
                 )
             else:
-                compilation = self._reuse_compilation(
-                    interpreted, planning_input, evidence
+                hierarchical_root = self.runs.resolve_artifact_path(
+                    interpreted.run_id, "hierarchical-planning"
                 )
-                if compilation is None:
-                    compilation = ScientificProblemCompiler(
-                        planner, evidence_repository=evidence
-                    ).compile(planning_input)
+                if hierarchical_root.exists():
+                    strategy = PlanningStrategy.HIERARCHICAL
+                elif (
+                    strategy == PlanningStrategy.HIERARCHICAL
+                    and interpreted.planning_proposal_id is not None
+                ):
+                    raise HierarchicalPlanningBlocked(
+                        (
+                            "this run already contains direct planning artifacts; use a new "
+                            "state directory for a hierarchical comparison",
+                        )
+                    )
+                if strategy == PlanningStrategy.HIERARCHICAL:
+                    compilation = self._hierarchical_compilation(
+                        interpreted,
+                        planning_input,
+                        evidence,
+                        planner,
+                    )
+                else:
+                    compilation = self._reuse_compilation(
+                        interpreted, planning_input, evidence
+                    )
+                    if compilation is None:
+                        compilation = ScientificProblemCompiler(
+                            planner, evidence_repository=evidence
+                        ).compile(planning_input)
+        except HierarchicalPlanningBlocked as error:
+            blocked = _update_run(
+                interpreted,
+                status=ScientificProblemRunStatus.HIERARCHICAL_PLANNING_BLOCKED,
+                last_successful_status=interpreted.status,
+                failure=ScientificRunFailure(
+                    stage="hierarchical_planning",
+                    category=type(error).__name__,
+                    message=_sanitize_failure(error),
+                    retryable=False,
+                ),
+            )
+            self.runs.save(blocked)
+            return WorkflowResult(blocked)
         except (FileNotFoundError, OSError, ValueError, TypeError) as error:
             return self._fail(interpreted, "planning", error, retryable=True)
         proposal = compilation.proposal_set
@@ -1015,22 +1074,20 @@ class ScientificProblemWorkflow:
                 return None
         except (FileNotFoundError, OSError, ValueError):
             return None
-        status = (
-            ScientificProblemRunStatus.EXPORTED
-            if gate.passed and previous.export_path is not None
-            else ScientificProblemRunStatus.APPROVED
-            if gate.passed
-            else (
-                ScientificProblemRunStatus.REJECTED
-                if verdict.decision
-                in {
-                    ApprovalDecision.REJECT,
-                    ApprovalDecision.REQUEST_REVISION,
-                    ApprovalDecision.INSUFFICIENT_EVIDENCE,
-                }
-                else ScientificProblemRunStatus.AWAITING_APPROVAL
-            )
-        )
+        if "REQUIRES_REPLANNING" in verdict.hard_red_flags:
+            status = ScientificProblemRunStatus.REQUIRES_REPLANNING
+        elif gate.passed and previous.export_path is not None:
+            status = ScientificProblemRunStatus.EXPORTED
+        elif gate.passed:
+            status = ScientificProblemRunStatus.APPROVED
+        elif verdict.decision in {
+            ApprovalDecision.REJECT,
+            ApprovalDecision.REQUEST_REVISION,
+            ApprovalDecision.INSUFFICIENT_EVIDENCE,
+        }:
+            status = ScientificProblemRunStatus.REJECTED
+        else:
+            status = ScientificProblemRunStatus.AWAITING_APPROVAL
         approval_binding = next(
             (item for item in previous.providers if item.stage == "approval"), None
         )
@@ -1102,6 +1159,183 @@ class ScientificProblemWorkflow:
             return CompilationResult(candidates, reports, proposal, receipts)
         except (FileNotFoundError, OSError, ValueError):
             return None
+
+    def _hierarchical_compilation(
+        self,
+        run: ScientificProblemRun,
+        planning_input,
+        evidence,
+        planner,
+    ) -> CompilationResult:
+        root = "hierarchical-planning"
+
+        def existing(path: str) -> bool:
+            return self.runs.resolve_artifact_path(run.run_id, path).exists()
+
+        directions_path = f"{root}/directions.yaml"
+        directions_attempt_path = f"{root}/attempts/directions.yaml"
+        if existing(directions_path):
+            directions = self.runs.load_artifact(
+                run.run_id, directions_path, ResearchDirectionSet
+            )
+        else:
+            if existing(directions_attempt_path):
+                raise HierarchicalPlanningBlocked(
+                    ("direction generation was started but no complete output was saved",)
+                )
+            attempt = build_hierarchical_stage_attempt(
+                "directions", planning_input, planner
+            )
+            self.runs.write_exclusive_artifact(
+                run.run_id,
+                directions_attempt_path,
+                "hierarchical_planning_stage_attempt",
+                attempt.attempt_id,
+                attempt,
+            )
+            method = getattr(planner, "propose_directions", None)
+            if not callable(method):
+                raise HierarchicalPlanningBlocked(
+                    ("planning provider does not support research direction generation",)
+                )
+            directions = build_research_direction_set(
+                planning_input, method(planning_input), planner
+            )
+            report = validate_research_direction_set(directions, planning_input)
+            if not report.valid:
+                raise HierarchicalPlanningBlocked(
+                    tuple(item.code for item in report.issues)
+                )
+            self.runs.write_immutable_artifact(
+                run.run_id,
+                directions_path,
+                "research_direction_set",
+                directions.direction_set_id,
+                directions,
+            )
+        direction_report = validate_research_direction_set(directions, planning_input)
+        if not direction_report.valid:
+            raise HierarchicalPlanningBlocked(
+                tuple(item.code for item in direction_report.issues)
+            )
+
+        triage_path = f"{root}/triage.yaml"
+        triage_attempt_path = f"{root}/attempts/triage.yaml"
+        if existing(triage_path):
+            triage = self.runs.load_artifact(
+                run.run_id, triage_path, DirectionTriageRecord
+            )
+        else:
+            if existing(triage_attempt_path):
+                raise HierarchicalPlanningBlocked(
+                    ("direction triage was started but no complete output was saved",)
+                )
+            attempt = build_hierarchical_stage_attempt(
+                "triage",
+                planning_input,
+                planner,
+                previous_stage_id=directions.direction_set_id,
+                previous_stage_hash=directions.content_hash,
+            )
+            self.runs.write_exclusive_artifact(
+                run.run_id,
+                triage_attempt_path,
+                "hierarchical_planning_stage_attempt",
+                attempt.attempt_id,
+                attempt,
+            )
+            method = getattr(planner, "triage_directions", None)
+            if not callable(method):
+                raise HierarchicalPlanningBlocked(
+                    ("planning provider does not support direction triage",)
+                )
+            triage = build_direction_triage_record(
+                planning_input,
+                directions,
+                method(planning_input, directions),
+                planner,
+            )
+            triage_report = validate_direction_triage(
+                triage, directions, planning_input
+            )
+            if not triage_report.valid:
+                raise HierarchicalPlanningBlocked(
+                    tuple(item.code for item in triage_report.issues)
+                )
+            self.runs.write_immutable_artifact(
+                run.run_id,
+                triage_path,
+                "direction_triage_record",
+                triage.triage_id,
+                triage,
+            )
+        triage_report = validate_direction_triage(triage, directions, planning_input)
+        if not triage_report.valid:
+            raise HierarchicalPlanningBlocked(
+                tuple(item.code for item in triage_report.issues)
+            )
+        if not any(
+            item.disposition == DirectionDisposition.RETAIN
+            for item in triage.dispositions
+        ):
+            raise HierarchicalPlanningBlocked(
+                ("direction triage retained no direction for plan expansion",)
+            )
+
+        expansion_path = f"{root}/expansion.yaml"
+        expansion_attempt_path = f"{root}/attempts/expansion.yaml"
+        if existing(expansion_path):
+            expansion = self.runs.load_artifact(
+                run.run_id, expansion_path, HierarchicalPlanningExpansion
+            )
+        else:
+            if existing(expansion_attempt_path):
+                raise HierarchicalPlanningBlocked(
+                    ("plan expansion was started but no complete output was saved",)
+                )
+            attempt = build_hierarchical_stage_attempt(
+                "expansion",
+                planning_input,
+                planner,
+                previous_stage_id=triage.triage_id,
+                previous_stage_hash=triage.content_hash,
+            )
+            self.runs.write_exclusive_artifact(
+                run.run_id,
+                expansion_attempt_path,
+                "hierarchical_planning_stage_attempt",
+                attempt.attempt_id,
+                attempt,
+            )
+            method = getattr(planner, "expand_directions", None)
+            if not callable(method):
+                raise HierarchicalPlanningBlocked(
+                    ("planning provider does not support retained direction expansion",)
+                )
+            expansion = build_hierarchical_expansion(
+                planning_input,
+                directions,
+                triage,
+                method(planning_input, directions, triage),
+                planner,
+            )
+            self.runs.write_immutable_artifact(
+                run.run_id,
+                expansion_path,
+                "hierarchical_planning_expansion",
+                expansion.expansion_id,
+                expansion,
+            )
+        expansion_report = validate_hierarchical_expansion(
+            expansion, directions, triage, planning_input
+        )
+        if not expansion_report.valid:
+            raise HierarchicalPlanningBlocked(
+                tuple(item.code for item in expansion_report.issues)
+            )
+        return ScientificProblemCompiler(
+            planner, evidence_repository=evidence
+        ).compile_proposal(planning_input, expansion.planning_proposal)
 
     def _load_revision_compilation(
         self,
@@ -1282,6 +1516,8 @@ class ScientificProblemWorkflow:
         current_run = run
         current_chain = chain
         while True:
+            if current_run.status == ScientificProblemRunStatus.REQUIRES_REPLANNING:
+                return current_run
             current_round = current_chain.rounds[-1]
             if current_round.approval_verdict is None:
                 return current_run
@@ -1827,7 +2063,9 @@ class ScientificProblemWorkflow:
                 identifier,
                 value,
             )
-        if passed:
+        if "REQUIRES_REPLANNING" in result.verdict.hard_red_flags:
+            status = ScientificProblemRunStatus.REQUIRES_REPLANNING
+        elif passed:
             status = ScientificProblemRunStatus.APPROVED
         elif result.verdict.decision in {
             ApprovalDecision.REJECT,
@@ -2053,6 +2291,7 @@ def scientific_run_status(
     retrieval_summary: dict[str, int] = {}
     evidence_gaps: list[dict[str, Any]] = []
     revision_state: dict[str, Any] | None = None
+    hierarchical_state: dict[str, Any] | None = None
     revision_chain: PlanRevisionChain | None = None
     if repository is not None:
         try:
@@ -2125,6 +2364,57 @@ def scientific_run_status(
                 item.candidate_plan.artifact_id for item in revision_chain.rounds
             ],
         }
+    if repository is not None:
+        directions_path = repository.resolve_artifact_path(
+            run.run_id, "hierarchical-planning/directions.yaml"
+        )
+        triage_path = repository.resolve_artifact_path(
+            run.run_id, "hierarchical-planning/triage.yaml"
+        )
+        expansion_path = repository.resolve_artifact_path(
+            run.run_id, "hierarchical-planning/expansion.yaml"
+        )
+        if directions_path.exists():
+            directions = repository.load_artifact(
+                run.run_id,
+                "hierarchical-planning/directions.yaml",
+                ResearchDirectionSet,
+            )
+            triage = (
+                repository.load_artifact(
+                    run.run_id,
+                    "hierarchical-planning/triage.yaml",
+                    DirectionTriageRecord,
+                )
+                if triage_path.exists()
+                else None
+            )
+            expansion = (
+                repository.load_artifact(
+                    run.run_id,
+                    "hierarchical-planning/expansion.yaml",
+                    HierarchicalPlanningExpansion,
+                )
+                if expansion_path.exists()
+                else None
+            )
+            hierarchical_state = {
+                "strategy": "hierarchical",
+                "generated_direction_count": len(directions.directions),
+                "retained_direction_count": (
+                    sum(
+                        item.disposition == DirectionDisposition.RETAIN
+                        for item in triage.dispositions
+                    )
+                    if triage is not None
+                    else 0
+                ),
+                "blocking_items": list(triage.blocking_items) if triage else [],
+                "provenance_complete": expansion is not None,
+                "direction_set_id": directions.direction_set_id,
+                "triage_id": triage.triage_id if triage else None,
+                "expansion_id": expansion.expansion_id if expansion else None,
+            }
     if repository is not None and run.context_id is not None:
         context = repository.load_artifact(run.run_id, "context.yaml", ScientificContextPacket)
         retrieval_summary = {
@@ -2163,6 +2453,7 @@ def scientific_run_status(
         "candidate_ids": [item.artifact_id for item in run.candidate_plans],
         "approval_state": run.approval_verdict_id,
         "revision_state": revision_state,
+        "hierarchical_planning": hierarchical_state,
         "export_state": run.export_path,
         "failure": run.failure.model_dump(mode="json") if run.failure else None,
     }

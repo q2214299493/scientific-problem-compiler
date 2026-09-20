@@ -94,6 +94,7 @@ from .models import (
     ConflictSet,
     CriterionDraft,
     CurationStatus,
+    DirectionDisposition,
     DAGTask,
     DomainProfile,
     EvidenceReference,
@@ -177,6 +178,12 @@ from .planning import (
     PlanningProposalError,
     StructuredLLMPlanningProvider,
     StructuredOutputError,
+    HierarchicalPlanningError,
+    build_direction_triage_record,
+    build_hierarchical_expansion,
+    build_research_direction_set,
+    validate_direction_triage,
+    validate_research_direction_set,
 )
 from .knowledge.ingestion import (
     LiteratureIngestionService,
@@ -1219,6 +1226,9 @@ def plan(
     llm_api_key_env: Annotated[str, typer.Option("--llm-api-key-env")] = "SPC_LLM_API_KEY",
     temperature: Annotated[float, typer.Option("--temperature")] = 0.0,
     max_attempts: Annotated[int, typer.Option("--max-attempts")] = 2,
+    planning_strategy: Annotated[
+        str, typer.Option("--planning-strategy")
+    ] = "direct",
 ) -> None:
     """Compile trusted context and evidence into validated candidate plans."""
     context = load_model(context_file, ScientificContextPacket)
@@ -1249,11 +1259,67 @@ def plan(
             )
         else:
             raise typer.BadParameter("--provider must be 'mock' or 'llm'")
-        result = ScientificProblemCompiler(
-            planning_provider,
-            evidence_repository=evidence_repository,
-        ).compile(planning_input)
-    except (PlanningContextError, PlanningProposalError, StructuredOutputError) as error:
+        compiler = ScientificProblemCompiler(
+            planning_provider, evidence_repository=evidence_repository
+        )
+        hierarchy = None
+        if planning_strategy == "direct":
+            result = compiler.compile(planning_input)
+        elif planning_strategy == "hierarchical":
+            directions = build_research_direction_set(
+                planning_input,
+                planning_provider.propose_directions(planning_input),
+                planning_provider,
+            )
+            direction_report = validate_research_direction_set(
+                directions, planning_input
+            )
+            if not direction_report.valid:
+                raise HierarchicalPlanningError(
+                    ", ".join(item.code for item in direction_report.issues)
+                )
+            triage = build_direction_triage_record(
+                planning_input,
+                directions,
+                planning_provider.triage_directions(planning_input, directions),
+                planning_provider,
+            )
+            triage_report = validate_direction_triage(
+                triage, directions, planning_input
+            )
+            if not triage_report.valid:
+                raise HierarchicalPlanningError(
+                    ", ".join(item.code for item in triage_report.issues)
+                )
+            if not any(
+                item.disposition == DirectionDisposition.RETAIN
+                for item in triage.dispositions
+            ):
+                raise HierarchicalPlanningError(
+                    "direction triage retained no direction for plan expansion"
+                )
+            hierarchy = build_hierarchical_expansion(
+                planning_input,
+                directions,
+                triage,
+                planning_provider.expand_directions(
+                    planning_input, directions, triage
+                ),
+                planning_provider,
+            )
+            result = compiler.compile_proposal(
+                planning_input, hierarchy.planning_proposal
+            )
+        else:
+            raise typer.BadParameter(
+                "--planning-strategy must be 'direct' or 'hierarchical'"
+            )
+    except (
+        HierarchicalPlanningError,
+        PlanningContextError,
+        PlanningProposalError,
+        StructuredOutputError,
+    ) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from error
 
@@ -1274,6 +1340,15 @@ def plan(
         output_dir / "project-trust-policy.yaml",
         *plan_paths,
         *receipt_paths,
+        *(
+            (
+                output_dir / "hierarchical-planning" / "directions.yaml",
+                output_dir / "hierarchical-planning" / "triage.yaml",
+                output_dir / "hierarchical-planning" / "expansion.yaml",
+            )
+            if hierarchy is not None
+            else ()
+        ),
     )
     existing = tuple(path for path in output_paths if path.exists())
     if existing:
@@ -1281,6 +1356,11 @@ def plan(
     dump_yaml(output_paths[0], planning_input)
     dump_yaml(output_paths[1], result.proposal_set)
     dump_yaml(output_paths[3], trust_policy)
+    if hierarchy is not None:
+        hierarchy_dir = output_dir / "hierarchical-planning"
+        dump_yaml(hierarchy_dir / "directions.yaml", directions)
+        dump_yaml(hierarchy_dir / "triage.yaml", triage)
+        dump_yaml(hierarchy_dir / "expansion.yaml", hierarchy)
     for path, candidate in zip(plan_paths, result.candidates, strict=True):
         require_safe_path_component(candidate.plan_id, field="plan_id")
         dump_yaml(path, candidate)
@@ -1617,7 +1697,12 @@ def _workflow_options(
     temperature: float,
     max_attempts: int,
     max_plan_revisions: int,
+    planning_strategy: str,
 ) -> dict[str, object]:
+    if planning_strategy not in {"direct", "hierarchical"}:
+        raise typer.BadParameter(
+            "--planning-strategy must be 'direct' or 'hierarchical'"
+        )
     return {
         "dry_run": dry_run,
         "interpretation_provider": interpretation_provider,
@@ -1630,6 +1715,7 @@ def _workflow_options(
         "temperature": temperature,
         "max_attempts": max_attempts,
         "max_plan_revisions": max_plan_revisions,
+        "planning_strategy": planning_strategy,
     }
 
 
@@ -1658,6 +1744,9 @@ def compile_scientific_request(
     max_plan_revisions: Annotated[
         int, typer.Option("--max-plan-revisions", min=0, max=10)
     ] = 0,
+    planning_strategy: Annotated[
+        str, typer.Option("--planning-strategy")
+    ] = "direct",
 ) -> None:
     """Start the trusted, planning-only SPC workflow and persist its run."""
     if (request is None) == (request_file is None):
@@ -1682,6 +1771,7 @@ def compile_scientific_request(
             temperature=temperature,
             max_attempts=max_attempts,
             max_plan_revisions=max_plan_revisions,
+            planning_strategy=planning_strategy,
         ),
     )
     payload = result.dry_run_report or scientific_run_status(result.run, workflow.runs)
@@ -1689,6 +1779,8 @@ def compile_scientific_request(
     if result.run.status.value in {
         "BLOCKED_SOURCE_CURATION",
         "REVISION_BLOCKED",
+        "HIERARCHICAL_PLANNING_BLOCKED",
+        "REQUIRES_REPLANNING",
         "FAILED",
     }:
         raise typer.Exit(1)
@@ -1713,6 +1805,9 @@ def resume_scientific_run(
     max_plan_revisions: Annotated[
         int, typer.Option("--max-plan-revisions", min=0, max=10)
     ] = 0,
+    planning_strategy: Annotated[
+        str, typer.Option("--planning-strategy")
+    ] = "direct",
 ) -> None:
     """Revalidate and resume a persisted scientific run."""
     persisted = ScientificProblemRunRepository(state_dir.resolve()).get(run_id)
@@ -1734,6 +1829,7 @@ def resume_scientific_run(
             temperature=temperature,
             max_attempts=max_attempts,
             max_plan_revisions=max_plan_revisions,
+            planning_strategy=planning_strategy,
         ),
     )
     typer.echo(
@@ -1746,6 +1842,8 @@ def resume_scientific_run(
     if result.run.status.value in {
         "BLOCKED_SOURCE_CURATION",
         "REVISION_BLOCKED",
+        "HIERARCHICAL_PLANNING_BLOCKED",
+        "REQUIRES_REPLANNING",
         "FAILED",
     }:
         raise typer.Exit(1)

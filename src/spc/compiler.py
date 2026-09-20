@@ -70,6 +70,14 @@ class ScientificProblemCompiler:
         if not callable(propose):
             raise TypeError("grounded compilation requires a PlanningProvider")
         proposal = propose(planning_input)
+        return self.compile_proposal(planning_input, proposal)
+
+    def compile_proposal(
+        self,
+        planning_input: ScientificPlanningInput,
+        proposal: PlanningProposalSet,
+    ) -> CompilationResult:
+        """Validate and materialize an already-produced grounded proposal."""
         proposal_report = validate_planning_proposal_set(proposal, planning_input)
         if not proposal_report.valid:
             raise PlanningProposalError(proposal_report)

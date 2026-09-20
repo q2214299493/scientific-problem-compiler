@@ -751,6 +751,41 @@ spc resume-scientific-run --run-id scientific-run-... --state-dir .spc `
   --approval-provider mock --candidate-id plan-...
 ```
 
+Initial planning supports two explicit strategies, independently of the chosen
+planning provider. `--planning-strategy direct` is the default and preserves the
+existing one-call proposal, hashes, approval path, and revision behavior.
+`--planning-strategy hierarchical` first generates one to six bounded research
+directions, then triages each direction as `retain`, `defer`, `exclude`, or
+`requires_human_choice`, and finally expands only retained directions into the
+existing `CandidatePlanDraft` / `PlanningProposalSet` contract. It never falls
+back to direct planning when every direction is unavailable.
+
+The three immutable stage records are stored as
+`hierarchical-planning/directions.yaml`, `triage.yaml`, and `expansion.yaml`.
+They bind the planning input, Domain Pack, context and knowledge snapshot,
+provider configuration, prior-stage hash, and output hashes. A complete stage
+is reused on resume. If a provider call was claimed but no complete output was
+saved, ordinary resume reports a blocked/uncertain stage instead of silently
+calling the provider again.
+
+```powershell
+spc compile-scientific-request `
+  --request "Which observation distinguishes the competing mechanisms?" `
+  --domain base --knowledge-dir knowledge --state-dir .spc-hierarchical `
+  --planning-strategy hierarchical `
+  --interpretation-provider mock --planning-provider mock
+```
+
+Direction triage is a planning comparison, not scientific approval: retained
+plans still pass deterministic proposal/plan validation and the unchanged
+independent approval and gate chain. Hierarchical planning applies only to the
+initial plan. A later `REQUEST_REVISION` uses the existing bounded revision
+loop and does not reopen direction generation or reset its budget. An approver
+may record `REQUIRES_REPLANNING` when the selected direction itself is wrong;
+SPC stops and records that state without automatically starting another
+hierarchical run. Offline mock comparison demonstrates control flow and
+provenance only, not superior scientific quality.
+
 Independent-review-driven plan revision is explicit and bounded. The default
 `--max-plan-revisions 0` preserves the one-pass workflow. Setting it to `1` or
 `2` permits a revision only after a fully bound independent

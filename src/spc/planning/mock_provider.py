@@ -6,6 +6,11 @@ from ..models import (
     CandidateTaskDraft,
     ComparisonBaselineDraft,
     CriterionDraft,
+    DirectionDisposition,
+    DirectionExpansionCandidate,
+    DirectionExpansionLLMResponse,
+    DirectionTriageLLMResponse,
+    DirectionTriageProposal,
     IntentInterpretation,
     ObservableDraft,
     PlanRevisionDisposition,
@@ -14,6 +19,10 @@ from ..models import (
     PlanRevisionLLMResponse,
     PlanningProposalSet,
     PlanningStrategyClass,
+    ResearchDirectionLLMResponse,
+    ResearchDirectionProposal,
+    ResearchDirectionSet,
+    DirectionTriageRecord,
     ScientificPlanningInput,
     SourceRole,
 )
@@ -54,6 +63,106 @@ def build_proposal_set(
 class MockPlanningProvider:
     provider_id = "mock-planning"
     provider_version = MOCK_PLANNING_PROVIDER_VERSION
+
+    def propose_directions(
+        self, planning_input: ScientificPlanningInput
+    ) -> ResearchDirectionLLMResponse:
+        proposal = self.propose(planning_input)
+        unresolved_conflicts = tuple(
+            item
+            for item in planning_input.conflict_sets
+            if item.resolution_status == "unresolved"
+        )
+        blocking_gaps = tuple(
+            item.gap_id for item in planning_input.evidence_gaps if item.blocking
+        )
+        directions = []
+        for index, candidate in enumerate(proposal.candidates):
+            conflict_refs = tuple(
+                item.conflict_id
+                for item in unresolved_conflicts
+                if set(item.claim_refs).issubset(set(candidate.claim_refs))
+            )
+            question = proposal.intent.atomic_questions[
+                min(index, len(proposal.intent.atomic_questions) - 1)
+            ]
+            directions.append(
+                ResearchDirectionProposal(
+                    direction_key=f"direction-{index + 1}",
+                    scientific_question=question,
+                    hypothesis_or_claim_to_test=candidate.primary_hypothesis,
+                    competing_explanations=(candidate.null_hypothesis,),
+                    distinguishing_observation=candidate.observables[0].description,
+                    evidence_refs=candidate.evidence_refs,
+                    claim_refs=candidate.claim_refs,
+                    capability_refs=candidate.capability_ids,
+                    conflict_refs=conflict_refs,
+                    assumptions=candidate.assumptions,
+                    blocking_gaps=blocking_gaps,
+                    limitations=candidate.limitations,
+                    rationale=(
+                        "This direction tests an observation that can distinguish the "
+                        "primary and competing explanations."
+                    ),
+                )
+            )
+        return ResearchDirectionLLMResponse(directions=tuple(directions))
+
+    def triage_directions(
+        self,
+        planning_input: ScientificPlanningInput,
+        directions: ResearchDirectionSet,
+    ) -> DirectionTriageLLMResponse:
+        del planning_input
+        return DirectionTriageLLMResponse(
+            dispositions=tuple(
+                DirectionTriageProposal(
+                    direction_key=item.direction_key,
+                    disposition=DirectionDisposition.RETAIN,
+                    reason="Direction is grounded and provides a distinguishing observation.",
+                )
+                for item in directions.directions[:4]
+            )
+        )
+
+    def expand_directions(
+        self,
+        planning_input: ScientificPlanningInput,
+        directions: ResearchDirectionSet,
+        triage: DirectionTriageRecord,
+    ) -> DirectionExpansionLLMResponse:
+        direct = self.propose(planning_input)
+        source_candidates = {
+            f"direction-{index + 1}": candidate
+            for index, candidate in enumerate(direct.candidates)
+        }
+        retained = tuple(
+            item.direction_key
+            for item in triage.dispositions
+            if item.disposition == DirectionDisposition.RETAIN
+        )
+        by_key = {item.direction_key: item for item in directions.directions}
+        expanded = tuple(
+            DirectionExpansionCandidate(
+                direction_key=direction_key,
+                candidate=source_candidates[direction_key].model_copy(
+                    update={
+                        "primary_hypothesis": by_key[
+                            direction_key
+                        ].hypothesis_or_claim_to_test,
+                    }
+                ),
+            )
+            for direction_key in retained
+        )
+        intent = direct.intent.model_copy(
+            update={
+                "atomic_questions": tuple(
+                    by_key[item].scientific_question for item in retained
+                )
+            }
+        )
+        return DirectionExpansionLLMResponse(intent=intent, candidates=expanded)
 
     def propose(self, planning_input: ScientificPlanningInput) -> PlanningProposalSet:
         claims_by_id = {claim.claim_id: claim for claim in planning_input.source_claims}
