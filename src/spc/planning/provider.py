@@ -27,6 +27,9 @@ class PlanningProvider(Protocol):
         self,
         planning_input: ScientificPlanningInput,
         triggering_review: ApprovalReviewRecord | None = None,
+        directions: ResearchDirectionSet | None = None,
+        triage: DirectionTriageRecord | None = None,
+        triggering_review_input: object | None = None,
     ) -> PlanningEvidenceRequestLLMResponse: ...
 
     def propose_directions(

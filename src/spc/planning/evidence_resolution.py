@@ -7,7 +7,10 @@ from typing import Any
 
 from ..models import (
     ApprovalDecision,
+    ApprovalReviewInput,
     ApprovalReviewRecord,
+    DirectionEvidenceNeed,
+    DirectionTriageRecord,
     EvidenceAcquisitionProposal,
     EvidenceClassification,
     EvidenceGap,
@@ -26,11 +29,14 @@ from ..models import (
     PlanningStrategy,
     GroundedStatement,
     ResearchDirectionSet,
+    RevisionApprovalReviewInput,
     RetrievalHit,
+    RetrievalMatchStatus,
     RetrievalManifest,
     RetrievalSourceType,
     ScientificPlanningInput,
     ScientificContextPacket,
+    ScientificQuestionPlan,
     scientific_context_semantic_hash,
 )
 from ..repositories import EvidenceStore, KnowledgeRepositories
@@ -77,6 +83,7 @@ _RETRIEVAL_TERMS = frozenset(
         "reported",
         "source",
         "literature",
+        "method",
         "paper",
         "method",
         "model",
@@ -197,8 +204,8 @@ def proposal_for_gap(
 def proposal_for_review(
     review: ApprovalReviewRecord,
     planning_input: ScientificPlanningInput,
+    review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
 ) -> PlanningEvidenceRequestProposal:
-    del planning_input
     response = getattr(review.response, "review", review.response)
     if response.decision_recommendation != ApprovalDecision.INSUFFICIENT_EVIDENCE:
         raise PlanningEvidenceError(
@@ -232,6 +239,45 @@ def proposal_for_review(
         if marker in lowered:
             evidence_type = candidate
             break
+    findings = (*response.required_fixes, *response.hard_red_flags)
+    related_claim_refs = tuple(
+        dict.fromkeys(
+            ref
+            for finding in findings
+            for ref in getattr(finding, "claim_refs", ())
+        )
+    )
+    related_evidence_refs = tuple(
+        dict.fromkeys(
+            ref
+            for finding in findings
+            for ref in getattr(finding, "evidence_refs", ())
+        )
+    )
+    task_refs = tuple(
+        dict.fromkeys(
+            ref for finding in findings for ref in getattr(finding, "task_refs", ())
+        )
+    )
+    capability_refs = tuple(
+        dict.fromkeys(
+            ref
+            for finding in findings
+            for ref in getattr(finding, "capability_refs", ())
+        )
+    )
+    if not set(related_claim_refs).issubset(set(planning_input.allowed_claim_ids)):
+        raise PlanningEvidenceError("REVIEW_EVIDENCE_REQUEST_CLAIM_BINDING_MISMATCH")
+    if not set(related_evidence_refs).issubset(
+        set(planning_input.allowed_evidence_ids)
+    ):
+        raise PlanningEvidenceError("REVIEW_EVIDENCE_REQUEST_EVIDENCE_BINDING_MISMATCH")
+    if not set(task_refs).issubset(set(review_input.allowed_task_ids)):
+        raise PlanningEvidenceError("REVIEW_EVIDENCE_REQUEST_TASK_BINDING_MISMATCH")
+    if not set(capability_refs).issubset(
+        set(review_input.allowed_capability_ids)
+    ):
+        raise PlanningEvidenceError("REVIEW_EVIDENCE_REQUEST_CAPABILITY_BINDING_MISMATCH")
     return PlanningEvidenceRequestProposal(
         request_key=f"review-{review.review_id}",
         scientific_question=trigger,
@@ -242,7 +288,7 @@ def proposal_for_review(
             "current planning judgment."
         ),
         evidence_type_needed=evidence_type,
-        target_entities=(),
+        target_entities=(*task_refs, *capability_refs),
         concepts=tuple(
             dict.fromkeys(
                 token
@@ -258,11 +304,53 @@ def proposal_for_review(
         evidence_that_would_not_resolve_gap=(
             "A relevance score, uncurated source, new calculation, or planner assertion."
         ),
+        related_claim_refs=related_claim_refs,
+        related_evidence_refs=related_evidence_refs,
+        related_direction_refs=(),
+        related_candidate_refs=(review_input.candidate_plan.plan_id,),
+        priority_reason="The independent review decision is INSUFFICIENT_EVIDENCE.",
+        blocking=True,
+    )
+
+
+def proposal_for_direction_need(
+    need: DirectionEvidenceNeed,
+) -> PlanningEvidenceRequestProposal:
+    if need.resolution_kind != EvidenceGapResolutionKind.RETRIEVAL_RESOLVABLE:
+        raise PlanningEvidenceError("DIRECTION_EVIDENCE_NEED_NOT_RETRIEVAL_RESOLVABLE")
+    return PlanningEvidenceRequestProposal(
+        request_key=f"direction-{need.need_key}",
+        scientific_question=need.scientific_question,
+        gap_id=None,
+        triggering_question=need.missing_evidence,
+        why_needed=need.why_direction_comparison_changes,
+        evidence_type_needed=need.required_evidence_type,
+        target_entities=(),
+        concepts=tuple(
+            dict.fromkeys(
+                token
+                for token in re.findall(
+                    r"[A-Za-z0-9][A-Za-z0-9_-]+",
+                    f"{need.scientific_question} {need.missing_evidence}",
+                )
+                if len(token) >= 3
+            )
+        )[:12],
+        comparison_conditions=need.comparison_conditions,
+        acceptable_source_classes=("literature_reported",),
+        evidence_that_would_resolve_gap=(
+            "A trusted exact record that explicitly supplies every declared comparison "
+            "condition for this direction decision."
+        ),
+        evidence_that_would_not_resolve_gap=(
+            "Topical relevance, an uncurated record, or a new calculation without the "
+            "declared comparison conditions."
+        ),
         related_claim_refs=(),
         related_evidence_refs=(),
-        related_direction_refs=(),
+        related_direction_refs=(need.related_direction_ref,),
         related_candidate_refs=(),
-        priority_reason="The independent review decision is INSUFFICIENT_EVIDENCE.",
+        priority_reason=need.why_direction_comparison_changes,
         blocking=True,
     )
 def _request_signature(proposal: PlanningEvidenceRequestProposal) -> tuple[object, ...]:
@@ -297,11 +385,59 @@ def build_planning_evidence_request_set(
     knowledge_snapshot_hash: str,
     source_acquisition_allowed: bool = False,
     direction_set: ResearchDirectionSet | None = None,
+    triage: DirectionTriageRecord | None = None,
     triage_id: str | None = None,
     triage_hash: str | None = None,
+    triggering_review: ApprovalReviewRecord | None = None,
     triggering_review_id: str | None = None,
     triggering_review_hash: str | None = None,
+    triggering_review_input: ApprovalReviewInput | RevisionApprovalReviewInput | None = None,
+    triggering_candidate: ScientificQuestionPlan | None = None,
 ) -> PlanningEvidenceRequestSet:
+    if triggering_review is not None:
+        if triggering_review_id not in {None, triggering_review.review_id} or (
+            triggering_review_hash not in {None, triggering_review.content_hash}
+        ):
+            raise PlanningEvidenceError("EVIDENCE_REQUEST_REVIEW_BINDING_MISMATCH")
+        triggering_review_id = triggering_review.review_id
+        triggering_review_hash = triggering_review.content_hash
+    if triage is not None:
+        if triage_id not in {None, triage.triage_id} or triage_hash not in {
+            None,
+            triage.content_hash,
+        }:
+            raise PlanningEvidenceError("EVIDENCE_REQUEST_TRIAGE_BINDING_MISMATCH")
+        triage_id = triage.triage_id
+        triage_hash = triage.content_hash
+        if direction_set is None or (
+            triage.direction_set_id != direction_set.direction_set_id
+            or triage.direction_set_hash != direction_set.content_hash
+        ):
+            raise PlanningEvidenceError("EVIDENCE_REQUEST_DIRECTION_TRIAGE_MISMATCH")
+    if (triggering_review_input is None) != (triggering_candidate is None):
+        raise PlanningEvidenceError(
+            "review input and triggering candidate must be supplied together"
+        )
+    if (triggering_review is None) != (triggering_review_input is None):
+        raise PlanningEvidenceError(
+            "review, review input, and triggering candidate must be supplied together"
+        )
+    if triggering_review_input is not None and triggering_candidate is not None:
+        if triggering_review is None or (
+            triggering_review.review_input_id
+            != triggering_review_input.review_input_id
+            or triggering_review.review_input_hash
+            != triggering_review_input.content_hash
+        ):
+            raise PlanningEvidenceError("EVIDENCE_REQUEST_REVIEW_INPUT_BINDING_MISMATCH")
+        if (
+            triggering_review_input.candidate_plan.plan_id
+            != triggering_candidate.plan_id
+            or triggering_review_input.candidate_plan_hash
+            != content_hash(triggering_candidate)
+            or triggering_review_input.candidate_plan != triggering_candidate
+        ):
+            raise PlanningEvidenceError("EVIDENCE_REQUEST_CANDIDATE_BINDING_MISMATCH")
     classifications = tuple(
         classify_evidence_gap(gap)
         for gap in planning_input.evidence_gaps
@@ -316,6 +452,9 @@ def build_planning_evidence_request_set(
         | {item.direction_key for item in direction_set.directions}
         if direction_set is not None
         else set()
+    )
+    allowed_candidates = (
+        {triggering_candidate.plan_id} if triggering_candidate is not None else set()
     )
     seen: set[tuple[object, ...]] = set()
     requests: list[PlanningEvidenceRequest] = []
@@ -337,6 +476,8 @@ def build_planning_evidence_request_set(
             proposal.related_direction_refs
         ).issubset(allowed_directions):
             raise PlanningEvidenceError("FABRICATED_EVIDENCE_REQUEST_DIRECTION_ID")
+        if not set(proposal.related_candidate_refs).issubset(allowed_candidates):
+            raise PlanningEvidenceError("FABRICATED_EVIDENCE_REQUEST_CANDIDATE_ID")
         if not set(proposal.acceptable_source_classes).issubset(
             _ACCEPTABLE_SOURCE_CLASSES
         ):
@@ -372,6 +513,24 @@ def build_planning_evidence_request_set(
         "triage_hash": triage_hash,
         "triggering_review_id": triggering_review_id,
         "triggering_review_hash": triggering_review_hash,
+        "triggering_review_input_id": (
+            triggering_review_input.review_input_id
+            if triggering_review_input is not None
+            else None
+        ),
+        "triggering_review_input_hash": (
+            triggering_review_input.content_hash
+            if triggering_review_input is not None
+            else None
+        ),
+        "triggering_candidate_id": (
+            triggering_candidate.plan_id if triggering_candidate is not None else None
+        ),
+        "triggering_candidate_hash": (
+            content_hash(triggering_candidate)
+            if triggering_candidate is not None
+            else None
+        ),
         "gap_classifications": classifications,
         "requests": tuple(requests),
     }
@@ -468,6 +627,126 @@ def _source_class_allows(
     return hit.source_type in allowed
 
 
+_CRITERION_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "be",
+        "comparison",
+        "condition",
+        "conditions",
+        "context",
+        "evidence",
+        "for",
+        "from",
+        "is",
+        "literature",
+        "missing",
+        "not",
+        "of",
+        "or",
+        "reported",
+        "retrieve",
+        "required",
+        "source",
+        "that",
+        "the",
+        "to",
+        "trusted",
+        "which",
+    }
+)
+
+
+def _record_for_hit(hit: RetrievalHit, repositories: KnowledgeRepositories) -> Any:
+    repositories_by_type = {
+        RetrievalSourceType.LITERATURE_DOCUMENT: repositories.literature_documents,
+        RetrievalSourceType.SOURCE_CLAIM: repositories.source_claims,
+        RetrievalSourceType.METHOD_FACT: repositories.method_facts,
+        RetrievalSourceType.MODEL_FACT: repositories.model_facts,
+        RetrievalSourceType.REPORTED_RESULT: repositories.reported_results,
+        RetrievalSourceType.EXPERT_OPINION: repositories.expert_opinions,
+        RetrievalSourceType.EXPERT_CASE: repositories.expert_cases,
+    }
+    repository = repositories_by_type.get(hit.source_type)
+    if repository is None:
+        raise PlanningEvidenceError(
+            f"unsupported evidence-resolution record type: {hit.source_type.value}"
+        )
+    record = repository.get(hit.record_id)
+    record_hash = getattr(record, "content_hash", None) or content_hash(record)
+    if hit.record_hash != record_hash:
+        raise PlanningEvidenceError(
+            f"retrieval hit record hash is stale: {hit.source_type.value}:{hit.record_id}"
+        )
+    return record
+
+
+def _flatten_record_text(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (int, float, bool)):
+        return (str(value),)
+    if isinstance(value, dict):
+        return tuple(
+            text
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            for text in (*_flatten_record_text(str(key)), *_flatten_record_text(item))
+        )
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return tuple(text for item in value for text in _flatten_record_text(item))
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _flatten_record_text(model_dump(mode="json"))
+    return ()
+
+
+def _criterion_tokens(value: str) -> frozenset[str]:
+    return frozenset(
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if token not in _CRITERION_STOPWORDS and len(token) > 1
+    )
+
+
+def _record_satisfies_condition(record: Any, condition: str) -> bool:
+    record_text = _normalized(" ".join(_flatten_record_text(record)))
+    normalized_condition = _normalized(condition)
+    if normalized_condition and normalized_condition in record_text:
+        return True
+    required = _criterion_tokens(condition)
+    return bool(required) and required.issubset(_criterion_tokens(record_text))
+
+
+def _evaluate_resolution_criteria(
+    request: PlanningEvidenceRequest,
+    hits: tuple[RetrievalHit, ...],
+    repositories: KnowledgeRepositories,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    records = tuple((hit, _record_for_hit(hit, repositories)) for hit in hits)
+    satisfied: list[str] = []
+    missing: list[str] = []
+    supporting_hit_ids: set[str] = set()
+    for condition in request.comparison_conditions:
+        supporting = tuple(
+            hit.hit_id
+            for hit, record in records
+            if _record_satisfies_condition(record, condition)
+        )
+        if supporting:
+            satisfied.append(condition)
+            supporting_hit_ids.update(supporting)
+        else:
+            missing.append(condition)
+    return (
+        tuple(satisfied),
+        tuple(missing),
+        tuple(sorted(supporting_hit_ids)),
+    )
+
+
 def _make_acquisition_proposal(
     request: PlanningEvidenceRequest,
     query: Any,
@@ -500,10 +779,14 @@ def _make_resolution(
     request: PlanningEvidenceRequest,
     *,
     status: EvidenceResolutionStatus,
+    retrieval_status: RetrievalMatchStatus,
     retrieval_context: Any | None,
     hits: Iterable[RetrievalHit] = (),
     rationale: str,
     uncertainty: tuple[str, ...],
+    supporting_hit_ids: tuple[str, ...] = (),
+    satisfied_conditions: tuple[str, ...] = (),
+    unsatisfied_conditions: tuple[str, ...] = (),
     acquisition: EvidenceAcquisitionProposal | None = None,
 ) -> EvidenceResolutionRecord:
     matched = tuple(hits)
@@ -511,6 +794,7 @@ def _make_resolution(
         "request_id": request.request_id,
         "request_hash": request.content_hash,
         "status": status,
+        "retrieval_status": retrieval_status,
         "retrieval_context_id": (
             retrieval_context.retrieval_context_id if retrieval_context else None
         ),
@@ -527,6 +811,13 @@ def _make_resolution(
         ),
         "record_refs": tuple(
             sorted(f"{hit.source_type.value}:{hit.record_id}" for hit in matched)
+        ),
+        "supporting_hit_ids": supporting_hit_ids,
+        "satisfied_conditions": satisfied_conditions,
+        "unsatisfied_conditions": unsatisfied_conditions,
+        "applied_resolution_criterion": request.evidence_that_would_resolve_gap,
+        "applied_nonresolution_criterion": (
+            request.evidence_that_would_not_resolve_gap
         ),
         "resolution_rationale": rationale,
         "remaining_uncertainty": uncertainty,
@@ -599,26 +890,64 @@ def resolve_planning_evidence_requests(
         )
         if trusted_hits:
             conflicting = bool(trusted.conflict_relation_refs)
+            satisfied, missing, supporting_hit_ids = _evaluate_resolution_criteria(
+                request, trusted_hits, repositories
+            )
+            if conflicting:
+                retrieval_status = RetrievalMatchStatus.CONFLICTING_MATCH
+                resolution_status = EvidenceResolutionStatus.CONFLICTING_EVIDENCE
+            elif not missing and satisfied:
+                retrieval_status = RetrievalMatchStatus.TRUSTED_MATCH
+                resolution_status = EvidenceResolutionStatus.RESOLVED_TRUSTED
+            elif satisfied:
+                retrieval_status = RetrievalMatchStatus.TRUSTED_MATCH
+                resolution_status = EvidenceResolutionStatus.PARTIALLY_RESOLVED
+            else:
+                retrieval_status = (
+                    RetrievalMatchStatus.AMBIGUOUS_MATCH
+                    if len(trusted_hits) > 1
+                    else RetrievalMatchStatus.TRUSTED_MATCH
+                )
+                resolution_status = EvidenceResolutionStatus.NO_MATCH
             records.append(
                 _make_resolution(
                     request,
-                    status=(
-                        EvidenceResolutionStatus.CONFLICTING_EVIDENCE
-                        if conflicting
-                        else EvidenceResolutionStatus.RESOLVED_TRUSTED
-                    ),
+                    status=resolution_status,
+                    retrieval_status=retrieval_status,
                     retrieval_context=trusted,
                     hits=trusted_hits,
                     rationale=(
-                        "Trusted matches were found, including an explicit contradiction relation."
+                        "Trusted matches were found, including an explicit contradiction "
+                        "relation; no source was selected as the resolution."
                         if conflicting
-                        else "Trusted, snapshot-bound knowledge matches the bounded request."
+                        else (
+                            "Trusted records explicitly satisfy every declared resolution "
+                            "condition."
+                            if resolution_status
+                            == EvidenceResolutionStatus.RESOLVED_TRUSTED
+                            else (
+                                "Trusted records satisfy only part of the declared resolution "
+                                "conditions."
+                                if resolution_status
+                                == EvidenceResolutionStatus.PARTIALLY_RESOLVED
+                                else (
+                                    "Trusted topical matches were retrieved, but none "
+                                    "programmatically satisfies the declared resolution "
+                                    "conditions; retrieval relevance alone is insufficient."
+                                )
+                            )
+                        )
                     ),
                     uncertainty=(
                         ("Conflicting trusted records require explicit planning treatment.",)
                         if conflicting
-                        else ()
+                        else tuple(
+                            f"Unresolved condition: {condition}" for condition in missing
+                        )
                     ),
+                    supporting_hit_ids=supporting_hit_ids,
+                    satisfied_conditions=satisfied,
+                    unsatisfied_conditions=missing,
                 )
             )
             continue
@@ -641,6 +970,7 @@ def resolve_planning_evidence_requests(
                 _make_resolution(
                     request,
                     status=EvidenceResolutionStatus.REQUIRES_SOURCE_CURATION,
+                    retrieval_status=RetrievalMatchStatus.REQUIRES_CURATION,
                     retrieval_context=audit,
                     hits=audit_hits,
                     rationale=(
@@ -661,6 +991,7 @@ def resolve_planning_evidence_requests(
             _make_resolution(
                 request,
                 status=EvidenceResolutionStatus.NO_MATCH,
+                retrieval_status=RetrievalMatchStatus.NO_TRUSTED_MATCH,
                 retrieval_context=trusted,
                 rationale=(
                     "No qualifying trusted match was found within the declared source scope, "
@@ -725,6 +1056,10 @@ def augment_scientific_context(
             EvidenceResolutionStatus.CONFLICTING_EVIDENCE,
         }
         for hit in record.matched_hits
+        if (
+            record.status == EvidenceResolutionStatus.CONFLICTING_EVIDENCE
+            or hit.hit_id in set(record.supporting_hit_ids)
+        )
         if hit.authority_status == "trusted_current"
     )
     if not trusted_hits:

@@ -141,6 +141,8 @@ def _prepare(
     claim_status: CurationStatus = CurationStatus.ACCEPTED,
     opinion_status: CurationStatus = CurationStatus.ACCEPTED,
     case_status: CurationStatus = CurationStatus.ACCEPTED,
+    method_text: str = "The reported barrier was calculated with DFT.",
+    method_attributes: dict[str, str] | None = None,
 ):
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
     store = repositories.evidence_store
@@ -224,8 +226,8 @@ def _prepare(
     )
     method = MethodFact(
         fact_id="method-k1h-dft",
-        text="The reported barrier was calculated with DFT.",
-        attributes={"method": "DFT"},
+        text=method_text,
+        attributes=method_attributes or {"method": "DFT"},
         evidence_refs=(evidence.evidence_id,),
     )
     result = ReportedResult(

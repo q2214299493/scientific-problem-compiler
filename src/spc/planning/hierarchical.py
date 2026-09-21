@@ -11,6 +11,7 @@ from ..models import (
     DirectionTriageItem,
     DirectionTriageLLMResponse,
     DirectionTriageRecord,
+    EvidenceGapResolutionKind,
     HierarchicalPlanningExpansion,
     HierarchicalPlanningStageAttempt,
     ResearchDirection,
@@ -502,6 +503,34 @@ def validate_direction_triage(
                     message=f"triage item {item.direction_key} has a stale direction binding",
                 )
             )
+        for need in item.evidence_needs:
+            if need.related_direction_ref not in {
+                direction.direction_key,
+                direction.direction_id,
+            }:
+                issues.append(
+                    ValidationIssue(
+                        code="DIRECTION_EVIDENCE_NEED_BINDING_MISMATCH",
+                        message=(
+                            f"evidence need {need.need_key} does not bind triage "
+                            f"direction {direction.direction_key}"
+                        ),
+                    )
+                )
+            if (
+                need.resolution_kind
+                == EvidenceGapResolutionKind.RETRIEVAL_RESOLVABLE
+                and not need.comparison_conditions
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="DIRECTION_EVIDENCE_NEED_HAS_NO_CRITERION",
+                        message=(
+                            f"retrieval evidence need {need.need_key} has no explicit "
+                            "comparison condition"
+                        ),
+                    )
+                )
     retained = {
         item.direction_key
         for item in triage.dispositions

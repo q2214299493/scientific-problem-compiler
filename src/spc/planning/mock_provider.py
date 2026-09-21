@@ -31,6 +31,7 @@ from ..models import (
 from ..serialization import content_hash
 from .evidence_resolution import (
     classify_evidence_gap,
+    proposal_for_direction_need,
     proposal_for_gap,
     proposal_for_review,
 )
@@ -75,11 +76,34 @@ class MockPlanningProvider:
         self,
         planning_input: ScientificPlanningInput,
         triggering_review: ApprovalReviewRecord | None = None,
+        directions: ResearchDirectionSet | None = None,
+        triage: DirectionTriageRecord | None = None,
+        triggering_review_input=None,
     ) -> PlanningEvidenceRequestLLMResponse:
         if triggering_review is not None:
+            if triggering_review_input is None:
+                raise ValueError("review-triggered evidence request requires review input")
             return PlanningEvidenceRequestLLMResponse(
-                requests=(proposal_for_review(triggering_review, planning_input),)
+                requests=(
+                    proposal_for_review(
+                        triggering_review,
+                        planning_input,
+                        triggering_review_input,
+                    ),
+                )
             )
+        if directions is not None or triage is not None:
+            if directions is None or triage is None:
+                raise ValueError("direction evidence request requires directions and triage")
+            proposals = tuple(
+                proposal_for_direction_need(need)
+                for disposition in triage.dispositions
+                for need in disposition.evidence_needs
+                if need.resolution_kind.value == "retrieval_resolvable"
+            )
+            if not proposals:
+                raise ValueError("no retrieval-resolvable direction evidence need")
+            return PlanningEvidenceRequestLLMResponse(requests=proposals[:5])
         proposals = tuple(
             proposal_for_gap(gap, planning_input)
             for gap in planning_input.evidence_gaps

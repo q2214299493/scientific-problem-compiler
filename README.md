@@ -792,12 +792,23 @@ Values from `1` to `3` allow planning to turn a specific blocking
 `EvidenceGap`, or a source-specific independent `INSUFFICIENT_EVIDENCE`
 review, into at most five structured evidence requests per cycle. Each request
 must state which planning judgment the missing information could change.
+Hierarchical triage may also declare a content-bound direction evidence need;
+only needs explicitly classified as retrieval-resolvable enter this path.
+Direction needs for a new calculation, experiment, or human choice remain
+outside literature retrieval. A successful direction-derived lookup rebuilds
+the planning input and starts a fresh hierarchy; the triggering directions and
+triage remain immutable history.
 Calculation-required gaps, new experiments, scope choices, and undetermined
 needs do not enter literature retrieval.
 
-SPC always queries the existing trusted K1H view first. A trusted match means
-only that an integrity-checked, curated record matched the declared query and
-source scope; its ranking score is relevance, not scientific confidence.
+SPC always queries the existing trusted K1H view first. Retrieval disposition
+and scientific resolution are separate: a trusted match means only that an
+integrity-checked, curated record matched the declared query and source scope.
+`RESOLVED_TRUSTED` additionally requires deterministic evidence that the
+matched record explicitly supplies every declared comparison condition. A
+topical match with missing conditions remains partial or unresolved, and
+conflicting trusted records remain `CONFLICTING_EVIDENCE`; ranking score is
+relevance, not scientific confidence.
 `NO_MATCH` means only that the declared snapshot, query policy, and source
 scope returned no trusted match—it is not a novelty claim. Conflicting records
 remain explicit. Machine-extracted or otherwise untrusted matches stop at

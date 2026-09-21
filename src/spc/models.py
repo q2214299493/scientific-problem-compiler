@@ -3706,6 +3706,14 @@ class EvidenceResolutionStatus(StrEnum):
     HUMAN_DECISION_REQUIRED = "human_decision_required"
 
 
+class RetrievalMatchStatus(StrEnum):
+    TRUSTED_MATCH = "trusted_match"
+    CONFLICTING_MATCH = "conflicting_match"
+    AMBIGUOUS_MATCH = "ambiguous_match"
+    NO_TRUSTED_MATCH = "no_trusted_match"
+    REQUIRES_CURATION = "requires_curation"
+
+
 class PlanningEvidenceRequestProposal(StrictModel):
     request_key: NonBlankStr
     scientific_question: NonBlankStr
@@ -3787,6 +3795,18 @@ class PlanningEvidenceRequestSet(StrictModel):
     triage_hash: Sha256Str | None = None
     triggering_review_id: NonBlankStr | None = None
     triggering_review_hash: Sha256Str | None = None
+    triggering_review_input_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triggering_review_input_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triggering_candidate_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triggering_candidate_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     gap_classifications: tuple[PlanningEvidenceGapClassification, ...]
     requests: tuple[PlanningEvidenceRequest, ...] = Field(max_length=5)
     content_hash: Sha256Str
@@ -3799,9 +3819,30 @@ class PlanningEvidenceRequestSet(StrictModel):
             (self.direction_set_id, self.direction_set_hash, "direction set"),
             (self.triage_id, self.triage_hash, "triage"),
             (self.triggering_review_id, self.triggering_review_hash, "review"),
+            (
+                self.triggering_review_input_id,
+                self.triggering_review_input_hash,
+                "review input",
+            ),
+            (
+                self.triggering_candidate_id,
+                self.triggering_candidate_hash,
+                "triggering candidate",
+            ),
         ):
             if (left is None) != (right is None):
                 raise ValueError(f"{name} ID and hash must be supplied together")
+        new_trigger_bindings = (
+            self.triggering_review_input_id,
+            self.triggering_candidate_id,
+        )
+        if any(item is not None for item in new_trigger_bindings) and (
+            self.triggering_review_id is None
+            or any(item is None for item in new_trigger_bindings)
+        ):
+            raise ValueError(
+                "review input and candidate bindings require a triggering review"
+            )
         if len({item.request_key for item in self.requests}) != len(self.requests):
             raise ValueError("planning evidence request keys must be unique")
         if len({item.request_id for item in self.requests}) != len(self.requests):
@@ -3847,6 +3888,9 @@ class EvidenceResolutionRecord(StrictModel):
     request_id: NonBlankStr
     request_hash: Sha256Str
     status: EvidenceResolutionStatus
+    retrieval_status: RetrievalMatchStatus | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     retrieval_context_id: NonBlankStr | None = None
     retrieval_context_hash: Sha256Str | None = None
     retrieval_context: KnowledgeRetrievalContext | None = None
@@ -3854,6 +3898,21 @@ class EvidenceResolutionRecord(StrictModel):
     evidence_refs: tuple[NonBlankStr, ...] = ()
     source_refs: tuple[NonBlankStr, ...] = ()
     record_refs: tuple[NonBlankStr, ...] = ()
+    supporting_hit_ids: tuple[NonBlankStr, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    satisfied_conditions: tuple[NonBlankStr, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    unsatisfied_conditions: tuple[NonBlankStr, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    applied_resolution_criterion: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    applied_nonresolution_criterion: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     resolution_rationale: NonBlankStr
     remaining_uncertainty: tuple[NonBlankStr, ...]
     acquisition_proposal_id: NonBlankStr | None = None
@@ -3948,6 +4007,30 @@ class PlanningEvidenceRequestAttempt(StrictModel):
     provider_config_hash: Sha256Str
     triggering_review_id: NonBlankStr | None = None
     triggering_review_hash: Sha256Str | None = None
+    triggering_review_input_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triggering_review_input_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triggering_candidate_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triggering_candidate_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    direction_set_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    direction_set_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triage_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    triage_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -3958,6 +4041,22 @@ class PlanningEvidenceRequestAttempt(StrictModel):
             self.triggering_review_hash is None
         ):
             raise ValueError("triggering review ID and hash must be supplied together")
+        for left, right, name in (
+            (
+                self.triggering_review_input_id,
+                self.triggering_review_input_hash,
+                "triggering review input",
+            ),
+            (
+                self.triggering_candidate_id,
+                self.triggering_candidate_hash,
+                "triggering candidate",
+            ),
+            (self.direction_set_id, self.direction_set_hash, "direction set"),
+            (self.triage_id, self.triage_hash, "triage"),
+        ):
+            if (left is None) != (right is None):
+                raise ValueError(f"{name} ID and hash must be supplied together")
         identity = self.model_dump(
             mode="json", exclude={"attempt_id", "content_hash"}
         )
@@ -4363,10 +4462,24 @@ class ResearchDirectionSet(StrictModel):
         return self
 
 
+class DirectionEvidenceNeed(StrictModel):
+    need_key: NonBlankStr
+    related_direction_ref: NonBlankStr
+    scientific_question: NonBlankStr
+    missing_evidence: NonBlankStr
+    why_direction_comparison_changes: NonBlankStr
+    required_evidence_type: PlanningEvidenceType
+    comparison_conditions: tuple[NonBlankStr, ...] = Field(min_length=1)
+    resolution_kind: EvidenceGapResolutionKind
+
+
 class DirectionTriageProposal(StrictModel):
     direction_key: NonBlankStr
     disposition: DirectionDisposition
     reason: NonBlankStr
+    evidence_needs: tuple[DirectionEvidenceNeed, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
 
 class DirectionTriageLLMResponse(StrictModel):

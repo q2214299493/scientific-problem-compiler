@@ -9,16 +9,20 @@ from spc.interpretation import MockInterpretationProvider, ScientificEvidencePac
 from spc.models import (
     ApprovalDecision,
     CurationStatus,
+    DirectionEvidenceNeed,
+    DirectionTriageLLMResponse,
     EvidenceGap,
     EvidenceGapResolutionKind,
     EvidenceResolutionStatus,
     PlanningEvidenceRequestLLMResponse,
+    PlanningEvidenceRequestProposal,
     PlanningEvidenceType,
     PlanningStrategy,
     InterpretationProposal,
     RequiredFix,
     ScientificPlanningInput,
     ScientificProblemRunStatus,
+    RetrievalMatchStatus,
 )
 from spc.planning import (
     MockPlanningProvider,
@@ -60,10 +64,17 @@ def _grounded_gap_inputs(
     tmp_path: Path,
     *,
     claim_status: CurationStatus = CurationStatus.ACCEPTED,
-    question: str = "Which reported method and comparison condition applies?",
-    missing: str = "The literature method and comparison condition are not established.",
+    question: str = "Which reported DFT method applies?",
+    missing: str = "DFT",
+    method_text: str = "The reported barrier was calculated with DFT.",
+    method_attributes: dict[str, str] | None = None,
 ):
-    repositories, store, *_ = _prepare(tmp_path, claim_status=claim_status)
+    repositories, store, *_ = _prepare(
+        tmp_path,
+        claim_status=claim_status,
+        method_text=method_text,
+        method_attributes=method_attributes,
+    )
     loader = DomainPackLoader()
     context = ScientificContextBuilder(loader).build(
         "Which surface ensemble should define the comparison?",
@@ -130,11 +141,9 @@ class GapUntilMethodRetrievedProvider(MockInterpretationProvider):
                 EvidenceGap(
                     gap_id="gap-method-comparison",
                     scientific_question=(
-                        "Which reported method and model comparison condition applies?"
+                        "Which reported DFT method applies?"
                     ),
-                    missing_evidence=(
-                        "The literature method and comparison condition are not established."
-                    ),
+                    missing_evidence="DFT",
                     why_it_matters=(
                         "The competing explanations cannot be compared on unmatched methods."
                     ),
@@ -155,9 +164,9 @@ class CountingHierarchicalEvidenceProvider(MockPlanningProvider):
     expansion_calls = 0
     evidence_request_calls = 0
 
-    def propose_evidence_requests(self, planning_input):
+    def propose_evidence_requests(self, planning_input, *args, **kwargs):
         type(self).evidence_request_calls += 1
-        return super().propose_evidence_requests(planning_input)
+        return super().propose_evidence_requests(planning_input, *args, **kwargs)
 
     def propose_directions(self, planning_input):
         type(self).directions_calls += 1
@@ -170,6 +179,66 @@ class CountingHierarchicalEvidenceProvider(MockPlanningProvider):
     def expand_directions(self, planning_input, directions, triage):
         type(self).expansion_calls += 1
         return super().expand_directions(planning_input, directions, triage)
+
+
+class DirectionDerivedEvidenceProvider(CountingHierarchicalEvidenceProvider):
+    def triage_directions(self, planning_input, directions):
+        type(self).triage_calls += 1
+        response = MockPlanningProvider.triage_directions(
+            self, planning_input, directions
+        )
+        if type(self).triage_calls > 1:
+            return response
+        first = response.dispositions[0]
+        direction = directions.directions[0]
+        need = DirectionEvidenceNeed(
+            need_key="need-reported-dft-method",
+            related_direction_ref=direction.direction_id,
+            scientific_question=(
+                "Which reported DFT condition makes the direction comparison valid?"
+            ),
+            missing_evidence="The reported DFT method condition is missing.",
+            why_direction_comparison_changes=(
+                "The directions cannot be compared until the reported DFT method is known."
+            ),
+            required_evidence_type=PlanningEvidenceType.METHOD_FACT,
+            comparison_conditions=("DFT",),
+            resolution_kind=EvidenceGapResolutionKind.RETRIEVAL_RESOLVABLE,
+        )
+        return DirectionTriageLLMResponse(
+            dispositions=(
+                first.model_copy(update={"evidence_needs": (need,)}),
+                *response.dispositions[1:],
+            )
+        )
+
+
+class DirectionCalculationNeedProvider(CountingHierarchicalEvidenceProvider):
+    def triage_directions(self, planning_input, directions):
+        type(self).triage_calls += 1
+        response = MockPlanningProvider.triage_directions(
+            self, planning_input, directions
+        )
+        first = response.dispositions[0]
+        direction = directions.directions[0]
+        need = DirectionEvidenceNeed(
+            need_key="need-new-dft",
+            related_direction_ref=direction.direction_key,
+            scientific_question="What is the system-specific activation barrier?",
+            missing_evidence="A new DFT calculation is required.",
+            why_direction_comparison_changes=(
+                "A system-specific result would change the direction comparison."
+            ),
+            required_evidence_type=PlanningEvidenceType.REPORTED_RESULT,
+            comparison_conditions=("system-specific activation barrier",),
+            resolution_kind=EvidenceGapResolutionKind.CALCULATION_REQUIRED,
+        )
+        return DirectionTriageLLMResponse(
+            dispositions=(
+                first.model_copy(update={"evidence_needs": (need,)}),
+                *response.dispositions[1:],
+            )
+        )
 
 
 class InsufficientThenApproveProvider(workflow_service.MockApprovalProvider):
@@ -191,8 +260,8 @@ class InsufficientThenApproveProvider(workflow_service.MockApprovalProvider):
                     RequiredFix(
                         fix_id="fix-reported-method-source",
                         description=(
-                            "Retrieve the literature-reported method and comparison "
-                            "condition from a trusted source."
+                        "Retrieve the literature-reported method and comparison "
+                            "condition DFT from a trusted source."
                         ),
                         blocking=True,
                     ),
@@ -267,6 +336,11 @@ def test_request_validation_rejects_fabricated_refs_and_deduplicates(
             ("ev-fabricated",),
             "FABRICATED_EVIDENCE_REQUEST_EVIDENCE_ID",
         ),
+        (
+            "related_candidate_refs",
+            ("candidate-fabricated",),
+            "FABRICATED_EVIDENCE_REQUEST_CANDIDATE_ID",
+        ),
     ):
         invalid = proposal.model_copy(update={field_name: bad_value})
         with pytest.raises(PlanningEvidenceError, match=code):
@@ -315,6 +389,174 @@ def test_trusted_match_uses_k1h_without_acquisition_and_rebuilds_context(
     assert child_context.content_hash != context.content_hash
     assert child_input.planning_input_id != planning_input.planning_input_id
     assert child_input.content_hash != planning_input.content_hash
+
+
+def test_trusted_topical_match_does_not_resolve_missing_reference_state(
+    tmp_path: Path,
+) -> None:
+    repositories, store, loader, context, planning_input, gap = _grounded_gap_inputs(
+        tmp_path
+    )
+    proposal = proposal_for_gap(gap, planning_input).model_copy(
+        update={
+            "comparison_conditions": ("isolated molecule reference state",),
+            "concepts": ("DFT", "reference", "state"),
+        }
+    )
+    request_set = _request_set(
+        planning_input,
+        context,
+        response=PlanningEvidenceRequestLLMResponse(requests=(proposal,)),
+    )
+
+    record = resolve_planning_evidence_requests(
+        request_set,
+        repositories,
+        store,
+        loader.load("base").profile,
+        context.knowledge_snapshot,
+    ).records[0]
+
+    assert record.retrieval_status in {
+        RetrievalMatchStatus.TRUSTED_MATCH,
+        RetrievalMatchStatus.AMBIGUOUS_MATCH,
+    }
+    assert record.status == EvidenceResolutionStatus.NO_MATCH
+    assert record.satisfied_conditions == ()
+    assert record.unsatisfied_conditions == ("isolated molecule reference state",)
+    assert record.applied_resolution_criterion == proposal.evidence_that_would_resolve_gap
+    assert (
+        record.applied_nonresolution_criterion
+        == proposal.evidence_that_would_not_resolve_gap
+    )
+
+
+def test_topical_trusted_match_cannot_remove_blocking_planning_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingReferenceStateProvider(MockInterpretationProvider):
+        def interpret(self, context):
+            proposal = super().interpret(context)
+            gap = EvidenceGap(
+                gap_id="gap-reference-state",
+                    scientific_question=(
+                        "Which reported DFT method uses the isolated molecule reference state?"
+                    ),
+                missing_evidence="isolated molecule reference state",
+                why_it_matters="The comparison is undefined without the reference state.",
+                blocking=True,
+            )
+            payload = proposal.model_dump(mode="python", exclude={"proposal_id"})
+            payload["evidence_gaps"] = (gap,)
+            return InterpretationProposal(
+                proposal_id=f"interpretation-{content_hash(payload)[:24]}",
+                **payload,
+            )
+
+    repositories, *_ = _prepare(tmp_path)
+    monkeypatch.setattr(
+        workflow_service,
+        "MockInterpretationProvider",
+        MissingReferenceStateProvider,
+    )
+    workflow = ScientificProblemWorkflow(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+
+    run = workflow.start(
+        "The mechanism is not sufficiently convincing without a distinguishing observation.",
+        "base",
+        max_evidence_resolution_cycles=1,
+    ).run
+
+    assert run.status == ScientificProblemRunStatus.EVIDENCE_RESOLUTION_BLOCKED
+    assert run.failure is not None
+    assert run.failure.category == "TRUSTED_MATCH_DID_NOT_RESOLVE_GAP"
+    cycle = workflow._load_evidence_cycles(run.run_id)[0]
+    assert cycle.child_context_id is None
+    resolutions = workflow.runs.load_artifact(
+        run.run_id,
+        "planning-evidence/cycle-1/resolutions.yaml",
+        workflow_service.EvidenceResolutionSet,
+    )
+    assert resolutions.records[0].status == EvidenceResolutionStatus.NO_MATCH
+    assert resolutions.records[0].retrieval_status in {
+        RetrievalMatchStatus.TRUSTED_MATCH,
+        RetrievalMatchStatus.AMBIGUOUS_MATCH,
+    }
+
+
+def test_trusted_record_explicitly_satisfying_reference_condition_resolves(
+    tmp_path: Path,
+) -> None:
+    repositories, store, loader, context, planning_input, gap = _grounded_gap_inputs(
+        tmp_path,
+        method_text=(
+            "The reported DFT method used the isolated molecule reference state."
+        ),
+        method_attributes={
+            "method": "DFT",
+            "reference_state": "isolated molecule",
+        },
+    )
+    proposal = proposal_for_gap(gap, planning_input).model_copy(
+        update={
+            "comparison_conditions": ("isolated molecule reference state",),
+            "concepts": ("DFT", "isolated", "molecule", "reference", "state"),
+        }
+    )
+    request_set = _request_set(
+        planning_input,
+        context,
+        response=PlanningEvidenceRequestLLMResponse(requests=(proposal,)),
+    )
+
+    record = resolve_planning_evidence_requests(
+        request_set,
+        repositories,
+        store,
+        loader.load("base").profile,
+        context.knowledge_snapshot,
+    ).records[0]
+
+    assert record.retrieval_status == RetrievalMatchStatus.TRUSTED_MATCH
+    assert record.status == EvidenceResolutionStatus.RESOLVED_TRUSTED
+    assert record.satisfied_conditions == ("isolated molecule reference state",)
+    assert record.unsatisfied_conditions == ()
+    assert record.supporting_hit_ids
+
+
+def test_only_one_of_two_comparison_conditions_is_partial(
+    tmp_path: Path,
+) -> None:
+    repositories, store, loader, context, planning_input, gap = _grounded_gap_inputs(
+        tmp_path
+    )
+    proposal = proposal_for_gap(gap, planning_input).model_copy(
+        update={
+            "comparison_conditions": ("DFT", "isolated molecule reference state"),
+            "concepts": ("DFT", "reference", "state"),
+        }
+    )
+    request_set = _request_set(
+        planning_input,
+        context,
+        response=PlanningEvidenceRequestLLMResponse(requests=(proposal,)),
+    )
+
+    record = resolve_planning_evidence_requests(
+        request_set,
+        repositories,
+        store,
+        loader.load("base").profile,
+        context.knowledge_snapshot,
+    ).records[0]
+
+    assert record.retrieval_status == RetrievalMatchStatus.TRUSTED_MATCH
+    assert record.status == EvidenceResolutionStatus.PARTIALLY_RESOLVED
+    assert record.satisfied_conditions == ("DFT",)
+    assert record.unsatisfied_conditions == ("isolated molecule reference state",)
 
 
 def test_no_match_acquisition_requires_explicit_policy_and_does_not_claim_novelty(
@@ -419,6 +661,10 @@ def test_conflicting_trusted_matches_remain_explicit(tmp_path: Path) -> None:
     )
 
     assert resolutions.records[0].status == EvidenceResolutionStatus.CONFLICTING_EVIDENCE
+    assert (
+        resolutions.records[0].retrieval_status
+        == RetrievalMatchStatus.CONFLICTING_MATCH
+    )
     assert resolutions.records[0].retrieval_context is not None
     child = augment_scientific_context(context, resolutions, store)
     assert child.conflicting_evidence
@@ -491,7 +737,7 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
 
     def counted_retrieve(self, query, *args, **kwargs):
         nonlocal evidence_query_calls
-        if "reported method" in query.raw_request.casefold():
+        if "dft" in query.raw_request.casefold():
             evidence_query_calls += 1
         return original_retrieve(self, query, *args, **kwargs)
 
@@ -519,7 +765,7 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
 
     assert result.run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
     assert CountingHierarchicalEvidenceProvider.evidence_request_calls == 1
-    assert CountingHierarchicalEvidenceProvider.directions_calls == 2
+    assert CountingHierarchicalEvidenceProvider.directions_calls == 1
     assert CountingHierarchicalEvidenceProvider.triage_calls == 1
     assert CountingHierarchicalEvidenceProvider.expansion_calls == 1
     assert evidence_query_calls == 1
@@ -529,9 +775,9 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
     assert cycle.child_context_id == result.run.context_id
     assert cycle.child_planning_input_id == result.run.planning_input_id
     assert cycle.parent_context_id != cycle.child_context_id
-    assert workflow.runs.resolve_artifact_path(
+    assert not workflow.runs.resolve_artifact_path(
         result.run.run_id, "planning-evidence/cycle-1/trigger-directions.yaml"
-    ).is_file()
+    ).exists()
     assert workflow.runs.resolve_artifact_path(
         result.run.run_id, "evidence-hierarchy-1/directions.yaml"
     ).is_file()
@@ -569,6 +815,115 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
         CountingHierarchicalEvidenceProvider.evidence_request_calls,
     ) == before
     assert evidence_query_calls == 1
+
+
+def test_direction_derived_evidence_need_runs_bounded_cycle_and_fresh_hierarchy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories, *_ = _prepare(tmp_path)
+    DirectionDerivedEvidenceProvider.directions_calls = 0
+    DirectionDerivedEvidenceProvider.triage_calls = 0
+    DirectionDerivedEvidenceProvider.expansion_calls = 0
+    DirectionDerivedEvidenceProvider.evidence_request_calls = 0
+    monkeypatch.setattr(
+        workflow_service,
+        "MockPlanningProvider",
+        DirectionDerivedEvidenceProvider,
+    )
+    workflow = ScientificProblemWorkflow(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+
+    run = workflow.start(
+        "The mechanism is not sufficiently convincing without a distinguishing observation.",
+        "base",
+        planning_strategy="hierarchical",
+        max_evidence_resolution_cycles=1,
+    ).run
+
+    assert run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    assert DirectionDerivedEvidenceProvider.evidence_request_calls == 1
+    assert DirectionDerivedEvidenceProvider.directions_calls == 2
+    assert DirectionDerivedEvidenceProvider.triage_calls == 2
+    assert DirectionDerivedEvidenceProvider.expansion_calls == 1
+    old_directions = workflow.runs.load_artifact(
+        run.run_id,
+        "hierarchical-planning/directions.yaml",
+        workflow_service.ResearchDirectionSet,
+    )
+    old_triage = workflow.runs.load_artifact(
+        run.run_id,
+        "hierarchical-planning/triage.yaml",
+        workflow_service.DirectionTriageRecord,
+    )
+    request_set = workflow.runs.load_artifact(
+        run.run_id,
+        "planning-evidence/cycle-1/request-set.yaml",
+        workflow_service.PlanningEvidenceRequestSet,
+    )
+    new_directions = workflow.runs.load_artifact(
+        run.run_id,
+        "evidence-hierarchy-1/directions.yaml",
+        workflow_service.ResearchDirectionSet,
+    )
+    new_triage = workflow.runs.load_artifact(
+        run.run_id,
+        "evidence-hierarchy-1/triage.yaml",
+        workflow_service.DirectionTriageRecord,
+    )
+    assert request_set.direction_set_id == old_directions.direction_set_id
+    assert request_set.direction_set_hash == old_directions.content_hash
+    assert request_set.triage_id == old_triage.triage_id
+    assert request_set.triage_hash == old_triage.content_hash
+    assert request_set.requests[0].related_direction_refs == (
+        old_directions.directions[0].direction_id,
+    )
+    assert new_directions.direction_set_id != old_directions.direction_set_id
+    assert new_directions.content_hash != old_directions.content_hash
+    assert new_triage.triage_id != old_triage.triage_id
+    assert new_triage.content_hash != old_triage.content_hash
+    before = (
+        DirectionDerivedEvidenceProvider.directions_calls,
+        DirectionDerivedEvidenceProvider.triage_calls,
+        DirectionDerivedEvidenceProvider.expansion_calls,
+        DirectionDerivedEvidenceProvider.evidence_request_calls,
+    )
+    resumed = workflow.resume(run.run_id).run
+    assert resumed.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    assert (
+        DirectionDerivedEvidenceProvider.directions_calls,
+        DirectionDerivedEvidenceProvider.triage_calls,
+        DirectionDerivedEvidenceProvider.expansion_calls,
+        DirectionDerivedEvidenceProvider.evidence_request_calls,
+    ) == before
+
+
+def test_direction_new_dft_need_does_not_enter_literature_retrieval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories, *_ = _prepare(tmp_path)
+    DirectionCalculationNeedProvider.evidence_request_calls = 0
+    monkeypatch.setattr(
+        workflow_service,
+        "MockPlanningProvider",
+        DirectionCalculationNeedProvider,
+    )
+    workflow = ScientificProblemWorkflow(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+
+    run = workflow.start(
+        "The mechanism is not sufficiently convincing without a distinguishing observation.",
+        "base",
+        planning_strategy="hierarchical",
+        max_evidence_resolution_cycles=1,
+    ).run
+
+    assert run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    assert DirectionCalculationNeedProvider.evidence_request_calls == 0
+    assert workflow._evidence_attempt_count(run.run_id) == 0
 
 
 def test_nonretrieval_gap_stops_without_retrieval_and_resume_stays_terminal(
@@ -657,11 +1012,29 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
     )
     assert request_set.triggering_review_id is not None
     assert request_set.triggering_review_hash is not None
+    assert request_set.triggering_review_input_id is not None
+    assert request_set.triggering_review_input_hash is not None
+    assert request_set.triggering_candidate_id is not None
+    assert request_set.triggering_candidate_hash is not None
     assert request_set.requests[0].triggering_question is not None
-    assert workflow.runs.resolve_artifact_path(
-        run.run_id,
-        "planning-evidence/cycle-1/trigger/approval-review.yaml",
-    ).is_file()
+    assert request_set.requests[0].related_candidate_refs == (
+        request_set.triggering_candidate_id,
+    )
+    for filename in (
+        "approval-review-input.yaml",
+        "approval-review.yaml",
+        "approval-verdict.yaml",
+        "independent-approval-receipt.yaml",
+        "plan-gate.yaml",
+        "project-trust-policy.yaml",
+        "candidate-plan.yaml",
+        "plan-validation-record.yaml",
+        "plan-compilation-receipt.yaml",
+    ):
+        assert workflow.runs.resolve_artifact_path(
+            run.run_id,
+            f"planning-evidence/cycle-1/trigger/{filename}",
+        ).is_file()
     triggering_review = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/trigger/approval-review.yaml",
@@ -669,10 +1042,86 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
     )
     assert triggering_review.review_id == request_set.triggering_review_id
     assert triggering_review.content_hash == request_set.triggering_review_hash
+    workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
     assert run.approval_review_id != triggering_review.review_id
     chain = workflow._load_revision_chain(run.run_id)
     assert chain is not None
     assert chain.context_id == cycles[0].child_context_id
+
+    trigger_input = workflow.runs.load_artifact(
+        run.run_id,
+        "planning-evidence/cycle-1/trigger/planning-input.yaml",
+        ScientificPlanningInput,
+    )
+    archived_review_input = workflow_service.parse_approval_review_input(
+        workflow_service.load_data(
+            workflow.runs.resolve_artifact_path(
+                run.run_id,
+                "planning-evidence/cycle-1/trigger/approval-review-input.yaml",
+            )
+        )
+    )
+    trigger_candidate = workflow.runs.load_artifact(
+        run.run_id,
+        "planning-evidence/cycle-1/trigger/candidate-plan.yaml",
+        workflow_service.ScientificQuestionPlan,
+    )
+    proposal_payload = request_set.requests[0].model_dump(
+        mode="python", exclude={"request_id", "content_hash"}
+    )
+    proposal_payload["related_candidate_refs"] = ("candidate-fabricated",)
+    fabricated = PlanningEvidenceRequestProposal.model_validate(proposal_payload)
+    with pytest.raises(
+        PlanningEvidenceError, match="FABRICATED_EVIDENCE_REQUEST_CANDIDATE_ID"
+    ):
+        build_planning_evidence_request_set(
+            trigger_input,
+            PlanningEvidenceRequestLLMResponse(requests=(fabricated,)),
+            MockPlanningProvider(),
+            planning_strategy=PlanningStrategy.DIRECT,
+            knowledge_snapshot_hash=request_set.knowledge_snapshot_hash,
+            triggering_review=triggering_review,
+            triggering_review_input=archived_review_input,
+            triggering_candidate=trigger_candidate,
+        )
+    with pytest.raises(
+        PlanningEvidenceError, match="EVIDENCE_REQUEST_CANDIDATE_BINDING_MISMATCH"
+    ):
+        build_planning_evidence_request_set(
+            trigger_input,
+            PlanningEvidenceRequestLLMResponse(
+                requests=(
+                    PlanningEvidenceRequestProposal.model_validate(
+                        request_set.requests[0].model_dump(
+                            mode="python", exclude={"request_id", "content_hash"}
+                        )
+                    ),
+                )
+            ),
+            MockPlanningProvider(),
+            planning_strategy=PlanningStrategy.DIRECT,
+            knowledge_snapshot_hash=request_set.knowledge_snapshot_hash,
+            triggering_review=triggering_review,
+            triggering_review_input=archived_review_input,
+            triggering_candidate=trigger_candidate.model_copy(
+                update={"plan_id": "candidate-from-another-plan"}
+            ),
+        )
+
+    archived_input = workflow.runs.resolve_artifact_path(
+        run.run_id,
+        "planning-evidence/cycle-1/trigger/approval-review-input.yaml",
+    )
+    archived_input.write_text(
+        archived_input.read_text(encoding="utf-8").replace(
+            "The mechanism is not sufficiently convincing",
+            "Tampered mechanism statement",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
 
 
 def test_uncertain_evidence_request_attempt_is_not_repeated_on_resume(
@@ -719,6 +1168,22 @@ def test_uncertain_evidence_request_attempt_is_not_repeated_on_resume(
 
 
 def test_evidence_cycle_budget_stops_persistent_gap(tmp_path: Path, monkeypatch) -> None:
+    class PartialThenPersistentPlanningProvider(CountingHierarchicalEvidenceProvider):
+        def propose_evidence_requests(self, planning_input, *args, **kwargs):
+            response = super().propose_evidence_requests(
+                planning_input, *args, **kwargs
+            )
+            proposal = response.requests[0].model_copy(
+                update={
+                    "comparison_conditions": (
+                        "DFT",
+                        "isolated molecule reference state",
+                    ),
+                    "concepts": ("DFT", "reference", "state"),
+                }
+            )
+            return PlanningEvidenceRequestLLMResponse(requests=(proposal,))
+
     class PersistentGapProvider(GapUntilMethodRetrievedProvider):
         def interpret(self, context):
             proposal = super().interpret(context)
@@ -741,14 +1206,14 @@ def test_evidence_cycle_budget_stops_persistent_gap(tmp_path: Path, monkeypatch)
             )
 
     repositories, *_ = _prepare(tmp_path)
-    CountingHierarchicalEvidenceProvider.evidence_request_calls = 0
+    PartialThenPersistentPlanningProvider.evidence_request_calls = 0
     monkeypatch.setattr(
         workflow_service, "MockInterpretationProvider", PersistentGapProvider
     )
     monkeypatch.setattr(
         workflow_service,
         "MockPlanningProvider",
-        CountingHierarchicalEvidenceProvider,
+        PartialThenPersistentPlanningProvider,
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
@@ -764,7 +1229,7 @@ def test_evidence_cycle_budget_stops_persistent_gap(tmp_path: Path, monkeypatch)
     assert run.failure is not None
     assert run.failure.category == "EVIDENCE_RESOLUTION_BUDGET_EXHAUSTED"
     assert workflow._evidence_attempt_count(run.run_id) == 1
-    assert CountingHierarchicalEvidenceProvider.evidence_request_calls == 1
+    assert PartialThenPersistentPlanningProvider.evidence_request_calls == 1
 
 
 def test_request_revision_does_not_enter_evidence_resolution(

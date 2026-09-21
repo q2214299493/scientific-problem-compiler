@@ -26,6 +26,7 @@ from ..models import (
     ApprovalReviewRecord,
     ApprovalVerdict,
     CurationStatus,
+    EvidenceGap,
     EvidenceGapResolutionKind,
     EvidenceResolutionSet,
     EvidenceResolutionStatus,
@@ -229,6 +230,56 @@ def _make_evidence_request_attempt(
         **payload,
         content_hash=content_hash({"attempt_id": attempt_id, **payload}),
     )
+
+
+def _carry_unresolved_evidence_gaps(
+    packet: ScientificEvidencePacket,
+    parent_input: ScientificPlanningInput,
+    request_set: PlanningEvidenceRequestSet,
+    resolutions: EvidenceResolutionSet,
+) -> ScientificEvidencePacket:
+    requests = {item.request_id: item for item in request_set.requests}
+    parent_gaps = {item.gap_id: item for item in parent_input.evidence_gaps}
+    carried: list[EvidenceGap] = []
+    for resolution in resolutions.records:
+        if resolution.status == EvidenceResolutionStatus.RESOLVED_TRUSTED:
+            continue
+        request = requests[resolution.request_id]
+        if request.gap_id is not None and request.gap_id in parent_gaps:
+            carried.append(parent_gaps[request.gap_id])
+            continue
+        carried.append(
+            EvidenceGap(
+                gap_id=(
+                    "planning-evidence-gap-"
+                    + request.request_id.removeprefix("planning-evidence-request-")
+                ),
+                scientific_question=request.scientific_question,
+                missing_evidence="; ".join(
+                    resolution.unsatisfied_conditions
+                    or request.comparison_conditions
+                    or (request.triggering_question or request.why_needed,)
+                ),
+                why_it_matters=request.why_needed,
+                blocking=request.blocking,
+                evidence_refs=resolution.evidence_refs,
+            )
+        )
+    if not carried:
+        return packet
+    gaps = {item.gap_id: item for item in (*packet.evidence_gaps, *carried)}
+    identity = packet.model_dump(
+        mode="python", exclude={"packet_id", "content_hash"}
+    )
+    identity["evidence_gaps"] = tuple(gaps[key] for key in sorted(gaps))
+    identity["provenance_manifest"] = {
+        **dict(packet.provenance_manifest),
+        "evidence_resolution_set_id": resolutions.resolution_set_id,
+        "evidence_resolution_set_hash": resolutions.content_hash,
+    }
+    packet_id = f"evidence-packet-{content_hash(identity)[:24]}"
+    payload = {"packet_id": packet_id, **identity}
+    return ScientificEvidencePacket(**payload, content_hash=content_hash(payload))
 
 
 def _provider_binding(stage: str, provider: Any) -> ScientificRunProviderBinding:
@@ -920,8 +971,33 @@ class ScientificProblemWorkflow:
                         strategy,
                         evidence_policy,
                     )
-                    if context.context_id == parent_context_id:
-                        break
+                    if context.context_id != parent_context_id:
+                        continue
+                    if strategy == PlanningStrategy.HIERARCHICAL:
+                        directions, triage = self._hierarchical_direction_triage(
+                            interpreted, planning_input, planner
+                        )
+                        (
+                            interpreted,
+                            context,
+                            packet,
+                            planning_input,
+                        ) = self._maybe_resolve_planning_evidence(
+                            interpreted,
+                            context,
+                            packet,
+                            planning_input,
+                            repositories,
+                            evidence,
+                            planner,
+                            strategy,
+                            evidence_policy,
+                            direction_set=directions,
+                            triage=triage,
+                        )
+                        if context.context_id != parent_context_id:
+                            continue
+                    break
             if revision_chain is not None:
                 if max_plan_revisions not in {0, revision_chain.max_revisions}:
                     raise ValueError(
@@ -1277,8 +1353,10 @@ class ScientificProblemWorkflow:
                     ApprovalReviewRecord,
                 )
                 cycle_index = self._evidence_attempt_count(approved.run_id) + 1
-                self._archive_evidence_trigger_artifacts(
+                trigger_review_input, trigger_candidate = (
+                    self._archive_evidence_trigger_artifacts(
                     approved, cycle_index, approval_prefix
+                    )
                 )
                 try:
                     (
@@ -1297,6 +1375,8 @@ class ScientificProblemWorkflow:
                         strategy,
                         evidence_policy,
                         triggering_review=review,
+                        triggering_review_input=trigger_review_input,
+                        triggering_candidate=trigger_candidate,
                     )
                 except EvidenceResolutionBlocked as error:
                     status = (
@@ -1547,7 +1627,10 @@ class ScientificProblemWorkflow:
         run: ScientificProblemRun,
         cycle_index: int,
         approval_prefix: str,
-    ) -> None:
+    ) -> tuple[
+        ApprovalReviewInput | RevisionApprovalReviewInput,
+        ScientificQuestionPlan,
+    ]:
         prefix = f"{self._evidence_cycle_prefix(cycle_index)}/trigger"
         planning_input = self.runs.load_artifact(
             run.run_id, "planning-input.yaml", ScientificPlanningInput
@@ -1575,38 +1658,234 @@ class ScientificProblemWorkflow:
             proposal.proposal_id,
             proposal,
         )
-        approval_models = (
+        review_input = parse_approval_review_input(
+            load_data(
+                self.runs.resolve_artifact_path(
+                    run.run_id, f"{approval_prefix}/approval-review-input.yaml"
+                )
+            )
+        )
+        review = self.runs.load_artifact(
+            run.run_id,
+            f"{approval_prefix}/approval-review.yaml",
+            ApprovalReviewRecord,
+        )
+        verdict = self.runs.load_artifact(
+            run.run_id,
+            f"{approval_prefix}/approval-verdict.yaml",
+            ApprovalVerdict,
+        )
+        approval_receipt = self.runs.load_artifact(
+            run.run_id,
+            f"{approval_prefix}/independent-approval-receipt.yaml",
+            IndependentApprovalReceipt,
+        )
+        gate = self.runs.load_artifact(
+            run.run_id, f"{approval_prefix}/plan-gate.yaml", GateVerdict
+        )
+        policy = self.runs.load_artifact(
+            run.run_id,
+            f"{approval_prefix}/project-trust-policy.yaml",
+            ProjectTrustPolicy,
+        )
+        candidate_ids = tuple(item.artifact_id for item in run.candidate_plans)
+        if review_input.candidate_plan.plan_id not in candidate_ids:
+            raise ValueError("evidence trigger review candidate is not part of the run")
+        candidate_index = candidate_ids.index(review_input.candidate_plan.plan_id)
+        candidate = self._load_bound_artifact(
+            run.run_id,
+            run.candidate_plans[candidate_index],
+            ScientificQuestionPlan,
+        )
+        validation = self._load_bound_artifact(
+            run.run_id,
+            run.plan_validation_records[candidate_index],
+            PlanValidationRecord,
+        )
+        compilation_receipt = self._load_bound_artifact(
+            run.run_id,
+            run.candidate_compilation_receipts[candidate_index],
+            PlanCompilationReceipt,
+        )
+        if not validate_plan_compilation_receipt(
+            candidate, compilation_receipt
+        ).valid:
+            raise ValueError("evidence trigger compilation receipt is invalid")
+        if not validate_independent_approval_chain(
+            candidate,
+            verdict,
+            review_input,
+            review,
+            approval_receipt,
+        ).valid:
+            raise ValueError("evidence trigger independent approval chain is invalid")
+        if (
+            gate.candidate_id != candidate.plan_id
+            or gate.candidate_content_hash != content_hash(candidate)
+            or gate.plan_validation_id != validation.validation_id
+            or gate.plan_validation_hash != content_hash(validation)
+            or gate.approval_verdict_id != verdict.verdict_id
+            or gate.approval_verdict_hash != content_hash(verdict)
+            or gate.independent_approval_receipt_id != approval_receipt.receipt_id
+            or gate.independent_approval_receipt_hash != approval_receipt.content_hash
+            or gate.plan_compilation_receipt_id != compilation_receipt.receipt_id
+            or gate.plan_compilation_receipt_hash != compilation_receipt.content_hash
+            or gate.trust_policy_version != policy.policy_version
+            or gate.trust_policy_hash != content_hash(policy)
+        ):
+            raise ValueError("evidence trigger gate does not bind its approval chain")
+        artifacts = (
+            (
+                "approval-review-input.yaml",
+                "approval_review_input",
+                review_input.review_input_id,
+                review_input,
+            ),
             (
                 "approval-review.yaml",
                 "approval_review_record",
-                ApprovalReviewRecord,
-                "review_id",
+                review.review_id,
+                review,
             ),
             (
                 "approval-verdict.yaml",
                 "approval_verdict",
-                ApprovalVerdict,
-                "verdict_id",
+                verdict.verdict_id,
+                verdict,
             ),
             (
                 "independent-approval-receipt.yaml",
                 "independent_approval_receipt",
-                IndependentApprovalReceipt,
-                "receipt_id",
+                approval_receipt.receipt_id,
+                approval_receipt,
             ),
-            ("plan-gate.yaml", "gate_verdict", GateVerdict, "gate_id"),
+            ("plan-gate.yaml", "gate_verdict", gate.gate_id, gate),
+            (
+                "project-trust-policy.yaml",
+                "project_trust_policy",
+                "project-trust-policy",
+                policy,
+            ),
+            (
+                "candidate-plan.yaml",
+                "scientific_question_plan",
+                candidate.plan_id,
+                candidate,
+            ),
+            (
+                "plan-validation-record.yaml",
+                "plan_validation_record",
+                validation.validation_id,
+                validation,
+            ),
+            (
+                "plan-compilation-receipt.yaml",
+                "plan_compilation_receipt",
+                compilation_receipt.receipt_id,
+                compilation_receipt,
+            ),
         )
-        for filename, artifact_type, model_type, id_field in approval_models:
-            value = self.runs.load_artifact(
-                run.run_id, f"{approval_prefix}/{filename}", model_type
-            )
+        for filename, artifact_type, artifact_id, value in artifacts:
             self.runs.write_immutable_artifact(
                 run.run_id,
                 f"{prefix}/{filename}",
                 artifact_type,
-                getattr(value, id_field),
+                artifact_id,
                 value,
             )
+        return review_input, candidate
+
+    def _validate_evidence_trigger_archive(
+        self,
+        run_id: str,
+        cycle_index: int,
+        request_set: PlanningEvidenceRequestSet,
+    ) -> tuple[
+        ApprovalReviewInput | RevisionApprovalReviewInput,
+        ApprovalReviewRecord,
+        ScientificQuestionPlan,
+    ]:
+        prefix = f"{self._evidence_cycle_prefix(cycle_index)}/trigger"
+        review_input = parse_approval_review_input(
+            load_data(
+                self.runs.resolve_artifact_path(
+                    run_id, f"{prefix}/approval-review-input.yaml"
+                )
+            )
+        )
+        review = self.runs.load_artifact(
+            run_id, f"{prefix}/approval-review.yaml", ApprovalReviewRecord
+        )
+        verdict = self.runs.load_artifact(
+            run_id, f"{prefix}/approval-verdict.yaml", ApprovalVerdict
+        )
+        receipt = self.runs.load_artifact(
+            run_id,
+            f"{prefix}/independent-approval-receipt.yaml",
+            IndependentApprovalReceipt,
+        )
+        gate = self.runs.load_artifact(
+            run_id, f"{prefix}/plan-gate.yaml", GateVerdict
+        )
+        policy = self.runs.load_artifact(
+            run_id, f"{prefix}/project-trust-policy.yaml", ProjectTrustPolicy
+        )
+        candidate = self.runs.load_artifact(
+            run_id, f"{prefix}/candidate-plan.yaml", ScientificQuestionPlan
+        )
+        validation = self.runs.load_artifact(
+            run_id,
+            f"{prefix}/plan-validation-record.yaml",
+            PlanValidationRecord,
+        )
+        compilation_receipt = self.runs.load_artifact(
+            run_id,
+            f"{prefix}/plan-compilation-receipt.yaml",
+            PlanCompilationReceipt,
+        )
+        expected_bindings = (
+            request_set.triggering_review_input_id,
+            request_set.triggering_review_input_hash,
+            request_set.triggering_review_id,
+            request_set.triggering_review_hash,
+            request_set.triggering_candidate_id,
+            request_set.triggering_candidate_hash,
+        )
+        actual_bindings = (
+            review_input.review_input_id,
+            review_input.content_hash,
+            review.review_id,
+            review.content_hash,
+            candidate.plan_id,
+            content_hash(candidate),
+        )
+        if expected_bindings != actual_bindings:
+            raise ValueError("evidence request does not bind its archived approval trigger")
+        if not validate_plan_compilation_receipt(
+            candidate, compilation_receipt
+        ).valid or not validate_independent_approval_chain(
+            candidate, verdict, review_input, review, receipt
+        ).valid:
+            raise ValueError("archived evidence trigger approval chain is invalid")
+        if (
+            review_input.candidate_plan != candidate
+            or validation.plan_id != candidate.plan_id
+            or validation.plan_content_hash != content_hash(candidate)
+            or gate.candidate_id != candidate.plan_id
+            or gate.candidate_content_hash != content_hash(candidate)
+            or gate.plan_validation_id != validation.validation_id
+            or gate.plan_validation_hash != content_hash(validation)
+            or gate.approval_verdict_id != verdict.verdict_id
+            or gate.approval_verdict_hash != content_hash(verdict)
+            or gate.independent_approval_receipt_id != receipt.receipt_id
+            or gate.independent_approval_receipt_hash != receipt.content_hash
+            or gate.plan_compilation_receipt_id != compilation_receipt.receipt_id
+            or gate.plan_compilation_receipt_hash != compilation_receipt.content_hash
+            or gate.trust_policy_version != policy.policy_version
+            or gate.trust_policy_hash != content_hash(policy)
+        ):
+            raise ValueError("archived evidence trigger gate binding is invalid")
+        return review_input, review, candidate
 
     def _maybe_resolve_planning_evidence(
         self,
@@ -1620,6 +1899,10 @@ class ScientificProblemWorkflow:
         strategy: PlanningStrategy,
         policy: PlanningEvidenceCyclePolicy | None,
         triggering_review: ApprovalReviewRecord | None = None,
+        triggering_review_input: ApprovalReviewInput | RevisionApprovalReviewInput | None = None,
+        triggering_candidate: ScientificQuestionPlan | None = None,
+        direction_set: ResearchDirectionSet | None = None,
+        triage: DirectionTriageRecord | None = None,
     ) -> tuple[
         ScientificProblemRun,
         ScientificContextPacket,
@@ -1642,7 +1925,14 @@ class ScientificProblemWorkflow:
                     latest.terminal_reason,
                 )
         blocking_gaps = tuple(gap for gap in planning_input.evidence_gaps if gap.blocking)
-        if not blocking_gaps and triggering_review is None:
+        direction_needs = tuple(
+            need
+            for disposition in (triage.dispositions if triage is not None else ())
+            for need in disposition.evidence_needs
+            if need.resolution_kind
+            == EvidenceGapResolutionKind.RETRIEVAL_RESOLVABLE
+        )
+        if not blocking_gaps and triggering_review is None and not direction_needs:
             return run, context, packet, planning_input
         attempt_count = self._evidence_attempt_count(run.run_id)
         if attempt_count:
@@ -1682,7 +1972,6 @@ class ScientificProblemWorkflow:
         resolution_path = self.runs.resolve_artifact_path(
             run.run_id, f"{prefix}/resolutions.yaml"
         )
-        direction_set = None
         provider_block_reason: str | None = None
         if request_path.exists():
             request_set = self.runs.load_artifact(
@@ -1690,6 +1979,36 @@ class ScientificProblemWorkflow:
                 f"{prefix}/request-set.yaml",
                 PlanningEvidenceRequestSet,
             )
+            if request_set.triggering_review_id is not None:
+                (
+                    archived_review_input,
+                    archived_review,
+                    archived_candidate,
+                ) = self._validate_evidence_trigger_archive(
+                    run.run_id, cycle_index, request_set
+                )
+                if triggering_review is not None and (
+                    triggering_review.review_id != archived_review.review_id
+                    or triggering_review.content_hash != archived_review.content_hash
+                ):
+                    raise EvidenceResolutionBlocked(
+                        "EVIDENCE_TRIGGER_REVIEW_MISMATCH",
+                        "current review does not match the archived evidence trigger",
+                    )
+                triggering_review = archived_review
+                triggering_review_input = archived_review_input
+                triggering_candidate = archived_candidate
+            if request_set.direction_set_id is not None:
+                if direction_set is None or triage is None or (
+                    request_set.direction_set_id != direction_set.direction_set_id
+                    or request_set.direction_set_hash != direction_set.content_hash
+                    or request_set.triage_id != triage.triage_id
+                    or request_set.triage_hash != triage.content_hash
+                ):
+                    raise EvidenceResolutionBlocked(
+                        "EVIDENCE_DIRECTION_CONTEXT_MISMATCH",
+                        "saved evidence request does not bind the active direction and triage",
+                    )
             if not resolution_path.exists():
                 raise EvidenceResolutionBlocked(
                     "EVIDENCE_RETRIEVAL_OUTCOME_UNCERTAIN",
@@ -1724,6 +2043,36 @@ class ScientificProblemWorkflow:
                     "triggering_review_hash": (
                         triggering_review.content_hash if triggering_review else None
                     ),
+                    "triggering_review_input_id": (
+                        triggering_review_input.review_input_id
+                        if triggering_review_input is not None
+                        else None
+                    ),
+                    "triggering_review_input_hash": (
+                        triggering_review_input.content_hash
+                        if triggering_review_input is not None
+                        else None
+                    ),
+                    "triggering_candidate_id": (
+                        triggering_candidate.plan_id
+                        if triggering_candidate is not None
+                        else None
+                    ),
+                    "triggering_candidate_hash": (
+                        content_hash(triggering_candidate)
+                        if triggering_candidate is not None
+                        else None
+                    ),
+                    "direction_set_id": (
+                        direction_set.direction_set_id
+                        if direction_set is not None
+                        else None
+                    ),
+                    "direction_set_hash": (
+                        direction_set.content_hash if direction_set is not None else None
+                    ),
+                    "triage_id": triage.triage_id if triage is not None else None,
+                    "triage_hash": triage.content_hash if triage is not None else None,
                 }
             )
             try:
@@ -1739,24 +2088,9 @@ class ScientificProblemWorkflow:
                     "EVIDENCE_REQUEST_OUTCOME_UNCERTAIN",
                     "another process already claimed this evidence-request cycle",
                 ) from error
-            if strategy == PlanningStrategy.HIERARCHICAL and triggering_review is None:
-                method = getattr(planner, "propose_directions", None)
-                if not callable(method):
-                    raise EvidenceResolutionBlocked(
-                        "EVIDENCE_DIRECTION_CONTEXT_UNAVAILABLE",
-                        "hierarchical provider cannot propose trigger directions",
-                    )
-                direction_set = build_research_direction_set(
-                    planning_input, method(planning_input), planner
-                )
-                report = validate_research_direction_set(
-                    direction_set, planning_input
-                )
-                if not report.valid:
-                    raise EvidenceResolutionBlocked(
-                        "EVIDENCE_DIRECTION_CONTEXT_INVALID",
-                        ", ".join(item.code for item in report.issues),
-                    )
+            retrievable = retrieval_resolvable_gaps(planning_input)
+            response = None
+            if direction_set is not None and triage is not None:
                 self.runs.write_immutable_artifact(
                     run.run_id,
                     f"{prefix}/trigger-directions.yaml",
@@ -1764,9 +2098,14 @@ class ScientificProblemWorkflow:
                     direction_set.direction_set_id,
                     direction_set,
                 )
-            retrievable = retrieval_resolvable_gaps(planning_input)
-            response = None
-            if triggering_review is not None or (
+                self.runs.write_immutable_artifact(
+                    run.run_id,
+                    f"{prefix}/trigger-triage.yaml",
+                    "direction_triage_record",
+                    triage.triage_id,
+                    triage,
+                )
+            if triggering_review is not None or direction_needs or (
                 retrievable and len(retrievable) == len(blocking_gaps)
             ):
                 method = getattr(planner, "propose_evidence_requests", None)
@@ -1776,11 +2115,20 @@ class ScientificProblemWorkflow:
                         "planning provider cannot produce bounded evidence requests",
                     )
                 try:
-                    response = (
-                        method(planning_input, triggering_review)
-                        if triggering_review is not None
-                        else method(planning_input)
-                    )
+                    if triggering_review is not None:
+                        response = method(
+                            planning_input,
+                            triggering_review,
+                            triggering_review_input=triggering_review_input,
+                        )
+                    elif direction_needs:
+                        response = method(
+                            planning_input,
+                            directions=direction_set,
+                            triage=triage,
+                        )
+                    else:
+                        response = method(planning_input)
                 except (PlanningEvidenceError, ValueError) as error:
                     provider_block_reason = str(error)
             request_set = build_planning_evidence_request_set(
@@ -1793,12 +2141,16 @@ class ScientificProblemWorkflow:
                 ),
                 source_acquisition_allowed=policy.source_acquisition_allowed,
                 direction_set=direction_set,
+                triage=triage,
+                triggering_review=triggering_review,
                 triggering_review_id=(
                     triggering_review.review_id if triggering_review else None
                 ),
                 triggering_review_hash=(
                     triggering_review.content_hash if triggering_review else None
                 ),
+                triggering_review_input=triggering_review_input,
+                triggering_candidate=triggering_candidate,
             )
             for prior in completed:
                 if prior.knowledge_snapshot_id != request_set.knowledge_snapshot_id:
@@ -1923,7 +2275,15 @@ class ScientificProblemWorkflow:
                     terminal_reason = "; ".join(
                         record.resolution_rationale for record in no_matches
                     )
-                    category = "NO_TRUSTED_MATCH"
+                    category = (
+                        "NO_TRUSTED_MATCH"
+                        if all(
+                            record.retrieval_status is None
+                            or record.retrieval_status.value == "no_trusted_match"
+                            for record in no_matches
+                        )
+                        else "TRUSTED_MATCH_DID_NOT_RESOLVE_GAP"
+                    )
         if terminal_reason is not None:
             cycle = self._record_evidence_cycle(
                 run.run_id,
@@ -1998,6 +2358,12 @@ class ScientificProblemWorkflow:
         interpretation = MockInterpretationProvider()
         child_packet = ScientificEvidencePacketBuilder(interpretation).build(
             child_context, evidence
+        )
+        child_packet = _carry_unresolved_evidence_gaps(
+            child_packet,
+            planning_input,
+            request_set,
+            resolutions,
         )
         child_input = PlanningContextResolver(self.domain_loader).resolve(
             child_context,
@@ -2101,13 +2467,12 @@ class ScientificProblemWorkflow:
         self.runs.save(updated)
         return updated, child_context, child_packet, child_input
 
-    def _hierarchical_compilation(
+    def _hierarchical_direction_triage(
         self,
         run: ScientificProblemRun,
         planning_input,
-        evidence,
         planner,
-    ) -> CompilationResult:
+    ) -> tuple[ResearchDirectionSet, DirectionTriageRecord]:
         root = self._hierarchical_root(run.run_id)
 
         def existing(path: str) -> bool:
@@ -2225,6 +2590,23 @@ class ScientificProblemWorkflow:
             raise HierarchicalPlanningBlocked(
                 ("direction triage retained no direction for plan expansion",)
             )
+        return directions, triage
+
+    def _hierarchical_compilation(
+        self,
+        run: ScientificProblemRun,
+        planning_input,
+        evidence,
+        planner,
+    ) -> CompilationResult:
+        root = self._hierarchical_root(run.run_id)
+
+        def existing(path: str) -> bool:
+            return self.runs.resolve_artifact_path(run.run_id, path).exists()
+
+        directions, triage = self._hierarchical_direction_triage(
+            run, planning_input, planner
+        )
 
         expansion_path = f"{root}/expansion.yaml"
         expansion_attempt_path = f"{root}/attempts/expansion.yaml"
