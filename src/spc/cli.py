@@ -152,6 +152,7 @@ from .models import (
     RetrievalManifest,
     RetrievalQuery,
     ReportedResult,
+    ResultEvidenceSubmission,
     ResolvedLiteratureResource,
     ResultContext,
     ScientificCapability,
@@ -244,6 +245,12 @@ from .retrieval import (
     PersistentKnowledgeRetriever,
     ScientificContextBuilder,
     build_retrieval_query,
+)
+from .result_feedback import (
+    ResultEvidenceIntakeService,
+    ResultFeedbackError,
+    SuccessorPlanningService,
+    result_feedback_status,
 )
 from .repositories import (
     CompositeEvidenceStore,
@@ -1941,6 +1948,153 @@ def export_scientific_run(
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from error
     typer.echo(str(path))
+
+
+@app.command("intake-result-evidence")
+def intake_result_evidence(
+    submission_file: Annotated[
+        Path,
+        typer.Option("--submission", exists=True, dir_okay=False, readable=True),
+    ],
+    artifact_root: Annotated[
+        Path,
+        typer.Option("--artifact-root", exists=True, file_okay=False, readable=True),
+    ],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+    execution_proposal_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--execution-proposal",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ] = None,
+) -> None:
+    """Validate and persist an untrusted downstream result declaration."""
+    try:
+        submission = load_model(submission_file, ResultEvidenceSubmission)
+        execution_proposal = (
+            load_model(execution_proposal_file, ExecutionProposal)
+            if execution_proposal_file is not None
+            else None
+        )
+        assessment = ResultEvidenceIntakeService(
+            state_dir=state_dir,
+            knowledge_dir=knowledge_dir,
+        ).intake(
+            submission,
+            artifact_root=artifact_root,
+            execution_proposal=execution_proposal,
+        )
+    except (FileNotFoundError, OSError, ValueError, ResultFeedbackError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(assessment.model_dump_json(indent=2))
+    if assessment.status.value != "RESULT_REQUIRES_CURATION":
+        raise typer.Exit(1)
+
+
+@app.command("curate-result-evidence")
+def curate_result_evidence(
+    parent_run_id: Annotated[str, typer.Option("--parent-run-id")],
+    submission_id: Annotated[str, typer.Option("--submission-id")],
+    status: Annotated[CurationStatus, typer.Option("--status")],
+    curator_id: Annotated[str, typer.Option("--curator-id")],
+    rationale: Annotated[str, typer.Option("--rationale")],
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Explicitly accept or reject one validated result intake."""
+    try:
+        curation, receipt = ResultEvidenceIntakeService(
+            state_dir=state_dir,
+            knowledge_dir=knowledge_dir,
+        ).curate(
+            parent_run_id=parent_run_id,
+            submission_id=submission_id,
+            status=status,
+            curator_id=curator_id,
+            rationale=rationale,
+        )
+    except (FileNotFoundError, OSError, ValueError, ResultFeedbackError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(
+        json.dumps(
+            {
+                "curation": curation.model_dump(mode="json"),
+                "materialization_receipt": (
+                    receipt.model_dump(mode="json") if receipt is not None else None
+                ),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+@app.command("compile-successor-plan")
+def compile_successor_plan(
+    parent_run_id: Annotated[str, typer.Option("--parent-run-id")],
+    submission_ids: Annotated[list[str], typer.Option("--submission-id")],
+    follow_up_request: Annotated[
+        str | None, typer.Option("--follow-up-request")
+    ] = None,
+    planning_provider: Annotated[
+        str, typer.Option("--planning-provider")
+    ] = "mock",
+    approval_provider: Annotated[
+        str, typer.Option("--approval-provider")
+    ] = "mock",
+    candidate_id: Annotated[str | None, typer.Option("--candidate-id")] = None,
+    knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Explicitly compile and independently review a result-bound successor plan."""
+    if planning_provider != "mock" or approval_provider != "mock":
+        raise typer.BadParameter(
+            "current successor CLI supports the existing offline mock providers only"
+        )
+    try:
+        cycle = SuccessorPlanningService(
+            state_dir=state_dir,
+            knowledge_dir=knowledge_dir,
+        ).compile(
+            parent_run_id=parent_run_id,
+            submission_ids=tuple(submission_ids),
+            follow_up_request=follow_up_request,
+            selected_candidate_id=candidate_id,
+        )
+    except (FileNotFoundError, OSError, ValueError, ResultFeedbackError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(cycle.model_dump_json(indent=2))
+    if cycle.status.value in {
+        "INSUFFICIENT_RESULT_EVIDENCE",
+        "RESULT_REQUIRES_CURATION",
+        "HUMAN_SCIENTIFIC_DECISION_REQUIRED",
+        "REJECTED",
+    }:
+        raise typer.Exit(1)
+
+
+@app.command("successor-plan-status")
+def successor_plan_status(
+    parent_run_id: Annotated[str, typer.Option("--parent-run-id")],
+    state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
+) -> None:
+    """Show result-intake and successor-cycle status for one parent run."""
+    repository = ScientificProblemRunRepository(state_dir.resolve())
+    repository.get(parent_run_id)
+    typer.echo(
+        json.dumps(
+            result_feedback_status(parent_run_id, repository),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
 @app.command("knowledge-status")

@@ -20,7 +20,7 @@ from ..repositories import KnowledgeRepositories, ModelRepository
 from ..serialization import content_hash
 from ..validators import EvidenceSpanRepository
 
-RESOLVER_VERSION = "planning-context-resolver-1.1.0"
+RESOLVER_VERSION = "planning-context-resolver-1.2.0"
 RecordT = TypeVar("RecordT", ExpertCase, LiteratureWorkflowPattern, ScientificCapability)
 
 
@@ -186,6 +186,15 @@ class PlanningContextResolver:
             }
             for quote in evidence_packet.source_quotes
         }
+        for evidence_id in allowed_evidence_ids:
+            if evidence_id in evidence_bindings:
+                continue
+            evidence = evidence_repository.get(evidence_id)
+            source = evidence_repository.verify_evidence_integrity(evidence)
+            evidence_bindings[evidence_id] = {
+                "source_id": source.source_id,
+                "source_version": source.version,
+            }
         provenance_manifest = {
             "resolver_version": RESOLVER_VERSION,
             "retrieval_id": manifest.retrieval_id,

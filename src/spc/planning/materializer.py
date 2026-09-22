@@ -402,6 +402,10 @@ class PlanMaterializer:
         revision_parent = provider_config.get("revision_parent_plan_id")
         revision_input_id = provider_config.get("revision_input_id")
         revision_input_hash = provider_config.get("revision_input_hash")
+        successor_parent = provider_config.get("successor_parent_plan_id")
+        successor_binding_id = provider_config.get("successor_parent_binding_id")
+        successor_binding_hash = provider_config.get("successor_parent_binding_hash")
+        successor_cycle_index = provider_config.get("successor_cycle_index")
         if revision_index:
             if not all(
                 isinstance(value, str) and value.strip()
@@ -416,6 +420,32 @@ class PlanMaterializer:
             )
         else:
             revision_manifest = ()
+        successor_values = (
+            successor_parent,
+            successor_binding_id,
+            successor_binding_hash,
+            successor_cycle_index,
+        )
+        if any(value is not None for value in successor_values):
+            if revision_index:
+                raise ValueError("a revision proposal cannot also be a successor proposal")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (
+                    successor_parent,
+                    successor_binding_id,
+                    successor_binding_hash,
+                )
+            ) or not isinstance(successor_cycle_index, int) or successor_cycle_index < 1:
+                raise ValueError("successor proposal is missing parent/result bindings")
+            successor_manifest = (
+                f"successor-parent-plan:{successor_parent}",
+                f"successor-parent-binding:{successor_binding_id}",
+                f"successor-parent-binding-hash:{successor_binding_hash}",
+                f"successor-cycle:{successor_cycle_index}",
+            )
+        else:
+            successor_manifest = ()
 
         identity = {
             "version": f"1.0.{revision_index}",
@@ -458,11 +488,14 @@ class PlanMaterializer:
                 f"distinguishing-axis:{candidate.distinguishing_axis}",
                 f"distinguishing-value:{candidate.distinguishing_value}",
                 *revision_manifest,
+                *successor_manifest,
                 *(f"claim:{claim_id}" for claim_id in candidate.claim_refs),
             ),
             "target_agent_capability_requirements": candidate.capability_ids,
             "wave_id": "wave-1",
-            "follow_up_of": revision_parent if revision_index else None,
+            "follow_up_of": (
+                revision_parent if revision_index else successor_parent
+            ),
             "source_proposal": proposal.proposal_id,
         }
         return ScientificQuestionPlan(

@@ -3878,6 +3878,11 @@ def scientific_run_status(
             }
             for gap in packet.evidence_gaps
         ]
+    result_feedback = None
+    if repository is not None:
+        from ..result_feedback import result_feedback_status
+
+        result_feedback = result_feedback_status(run.run_id, repository)
     return {
         "run_id": run.run_id,
         "request": run.original_request,
@@ -3897,6 +3902,7 @@ def scientific_run_status(
         "hierarchical_planning": hierarchical_state,
         "evidence_resolution": evidence_resolution_state,
         "export_state": run.export_path,
+        **(result_feedback or {}),
         "failure": run.failure.model_dump(mode="json") if run.failure else None,
     }
 

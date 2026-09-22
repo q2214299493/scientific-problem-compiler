@@ -134,6 +134,60 @@ rejects command-, script-, executable-, shell-, scheduler-, or submission-
 bearing keys at any depth. These checks do not grant authorization:
 `ExecutionProposal` remains both unauthorized and non-runnable.
 
+## Provenance-bound downstream result feedback
+
+Result feedback is a separate boundary from evidence retrieval. Retrieval
+finds already-existing trusted knowledge; result feedback imports a new
+calculation, experiment, diagnostic, partial outcome, failed execution, or
+null/negative observation produced outside SPC. SPC still does not log in to a
+cluster, submit a job, run VASP/NEB, authorize execution, or reinterpret a
+failed calculation as hypothesis falsification. Plans and tasks remain
+`runnable: false`.
+
+An external `ResultEvidenceSubmission` is an untrusted declaration. Intake
+checks its artifact checksums, exact approved run/plan version, task and
+capability, optional export/execution-proposal binding, and system/method
+fingerprints. A changed fingerprint is accepted only when the exact difference
+is disclosed by the submission and was already approved by the plan. Passing
+these checks yields `RESULT_REQUIRES_CURATION`, not trusted scientific evidence.
+
+```powershell
+spc intake-result-evidence --submission result-submission.yaml `
+  --artifact-root downstream-output --knowledge-dir knowledge --state-dir .spc
+
+spc curate-result-evidence --parent-run-id scientific-run-... `
+  --submission-id result-submission-... --status accepted `
+  --curator-id human-reviewer --rationale "Reviewed provenance and scope." `
+  --knowledge-dir knowledge --state-dir .spc
+```
+
+Explicit acceptance materializes the verified declaration through the existing
+project `EvidenceSpan`, `MethodFact`, `ModelFact`, and `ReportedResult`
+contracts. It does not create a second result database and does not turn the
+executor's interpretation into a scientific conclusion. `failed_execution`
+never creates a normal `ReportedResult`; partial results retain missing outputs
+as gaps, and null/negative evidence is preserved rather than filtered.
+
+Successor planning is a separate, explicit command. It binds the exact parent
+run, plan version, task, accepted submissions, materialization receipts, and
+evidence IDs; then creates a new context, evidence packet, planning input, plan,
+validation record, independent review, receipt, and gate. Parent approvals are
+not reused.
+
+```powershell
+spc compile-successor-plan --parent-run-id scientific-run-... `
+  --submission-id result-submission-... `
+  --follow-up-request "Plan one additional discriminating test." `
+  --planning-provider mock --approval-provider mock `
+  --knowledge-dir knowledge --state-dir .spc
+
+spc successor-plan-status --parent-run-id scientific-run-... --state-dir .spc
+```
+
+Artifacts remain immutable under `result-evidence/` and
+`successor-planning/cycle-N/`. The offline mock providers demonstrate the
+binding and control flow only; they do not establish scientific correctness.
+
 ## Knowledge Layer K1A
 
 K1A adds immutable persistence contracts for curated literature metadata,
