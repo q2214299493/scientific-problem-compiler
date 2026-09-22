@@ -3610,6 +3610,19 @@ class ReportedResult(StrictModel):
     result_status: ResultStatus
 
 
+class ReportedObservation(StrictModel):
+    """A provenance-bound qualitative observation without numeric semantics."""
+
+    observation_id: NonBlankStr
+    quantity: NonBlankStr
+    qualitative_value: NonBlankStr
+    system_context: FrozenDict
+    method_context: FrozenDict
+    result_context: ResultContext | None = None
+    evidence_refs: tuple[NonBlankStr, ...] = Field(min_length=1)
+    result_status: ResultStatus
+
+
 class MethodFact(StrictModel):
     fact_id: NonBlankStr
     text: NonBlankStr
@@ -4142,6 +4155,9 @@ class ScientificEvidencePacket(StrictModel):
     source_quotes: tuple[SourceQuote, ...] = ()
     source_claims: tuple[SourceClaim, ...] = ()
     reported_results: tuple[ReportedResult, ...] = ()
+    reported_observations: tuple[ReportedObservation, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     method_facts: tuple[MethodFact, ...] = ()
     model_facts: tuple[ModelFact, ...] = ()
     evidence_assessments: tuple[EvidenceAssessment, ...] = ()
@@ -4212,6 +4228,9 @@ class ScientificPlanningInput(StrictModel):
     source_quotes: tuple[SourceQuote, ...] = ()
     source_claims: tuple[SourceClaim, ...] = ()
     reported_results: tuple[ReportedResult, ...] = ()
+    reported_observations: tuple[ReportedObservation, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     method_facts: tuple[MethodFact, ...] = ()
     model_facts: tuple[ModelFact, ...] = ()
     evidence_assessments: tuple[EvidenceAssessment, ...] = ()
@@ -4257,6 +4276,7 @@ class ScientificPlanningInput(StrictModel):
                 self.source_quotes,
                 self.source_claims,
                 self.reported_results,
+                self.reported_observations,
                 self.method_facts,
                 self.model_facts,
                 self.comparison_constraints,
@@ -4789,6 +4809,9 @@ class ApprovalReviewInput(StrictModel):
     source_quotes: tuple[SourceQuote, ...] = ()
     source_claims: tuple[SourceClaim, ...] = ()
     reported_results: tuple[ReportedResult, ...] = ()
+    reported_observations: tuple[ReportedObservation, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     method_facts: tuple[MethodFact, ...] = ()
     model_facts: tuple[ModelFact, ...] = ()
     evidence_assessments: tuple[EvidenceAssessment, ...] = ()
@@ -4853,6 +4876,7 @@ class ApprovalReviewInput(StrictModel):
             for collection in (
                 self.source_claims,
                 self.reported_results,
+                self.reported_observations,
                 self.method_facts,
                 self.model_facts,
                 self.comparison_constraints,
@@ -5972,6 +5996,12 @@ class ResultEvidenceAssessment(StrictModel):
     parent_plan_hash: Sha256Str
     task_id: NonBlankStr
     capability_id: NonBlankStr
+    parent_authority_origin: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    parent_authority_ref: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     content_bound: bool
     plan_bound: bool
     context_compatible: bool
@@ -6018,10 +6048,19 @@ class ResultEvidenceMaterializationReceipt(StrictModel):
     parent_plan_id: NonBlankStr
     parent_plan_hash: Sha256Str
     task_id: NonBlankStr
+    parent_authority_origin: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    parent_authority_ref: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     source_id: NonBlankStr
     source_version: NonBlankStr
     accepted_evidence_ids: tuple[NonBlankStr, ...]
     reported_result_hashes: dict[NonBlankStr, Sha256Str] = Field(default_factory=dict)
+    reported_observation_hashes: dict[NonBlankStr, Sha256Str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     method_fact_hashes: dict[NonBlankStr, Sha256Str] = Field(default_factory=dict)
     model_fact_hashes: dict[NonBlankStr, Sha256Str] = Field(default_factory=dict)
     missing_observables: tuple[NonBlankStr, ...] = ()
@@ -6034,7 +6073,9 @@ class ResultEvidenceMaterializationReceipt(StrictModel):
         if len(set(self.accepted_evidence_ids)) != len(self.accepted_evidence_ids):
             raise ValueError("accepted evidence IDs must be unique")
         identity = self.model_dump(
-            mode="json", exclude={"receipt_id", "content_hash"}
+            mode="json",
+            exclude={"receipt_id", "content_hash"},
+            exclude_none=True,
         )
         expected_id = f"result-materialization-{content_hash(identity)[:24]}"
         if self.receipt_id != expected_id:

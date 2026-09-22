@@ -276,7 +276,10 @@ class PlanMaterializer:
 
         system_values: dict[str, list[Any]] = defaultdict(list)
         method_values: dict[str, list[Any]] = defaultdict(list)
-        for result in planning_input.reported_results:
+        for result in (
+            *planning_input.reported_results,
+            *planning_input.reported_observations,
+        ):
             for key, value in result.system_context.items():
                 if value not in system_values[key]:
                     system_values[key].append(value)

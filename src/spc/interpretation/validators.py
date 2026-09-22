@@ -641,6 +641,7 @@ def validate_evidence_packet_integrity(
     id_values = [
         *(item.claim_id for item in packet.source_claims),
         *(item.result_id for item in packet.reported_results),
+        *(item.observation_id for item in packet.reported_observations),
         *(item.fact_id for item in packet.method_facts),
         *(item.fact_id for item in packet.model_facts),
         *(item.assessment_id for item in packet.evidence_assessments),
@@ -685,6 +686,49 @@ def validate_evidence_packet_integrity(
                     context=context,
                     evidence_repository=evidence_repository,
                     path=f"{collection_name}[{index}]",
+                )
+            )
+    method_facts = {fact.fact_id: fact for fact in packet.method_facts}
+    model_facts = {fact.fact_id: fact for fact in packet.model_facts}
+    for index, observation in enumerate(packet.reported_observations):
+        path = f"reported_observations[{index}]"
+        issues.extend(
+            _check_refs(
+                observation.evidence_refs,
+                context=context,
+                evidence_repository=evidence_repository,
+                path=path,
+            )
+        )
+        issues.extend(
+            result_context_record_issues(
+                observation,
+                method_facts,
+                model_facts,
+                path=f"{path}.result_context",
+                require_context=True,
+            )
+        )
+        expected_text = f"{observation.quantity} = {observation.qualitative_value}"
+        explicitly_supported = False
+        for evidence_id in observation.evidence_refs:
+            try:
+                evidence = evidence_repository.get(evidence_id)
+                evidence_repository.verify_evidence_integrity(evidence)
+            except (FileNotFoundError, KeyError, OSError, ValueError):
+                continue
+            if evidence.text.strip() == expected_text:
+                explicitly_supported = True
+                break
+        if not explicitly_supported:
+            issues.append(
+                ValidationIssue(
+                    code="QUALITATIVE_OBSERVATION_NOT_EXPLICIT",
+                    message=(
+                        "qualitative observation must be recoverable exactly from "
+                        "one cited EvidenceSpan"
+                    ),
+                    path=path,
                 )
             )
     issues.extend(validate_claim_evidence_refs(packet, context, evidence_repository).issues)

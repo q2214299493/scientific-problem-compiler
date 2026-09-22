@@ -250,7 +250,13 @@ class MockPlanningProvider:
             else f"{planning_input.original_request.rstrip('.')}?",
         )
         observable_names = tuple(
-            dict.fromkeys(result.quantity for result in planning_input.reported_results)
+            dict.fromkeys(
+                result.quantity
+                for result in (
+                    *planning_input.reported_results,
+                    *planning_input.reported_observations,
+                )
+            )
         ) or ("decision-relevant observable",)
         evidence_basis = (
             planning_input.allowed_claim_ids or planning_input.allowed_evidence_ids

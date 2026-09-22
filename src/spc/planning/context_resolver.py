@@ -225,6 +225,11 @@ class PlanningContextResolver:
             "source_quotes": evidence_packet.source_quotes,
             "source_claims": evidence_packet.source_claims,
             "reported_results": evidence_packet.reported_results,
+            **(
+                {"reported_observations": evidence_packet.reported_observations}
+                if evidence_packet.reported_observations
+                else {}
+            ),
             "method_facts": evidence_packet.method_facts,
             "model_facts": evidence_packet.model_facts,
             "evidence_assessments": evidence_packet.evidence_assessments,

@@ -5,10 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from spc.approval import MockApprovalProvider
 from spc.models import (
+    ApprovalDecision,
     CurationStatus,
     FingerprintDifference,
+    IndependentApprovalReceipt,
     ReportedObservable,
+    ResearchUpdate,
     ResultArtifactManifestEntry,
     ResultContextComparisonStatus,
     ResultEvidenceIntakeStatus,
@@ -20,6 +24,7 @@ from spc.models import (
     ScientificPlanningInput,
     ScientificProblemRunStatus,
     ScientificQuestionPlan,
+    SuccessorParentBinding,
 )
 from spc.result_feedback import (
     ResultFeedbackError,
@@ -37,6 +42,13 @@ REQUEST = (
     "The mechanism is not sufficiently convincing without a distinguishing "
     "observation."
 )
+
+
+class RejectSuccessorApproval(MockApprovalProvider):
+    def review(self, review_input):
+        return super().review(review_input).model_copy(
+            update={"decision_recommendation": ApprovalDecision.REJECT}
+        )
 
 
 def _approved_parent(tmp_path: Path, *, domain: str = "base"):
@@ -334,6 +346,124 @@ def test_explicit_plan_approved_deviation_is_preserved(tmp_path: Path) -> None:
     assert comparison.approved_deviation_refs
 
 
+@pytest.mark.parametrize(
+    ("approved_left", "approved_right", "actual_right"),
+    (
+        ("PBE", "RPBE", "SCAN"),
+        ("LDA", "RPBE", "RPBE"),
+    ),
+)
+def test_fingerprint_deviation_requires_exact_approved_values(
+    tmp_path: Path,
+    approved_left: str,
+    approved_right: str,
+    actual_right: str,
+) -> None:
+    _, _, run, plan = _approved_parent(tmp_path)
+    base_attributes = {**dict(plan.method_fingerprint.attributes), "functional": "PBE"}
+    expected_plan = plan.model_copy(
+        update={
+            "method_fingerprint": plan.method_fingerprint.model_copy(
+                update={"attributes": base_attributes}
+            ),
+            "fingerprint_differences": (
+                FingerprintDifference(
+                    field="method_context.functional",
+                    left=approved_left,
+                    right=approved_right,
+                    disclosed_deviation=True,
+                ),
+            ),
+        }
+    )
+    actual = expected_plan.method_fingerprint.model_copy(
+        update={"attributes": {**base_attributes, "functional": actual_right}}
+    )
+    declared = FingerprintDifference(
+        field="method.functional",
+        left="PBE",
+        right=actual_right,
+        disclosed_deviation=True,
+    )
+    submission, _, _ = _submission(
+        tmp_path,
+        run,
+        expected_plan,
+        method_fingerprint=actual,
+        declared_deviations=(declared,),
+    )
+
+    comparison = ResultEvidenceIntakeService._comparison(submission, expected_plan)
+
+    assert (
+        comparison.status
+        == ResultContextComparisonStatus.UNDECLARED_METHOD_CHANGE
+    )
+
+
+def test_one_wrong_value_blocks_multiple_declared_deviations(tmp_path: Path) -> None:
+    _, _, run, plan = _approved_parent(tmp_path)
+    base = {
+        **dict(plan.method_fingerprint.attributes),
+        "functional": "PBE",
+        "dispersion": "none",
+    }
+    approved = (
+        FingerprintDifference(
+            field="method.functional",
+            left="PBE",
+            right="RPBE",
+            disclosed_deviation=True,
+        ),
+        FingerprintDifference(
+            field="method.dispersion",
+            left="none",
+            right="D3",
+            disclosed_deviation=True,
+        ),
+    )
+    expected_plan = plan.model_copy(
+        update={
+            "method_fingerprint": plan.method_fingerprint.model_copy(
+                update={"attributes": base}
+            ),
+            "fingerprint_differences": approved,
+        }
+    )
+    actual = expected_plan.method_fingerprint.model_copy(
+        update={
+            "attributes": {
+                **base,
+                "functional": "RPBE",
+                "dispersion": "D4",
+            }
+        }
+    )
+    declared = (
+        approved[0],
+        FingerprintDifference(
+            field="method.dispersion",
+            left="none",
+            right="D4",
+            disclosed_deviation=True,
+        ),
+    )
+    submission, _, _ = _submission(
+        tmp_path,
+        run,
+        expected_plan,
+        method_fingerprint=actual,
+        declared_deviations=declared,
+    )
+
+    comparison = ResultEvidenceIntakeService._comparison(submission, expected_plan)
+
+    assert (
+        comparison.status
+        == ResultContextComparisonStatus.UNDECLARED_METHOD_CHANGE
+    )
+
+
 def test_failed_execution_never_materializes_reported_result(tmp_path: Path) -> None:
     repositories, _, run, plan = _approved_parent(tmp_path)
     submission, artifact_root, _ = _submission(
@@ -355,6 +485,7 @@ def test_failed_execution_never_materializes_reported_result(tmp_path: Path) -> 
     ) == (run.run_id, plan.plan_id, content_hash(plan), plan.tasks[0].task_id)
 
     assert not receipt.reported_result_hashes
+    assert not receipt.reported_observation_hashes
     assert receipt.accepted_evidence_ids
     assert receipt.missing_observables == plan.tasks[0].outputs
 
@@ -362,7 +493,7 @@ def test_failed_execution_never_materializes_reported_result(tmp_path: Path) -> 
 def test_partial_and_null_results_are_preserved_without_fabricating_missing_values(
     tmp_path: Path,
 ) -> None:
-    repositories, _, run, plan = _approved_parent(tmp_path)
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
     task = plan.tasks[0]
     partial_observable = ReportedObservable(
         observable_key="partial-observable",
@@ -398,12 +529,50 @@ def test_partial_and_null_results_are_preserved_without_fabricating_missing_valu
         result_type=ResultEvidenceType.NULL_OR_NEGATIVE_RESULT,
         outcome=ResultExecutionOutcome.NULL_OR_NEGATIVE,
         observables=(negative_observable,),
+        untrusted_interpretation="this proves mechanism A is false",
     )
     _, negative_receipt = _intake_and_accept(
         tmp_path, repositories, run, negative, negative_root
     )
     assert negative_receipt.accepted_evidence_ids
     assert not negative_receipt.reported_result_hashes
+    assert negative_receipt.reported_observation_hashes
+
+    SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(
+        parent_run_id=run.run_id,
+        submission_ids=(negative.submission_id,),
+        follow_up_request="Assess the reported absence without treating it as proof.",
+    )
+    successor_input = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-1/planning-input.yaml",
+        ScientificPlanningInput,
+    )
+    observations = getattr(successor_input, "reported_observations", ())
+    assert any(
+        item.quantity == task.outputs[0]
+        and item.qualitative_value == "not detected"
+        for item in observations
+    )
+    research_update = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-1/research-update.yaml",
+        ResearchUpdate,
+    )
+    assert f"{task.outputs[0]} = not detected" in (
+        research_update.new_reported_observations
+    )
+    successor_packet = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-1/evidence-packet.yaml",
+        ScientificEvidencePacket,
+    )
+    assert all(
+        "this proves mechanism A is false" not in claim.text
+        for claim in successor_packet.source_claims
+    )
 
 
 def test_accepted_result_builds_new_context_input_and_independently_approved_successor(
@@ -471,6 +640,125 @@ def test_accepted_result_builds_new_context_input_and_independently_approved_suc
     status = result_feedback_status(run.run_id, workflow.runs)
     assert status["result_evidence"]["accepted"] == 1
     assert status["successor_planning"]["latest_status"] == "APPROVED"
+
+
+def test_approved_successor_is_exact_parent_of_second_result_cycle(
+    tmp_path: Path,
+) -> None:
+    repositories, workflow, run, plan0 = _approved_parent(tmp_path)
+    result0, root0, _ = _submission(tmp_path / "result-0", run, plan0)
+    _intake_and_accept(tmp_path, repositories, run, result0, root0)
+    cycle1 = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(
+        parent_run_id=run.run_id,
+        submission_ids=(result0.submission_id,),
+        follow_up_request="Plan the first bounded follow-up.",
+    )
+    assert cycle1.status.value == "APPROVED"
+    plan1 = workflow.runs.load_artifact(
+        run.run_id,
+        f"successor-planning/cycle-1/candidates/{cycle1.selected_plan_id}.yaml",
+        ScientificQuestionPlan,
+    )
+
+    result1, root1, _ = _submission(
+        tmp_path / "result-1",
+        run,
+        plan1,
+        observables=(
+            ReportedObservable(
+                observable_key=plan1.tasks[0].outputs[0],
+                quantity="second-cycle discriminating observation",
+                value=2.5,
+                unit="eV",
+                result_status=ResultStatus.COMPUTED_REPORTED,
+            ),
+        ),
+    )
+    assessment1, receipt1 = _intake_and_accept(
+        tmp_path, repositories, run, result1, root1
+    )
+    assert assessment1.parent_plan_id == plan1.plan_id
+    assert assessment1.parent_authority_origin == "successor_cycle"
+    assert receipt1.parent_authority_origin == "successor_cycle"
+    cycle2 = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(
+        parent_run_id=run.run_id,
+        submission_ids=(result1.submission_id,),
+        follow_up_request="Plan the second bounded follow-up.",
+    )
+    assert cycle2.status.value == "APPROVED"
+    plan2 = workflow.runs.load_artifact(
+        run.run_id,
+        f"successor-planning/cycle-2/candidates/{cycle2.selected_plan_id}.yaml",
+        ScientificQuestionPlan,
+    )
+    binding2 = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-2/parent-binding.yaml",
+        SuccessorParentBinding,
+    )
+    assert binding2.parent_plan_id == plan1.plan_id
+    assert binding2.parent_plan_hash == content_hash(plan1)
+    assert plan2.follow_up_of == plan1.plan_id
+    assert plan2.plan_id != plan1.plan_id != plan0.plan_id
+    assert all(not task.runnable for task in plan2.tasks)
+    approval1 = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-1/approval/independent-approval-receipt.yaml",
+        IndependentApprovalReceipt,
+    )
+    approval2 = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-2/approval/independent-approval-receipt.yaml",
+        IndependentApprovalReceipt,
+    )
+    assert approval2.receipt_id != approval1.receipt_id
+
+    cross_cycle, cross_root, _ = _submission(
+        tmp_path / "cross-cycle",
+        run,
+        plan1,
+        parent_plan_hash=content_hash(plan2),
+    )
+    cross_assessment = ResultEvidenceIntakeService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).intake(cross_cycle, artifact_root=cross_root)
+    assert cross_assessment.status == ResultEvidenceIntakeStatus.BLOCKED_PLAN_BINDING
+
+
+def test_rejected_successor_cannot_be_result_parent(tmp_path: Path) -> None:
+    repositories, workflow, run, plan0 = _approved_parent(tmp_path)
+    result0, root0, _ = _submission(tmp_path / "result-0", run, plan0)
+    _intake_and_accept(tmp_path, repositories, run, result0, root0)
+    cycle = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(
+        parent_run_id=run.run_id,
+        submission_ids=(result0.submission_id,),
+        follow_up_request="Propose a plan that the independent reviewer rejects.",
+        approval_provider=RejectSuccessorApproval(),
+    )
+    assert cycle.status.value == "REJECTED"
+    rejected_plan = workflow.runs.load_artifact(
+        run.run_id,
+        f"successor-planning/cycle-1/candidates/{cycle.selected_plan_id}.yaml",
+        ScientificQuestionPlan,
+    )
+    rejected_result, rejected_root, _ = _submission(
+        tmp_path / "rejected-result", run, rejected_plan
+    )
+
+    assessment = ResultEvidenceIntakeService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).intake(rejected_result, artifact_root=rejected_root)
+
+    assert assessment.status == ResultEvidenceIntakeStatus.BLOCKED_PLAN_BINDING
+    assert "PARENT_SUCCESSOR_NOT_APPROVED" in {
+        issue.code for issue in assessment.issues
+    }
 
 
 def test_tampered_accepted_raw_artifact_blocks_successor(tmp_path: Path) -> None:
