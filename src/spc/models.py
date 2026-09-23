@@ -6163,8 +6163,68 @@ class ResearchUpdate(StrictModel):
         return self
 
 
+class SuccessorPlanningInvocation(StrictModel):
+    invocation_id: NonBlankStr
+    parent_run_id: NonBlankStr
+    parent_plan_id: NonBlankStr
+    parent_plan_version: NonBlankStr
+    parent_plan_hash: Sha256Str
+    result_submission_ids: tuple[NonBlankStr, ...] = Field(min_length=1)
+    result_submission_hashes: tuple[Sha256Str, ...] = Field(min_length=1)
+    materialization_receipt_ids: tuple[NonBlankStr, ...] = Field(min_length=1)
+    materialization_receipt_hashes: tuple[Sha256Str, ...] = Field(min_length=1)
+    follow_up_request: NonBlankStr | None = None
+    planning_provider_id: NonBlankStr
+    planning_provider_version: NonBlankStr
+    planning_provider_config_hash: Sha256Str
+    approval_provider_id: NonBlankStr
+    approval_provider_version: NonBlankStr
+    approval_provider_config_hash: Sha256Str
+    selected_candidate_id: NonBlankStr | None = None
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> SuccessorPlanningInvocation:
+        from .serialization import content_hash
+
+        for identifiers, hashes, label in (
+            (
+                self.result_submission_ids,
+                self.result_submission_hashes,
+                "result submissions",
+            ),
+            (
+                self.materialization_receipt_ids,
+                self.materialization_receipt_hashes,
+                "materialization receipts",
+            ),
+        ):
+            if len(identifiers) != len(hashes):
+                raise ValueError(f"successor invocation {label} must align")
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError(f"successor invocation {label} must be unique")
+        identity = self.model_dump(
+            mode="json",
+            exclude={"invocation_id", "content_hash"},
+            exclude_none=True,
+        )
+        expected_id = f"successor-invocation-{content_hash(identity)[:24]}"
+        if self.invocation_id != expected_id:
+            raise ValueError("SuccessorPlanningInvocation ID is not content-bound")
+        payload = {"invocation_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("SuccessorPlanningInvocation content_hash is invalid")
+        return self
+
+
 class SuccessorPlanningCycle(StrictModel):
     cycle_id: NonBlankStr
+    invocation_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    invocation_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     parent_binding_id: NonBlankStr
     parent_binding_hash: Sha256Str
     research_update_id: NonBlankStr
@@ -6197,6 +6257,7 @@ class SuccessorPlanningCycle(StrictModel):
         from .serialization import content_hash
 
         pairs = (
+            (self.invocation_id, self.invocation_hash),
             (self.planning_proposal_id, self.planning_proposal_hash),
             (self.selected_plan_id, self.selected_plan_hash),
             (self.approval_review_id, self.approval_review_hash),

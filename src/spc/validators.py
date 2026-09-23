@@ -853,6 +853,127 @@ def validate_approval_state(
     return _report(issues)
 
 
+def validate_approved_plan_authority(
+    plan: ScientificQuestionPlan,
+    validation_record: PlanValidationRecord,
+    review_input: ApprovalReviewInput | RevisionApprovalReviewInput,
+    review: ApprovalReviewRecord,
+    verdict: ApprovalVerdict,
+    receipt: IndependentApprovalReceipt,
+    gate: GateVerdict,
+    trust_policy: ProjectTrustPolicy,
+    compilation_receipt: PlanCompilationReceipt,
+    *,
+    current_report: ValidationReport | None = None,
+    require_passed: bool = True,
+) -> ValidationReport:
+    """Validate the shared approval authority boundary used by every loop."""
+
+    issues: list[ValidationIssue] = []
+    issues.extend(validate_plan_compilation_receipt(plan, compilation_receipt).issues)
+    if current_report is None:
+        if (
+            validation_record.plan_id,
+            validation_record.plan_version,
+            validation_record.plan_content_hash,
+            validation_record.domain,
+            validation_record.domain_pack_version,
+        ) != (
+            plan.plan_id,
+            plan.version,
+            content_hash(plan),
+            plan.domain,
+            plan.domain_pack_version,
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="STALE_PLAN_VALIDATION",
+                    message="PlanValidationRecord is not bound to the current plan",
+                )
+            )
+        if not validation_record.valid:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_VALIDATION_FAILED",
+                    message="approved authority requires a valid plan validation record",
+                )
+            )
+    else:
+        issues.extend(
+            validate_plan_validation_record(
+                plan, validation_record, current_report
+            ).issues
+        )
+    issues.extend(
+        validate_independent_approval_chain(
+            plan, verdict, review_input, review, receipt
+        ).issues
+    )
+    issues.extend(validate_approval_state(plan, verdict).issues)
+    if trust_policy.approval_mode != ApprovalMode.INDEPENDENT_REQUIRED:
+        issues.append(
+            ValidationIssue(
+                code="INDEPENDENT_APPROVAL_POLICY_REQUIRED",
+                message="approved Phase 2+ authority requires independent approval policy",
+            )
+        )
+    if require_passed and verdict.decision not in {
+        ApprovalDecision.APPROVE,
+        ApprovalDecision.APPROVE_WITH_CONDITIONS,
+    }:
+        issues.append(
+            ValidationIssue(
+                code="APPROVAL_DECISION_NOT_EXPORTABLE",
+                message="approval authority requires an exportable approval decision",
+            )
+        )
+    if require_passed and not gate.passed:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_GATE_NOT_PASSED",
+                message="approval authority requires a passed plan gate",
+            )
+        )
+    expected_gate_binding = (
+        plan.plan_id,
+        plan.version,
+        content_hash(plan),
+        verdict.verdict_id,
+        content_hash(verdict),
+        validation_record.validation_id,
+        content_hash(validation_record),
+        receipt.receipt_id,
+        receipt.content_hash,
+        trust_policy.policy_version,
+        content_hash(trust_policy),
+        compilation_receipt.receipt_id,
+        compilation_receipt.content_hash,
+    )
+    actual_gate_binding = (
+        gate.candidate_id,
+        gate.candidate_version,
+        gate.candidate_content_hash,
+        gate.approval_verdict_id,
+        gate.approval_verdict_hash,
+        gate.plan_validation_id,
+        gate.plan_validation_hash,
+        gate.independent_approval_receipt_id,
+        gate.independent_approval_receipt_hash,
+        gate.trust_policy_version,
+        gate.trust_policy_hash,
+        gate.plan_compilation_receipt_id,
+        gate.plan_compilation_receipt_hash,
+    )
+    if actual_gate_binding != expected_gate_binding:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_GATE_AUTHORITY_BINDING_MISMATCH",
+                message="Plan Gate does not bind the complete approval authority chain",
+            )
+        )
+    return _report(issues)
+
+
 def validate_phase1_boundary(policy: ExecutionPolicy, tasks: Iterable[DAGTask]) -> ValidationReport:
     issues: list[ValidationIssue] = []
     if policy.mode != "planning_only":

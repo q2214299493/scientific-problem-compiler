@@ -105,6 +105,7 @@ from ..retrieval import ScientificContextBuilder
 from ..serialization import content_hash, file_sha256, load_data
 from ..validators import (
     build_plan_validation_record,
+    validate_approved_plan_authority,
     validate_independent_approval_chain,
     validate_plan_compilation_receipt,
     validate_question_plan,
@@ -521,49 +522,63 @@ class ScientificProblemWorkflow:
     def _load_revision_attempts(
         self, run_id: str
     ) -> tuple[tuple[PlanRevisionAttemptStart, PlanRevisionAttemptOutcome | None], ...]:
-        root = self._revision_artifact_root(run_id)
-        relative_root = f"{root}/attempts" if root == "plan-revisions" else root
-        name_prefix = "attempt-" if root == "plan-revisions" else "a-"
-        attempts_root = self.runs.resolve_artifact_path(
-            run_id, relative_root
+        run_root = self.runs.run_dir(run_id)
+        locations = [(run_root / "plan-revisions" / "attempts", "attempt-")]
+        locations.extend(
+            (path, "a-")
+            for path in sorted(
+                run_root.glob("evidence-replan-*"),
+                key=lambda item: int(item.name.removeprefix("evidence-replan-")),
+            )
+            if path.is_dir() and not path.is_symlink()
         )
-        if not attempts_root.exists():
-            return ()
         attempts: list[
             tuple[PlanRevisionAttemptStart, PlanRevisionAttemptOutcome | None]
         ] = []
-        for expected_index, directory in enumerate(
-            sorted(
+        for attempts_root, name_prefix in locations:
+            if not attempts_root.exists():
+                continue
+            for directory in sorted(
                 attempts_root.glob(f"{name_prefix}*"),
                 key=lambda path: int(path.name.removeprefix(name_prefix)),
-            ),
-            start=1,
-        ):
-            if directory.is_symlink() or directory.name != f"{name_prefix}{expected_index}":
-                raise ValueError("revision attempt indices are not contiguous")
-            start = self.runs.load_artifact(
-                run_id,
-                f"{self._attempt_prefix(run_id, expected_index)}/start.yaml",
-                PlanRevisionAttemptStart,
-            )
-            if start.attempt_index != expected_index:
-                raise ValueError("revision attempt start index is invalid")
-            outcome_path = directory / "outcome.yaml"
-            outcome = (
-                self.runs.load_artifact(
-                    run_id,
-                    f"{self._attempt_prefix(run_id, expected_index)}/outcome.yaml",
-                    PlanRevisionAttemptOutcome,
-                )
-                if outcome_path.exists()
-                else None
-            )
-            if outcome is not None and (
-                outcome.attempt_id != start.attempt_id
-                or outcome.attempt_start_hash != start.content_hash
             ):
-                raise ValueError("revision attempt outcome does not bind its start")
-            attempts.append((start, outcome))
+                if directory.is_symlink():
+                    raise ValueError("revision attempt directory cannot be a symlink")
+                try:
+                    path_index = int(directory.name.removeprefix(name_prefix))
+                except ValueError as error:
+                    raise ValueError("revision attempt index is invalid") from error
+                relative = directory.relative_to(run_root).as_posix()
+                start = self.runs.load_artifact(
+                    run_id,
+                    f"{relative}/start.yaml",
+                    PlanRevisionAttemptStart,
+                )
+                if start.attempt_index != path_index:
+                    raise ValueError("revision attempt path does not match its index")
+                outcome_path = directory / "outcome.yaml"
+                outcome = (
+                    self.runs.load_artifact(
+                        run_id,
+                        f"{relative}/outcome.yaml",
+                        PlanRevisionAttemptOutcome,
+                    )
+                    if outcome_path.exists()
+                    else None
+                )
+                if outcome is not None and (
+                    outcome.attempt_id != start.attempt_id
+                    or outcome.attempt_start_hash != start.content_hash
+                ):
+                    raise ValueError("revision attempt outcome does not bind its start")
+                attempts.append((start, outcome))
+        attempts.sort(key=lambda item: item[0].attempt_index)
+        if tuple(item[0].attempt_index for item in attempts) != tuple(
+            range(1, len(attempts) + 1)
+        ):
+            raise ValueError(
+                "revision attempt indices must be globally unique and contiguous"
+            )
         return tuple(attempts)
 
     def _validate_revision_chain_integrity(self, chain: PlanRevisionChain) -> None:
@@ -622,18 +637,22 @@ class ScientificProblemWorkflow:
             gate = self._load_bound_artifact(
                 chain.run_id, round_record.gate, GateVerdict
             )
-            if not validate_independent_approval_chain(
-                plan, verdict, review_input, review, approval_receipt
+            policy = self._load_bound_artifact(
+                chain.run_id, round_record.trust_policy, ProjectTrustPolicy
+            )
+            if not validate_approved_plan_authority(
+                plan,
+                validation,
+                review_input,
+                review,
+                verdict,
+                approval_receipt,
+                gate,
+                policy,
+                receipt,
+                require_passed=False,
             ).valid:
-                raise ValueError("revision approval chain failed integrity validation")
-            if (
-                gate.candidate_id != plan.plan_id
-                or gate.candidate_content_hash != content_hash(plan)
-                or gate.approval_verdict_hash != content_hash(verdict)
-                or gate.independent_approval_receipt_hash
-                != approval_receipt.content_hash
-            ):
-                raise ValueError("revision gate does not bind its approval chain")
+                raise ValueError("revision approval authority failed integrity validation")
 
     def start(
         self,
@@ -1339,6 +1358,24 @@ class ScientificProblemWorkflow:
                 if approved.approval_receipt_id is None:
                     return WorkflowResult(approved)
                 revision_chain = self._record_round_approval(revision_chain, approved)
+        if revision_chain is not None:
+            approved = self._run_revision_cycle(
+                approved,
+                revision_chain,
+                context,
+                packet,
+                planning_input,
+                repositories,
+                evidence,
+                planner,
+                approval_provider,
+                llm_endpoint,
+                llm_model,
+                llm_api_key,
+                temperature,
+                max_attempts,
+            )
+            revision_chain = self._load_revision_chain(approved.run_id)
         if approved.approval_verdict_id is not None and evidence_policy is not None:
             approval_prefix = self._approval_prefix(approved.run_id)
             verdict = self.runs.load_artifact(
@@ -1422,26 +1459,7 @@ class ScientificProblemWorkflow:
                         ),
                         planning_strategy=strategy.value,
                     )
-        if revision_chain is None:
-            return WorkflowResult(approved)
-        return WorkflowResult(
-            self._run_revision_cycle(
-                approved,
-                revision_chain,
-                context,
-                packet,
-                planning_input,
-                repositories,
-                evidence,
-                planner,
-                approval_provider,
-                llm_endpoint,
-                llm_model,
-                llm_api_key,
-                temperature,
-                max_attempts,
-            )
-        )
+        return WorkflowResult(approved)
 
     def _reuse_approval(
         self,
@@ -1473,7 +1491,7 @@ class ScientificProblemWorkflow:
                 run.plan_validation_records[index].relative_path,
                 PlanValidationRecord,
             )
-            ApprovalContextResolver(self.domain_loader).resolve(
+            expected_review_input = ApprovalContextResolver(self.domain_loader).resolve(
                 context,
                 packet,
                 planning_input,
@@ -1508,16 +1526,34 @@ class ScientificProblemWorkflow:
             gate = self.runs.load_artifact(
                 run.run_id, f"{approval_prefix}/plan-gate.yaml", GateVerdict
             )
-            if not validate_independent_approval_chain(
-                plan, verdict, review_input, review, receipt
-            ).valid:
+            policy = self.runs.load_artifact(
+                run.run_id,
+                f"{approval_prefix}/project-trust-policy.yaml",
+                ProjectTrustPolicy,
+            )
+            compilation_receipt = self.runs.load_artifact(
+                run.run_id,
+                run.candidate_compilation_receipts[index].relative_path,
+                PlanCompilationReceipt,
+            )
+            current_report = validate_question_plan(
+                plan, planning_input.scientific_capabilities, evidence
+            )
+            if content_hash(expected_review_input) != content_hash(review_input):
                 return None
-            if (
-                gate.candidate_id != plan.plan_id
-                or gate.candidate_content_hash != content_hash(plan)
-                or gate.approval_verdict_hash != content_hash(verdict)
-                or gate.independent_approval_receipt_hash != receipt.content_hash
-            ):
+            if not validate_approved_plan_authority(
+                plan,
+                validation,
+                review_input,
+                review,
+                verdict,
+                receipt,
+                gate,
+                policy,
+                compilation_receipt,
+                current_report=current_report,
+                require_passed=False,
+            ).valid:
                 return None
         except (FileNotFoundError, OSError, ValueError):
             return None
@@ -2889,14 +2925,27 @@ class ScientificProblemWorkflow:
             gate = self._load_bound_artifact(
                 current_run.run_id, current_round.gate, GateVerdict
             )
-            if not validate_independent_approval_chain(
-                plan, verdict, review_input, review, receipt
-            ).valid or (
-                gate.candidate_id != plan.plan_id
-                or gate.candidate_content_hash != content_hash(plan)
-                or gate.approval_verdict_hash != content_hash(verdict)
-                or gate.independent_approval_receipt_hash != receipt.content_hash
-            ):
+            policy = self._load_bound_artifact(
+                current_run.run_id,
+                current_round.trust_policy,
+                ProjectTrustPolicy,
+            )
+            trigger_report = validate_question_plan(
+                plan, planning_input.scientific_capabilities, evidence
+            )
+            if not validate_approved_plan_authority(
+                plan,
+                validation,
+                review_input,
+                review,
+                verdict,
+                receipt,
+                gate,
+                policy,
+                compilation_receipt,
+                current_report=trigger_report,
+                require_passed=False,
+            ).valid:
                 return self._revision_block(
                     current_run,
                     current_chain,
@@ -3636,47 +3685,40 @@ def scientific_run_status(
             run_root.glob("evidence-replan-*"),
             key=lambda path: int(path.name.removeprefix("evidence-replan-")),
         )
-        revision_root = (
-            evidence_replan_roots[-1].name
-            if evidence_replan_roots
-            and revision_chain.context_id == run.context_id
-            else "plan-revisions"
-        )
-        attempts_relative_root = (
-            f"{revision_root}/attempts"
-            if revision_root == "plan-revisions"
-            else revision_root
-        )
-        attempt_name_prefix = (
-            "attempt-" if revision_root == "plan-revisions" else "a-"
-        )
-        attempts_root = repository.resolve_artifact_path(
-            run.run_id, attempts_relative_root
-        )
-        if attempts_root.exists():
-            attempt_directories = sorted(
+        attempt_locations = [
+            (run_root / "plan-revisions" / "attempts", "attempt-")
+        ] + [
+            (path, "a-")
+            for path in evidence_replan_roots
+            if path.is_dir() and not path.is_symlink()
+        ]
+        for attempts_root, attempt_name_prefix in attempt_locations:
+            if not attempts_root.exists():
+                continue
+            for directory in sorted(
                 attempts_root.glob(f"{attempt_name_prefix}*"),
                 key=lambda path: int(path.name.removeprefix(attempt_name_prefix)),
-            )
-            for expected_index, directory in enumerate(
-                attempt_directories, start=1
             ):
-                if directory.is_symlink() or directory.name != (
-                    f"{attempt_name_prefix}{expected_index}"
-                ):
-                    raise ValueError("revision attempt indices are not contiguous")
+                if directory.is_symlink():
+                    raise ValueError("revision attempt directory cannot be a symlink")
+                expected_index = int(
+                    directory.name.removeprefix(attempt_name_prefix)
+                )
+                attempt_relative = directory.relative_to(run_root).as_posix()
                 start = repository.load_artifact(
                     run.run_id,
-                    f"{attempts_relative_root}/{attempt_name_prefix}{expected_index}"
-                    "/start.yaml",
+                    f"{attempt_relative}/start.yaml",
                     PlanRevisionAttemptStart,
                 )
+                if start.attempt_index != expected_index:
+                    raise ValueError(
+                        "revision attempt path does not match its global index"
+                    )
                 outcome_path = directory / "outcome.yaml"
                 outcome = (
                     repository.load_artifact(
                         run.run_id,
-                        f"{attempts_relative_root}/{attempt_name_prefix}{expected_index}"
-                        "/outcome.yaml",
+                        f"{attempt_relative}/outcome.yaml",
                         PlanRevisionAttemptOutcome,
                     )
                     if outcome_path.exists()
@@ -3698,6 +3740,13 @@ def scientific_run_status(
                         ),
                     }
                 )
+        attempt_states.sort(key=lambda item: int(item["attempt_index"]))
+        if tuple(item["attempt_index"] for item in attempt_states) != tuple(
+            range(1, len(attempt_states) + 1)
+        ):
+            raise ValueError(
+                "revision attempt indices must be globally unique and contiguous"
+            )
         revision_state = {
             "max_revisions": revision_chain.max_revisions,
             "revisions_used": revision_chain.revisions_used,
