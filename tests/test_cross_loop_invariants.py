@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
 import pytest
 
@@ -20,6 +19,8 @@ from spc.models import (
     ScientificPlanningInput,
     ScientificProblemRunStatus,
     ScientificQuestionPlan,
+    SuccessorParentBinding,
+    SuccessorPlanningCycle,
     RevisionApprovalLLMResponse,
 )
 from spc.planning import MockPlanningProvider
@@ -268,6 +269,140 @@ def test_human_candidate_selection_reuses_the_original_planning_output(
     assert approver.call_count == 1
 
 
+def test_stored_selection_resumes_without_candidate_argument_before_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, _, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    planner = TwoCandidateSuccessorPlanner()
+    approver = CountingSuccessorApprover()
+    service = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+    pending = service.compile(
+        parent_run_id=run.run_id,
+        submission_ids=(submission.submission_id,),
+        planning_provider=planner,
+        approval_provider=approver,
+    )
+    selected_id = pending.candidate_plan_ids[0]
+    original_write = service.runs.write_exclusive_artifact
+
+    def interrupt_before_approval_claim(run_id, relative_path, *args, **kwargs):
+        if relative_path.endswith("provider-calls/approval.yaml"):
+            raise KeyboardInterrupt("crash immediately before approval claim")
+        return original_write(run_id, relative_path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        service.runs, "write_exclusive_artifact", interrupt_before_approval_claim
+    )
+    with pytest.raises(KeyboardInterrupt, match="before approval claim"):
+        service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            approval_provider=approver,
+            selected_candidate_id=selected_id,
+        )
+    monkeypatch.setattr(service.runs, "write_exclusive_artifact", original_write)
+
+    completed = service.compile(
+        parent_run_id=run.run_id,
+        submission_ids=(submission.submission_id,),
+        planning_provider=planner,
+        approval_provider=approver,
+    )
+
+    assert completed.status.value == "APPROVED"
+    assert completed.selected_plan_id == selected_id
+    assert planner.call_count == 1
+    assert approver.call_count == 1
+
+
+def test_stored_selection_and_claimed_interrupted_approval_resume_as_uncertain(
+    tmp_path: Path,
+) -> None:
+    repositories, _, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    planner = TwoCandidateSuccessorPlanner()
+    approver = InterruptingSuccessorApprover()
+    service = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+    pending = service.compile(
+        parent_run_id=run.run_id,
+        submission_ids=(submission.submission_id,),
+        planning_provider=planner,
+        approval_provider=approver,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="approval interruption"):
+        service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            approval_provider=approver,
+            selected_candidate_id=pending.candidate_plan_ids[0],
+        )
+    with pytest.raises(
+        ResultFeedbackError, match="SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"
+    ):
+        service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            approval_provider=approver,
+        )
+
+    assert planner.call_count == 1
+    assert approver.call_count == 1
+
+
+def test_stored_selection_conflicts_with_a_different_candidate_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, _, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    planner = TwoCandidateSuccessorPlanner()
+    service = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+    pending = service.compile(
+        parent_run_id=run.run_id,
+        submission_ids=(submission.submission_id,),
+        planning_provider=planner,
+    )
+    original_write = service.runs.write_exclusive_artifact
+
+    def interrupt_before_approval_claim(run_id, relative_path, *args, **kwargs):
+        if relative_path.endswith("provider-calls/approval.yaml"):
+            raise KeyboardInterrupt("crash immediately before approval claim")
+        return original_write(run_id, relative_path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        service.runs, "write_exclusive_artifact", interrupt_before_approval_claim
+    )
+    with pytest.raises(KeyboardInterrupt):
+        service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            selected_candidate_id=pending.candidate_plan_ids[0],
+        )
+    monkeypatch.setattr(service.runs, "write_exclusive_artifact", original_write)
+
+    with pytest.raises(ResultFeedbackError, match="SUCCESSOR_SELECTION_CONFLICT"):
+        service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            selected_candidate_id=pending.candidate_plan_ids[1],
+        )
+
+
 def test_candidate_from_another_successor_invocation_is_rejected(tmp_path: Path) -> None:
     repositories, _, run, plan = _approved_parent(tmp_path)
     submission, artifact_root, _ = _submission(tmp_path, run, plan)
@@ -443,31 +578,92 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
     successor_root = workflow.runs.resolve_artifact_path(
         run.run_id, "successor-planning"
     )
-    (successor_root / "cycle-1").rename(successor_root / "cycle-10")
-    incomplete = successor_root / "cycle-2" / "provider-calls"
-    incomplete.mkdir(parents=True)
-    shutil.copy2(
-        successor_root / "cycle-10" / "invocation.yaml",
-        incomplete.parent / "invocation.yaml",
+    base_binding = workflow.runs.load_artifact(
+        run.run_id,
+        "successor-planning/cycle-1/parent-binding.yaml",
+        SuccessorParentBinding,
     )
-    shutil.copy2(
-        successor_root / "cycle-10" / "parent-binding.yaml",
-        incomplete.parent / "parent-binding.yaml",
+    from spc.result_feedback.service import _build_content_bound
+
+    def write_incomplete_binding(index: int, parent_plan_id: str) -> None:
+        payload = base_binding.model_dump(
+            mode="python", exclude={"binding_id", "content_hash"}
+        )
+        payload.update(
+            successor_cycle_index=index,
+            parent_plan_id=parent_plan_id,
+        )
+        binding = _build_content_bound(
+            SuccessorParentBinding, "successor-parent-binding", payload
+        )
+        cycle_dir = successor_root / f"cycle-{index}"
+        dump_yaml(cycle_dir / "parent-binding.yaml", binding)
+        dump_yaml(
+            cycle_dir / "provider-calls" / "planning.yaml",
+            {"claimed": True},
+        )
+
+    write_incomplete_binding(2, "synthetic-parent-cycle-2")
+    write_incomplete_binding(10, "parent-from-latest-attempted-cycle")
+    cycle1 = workflow.runs.load_artifact(
+        run.run_id, "successor-planning/cycle-1/cycle.yaml", SuccessorPlanningCycle
     )
-    shutil.copy2(
-        successor_root / "cycle-10" / "provider-calls" / "planning.yaml",
-        incomplete / "planning.yaml",
+    binding3_payload = base_binding.model_dump(
+        mode="python", exclude={"binding_id", "content_hash"}
     )
+    binding3_payload["successor_cycle_index"] = 3
+    binding3 = _build_content_bound(
+        SuccessorParentBinding, "successor-parent-binding", binding3_payload
+    )
+    cycle3_payload = cycle1.model_dump(
+        mode="python", exclude={"cycle_id", "content_hash"}
+    )
+    cycle3_payload.update(
+        parent_binding_id=binding3.binding_id,
+        parent_binding_hash=binding3.content_hash,
+    )
+    cycle3 = _build_content_bound(
+        SuccessorPlanningCycle, "successor-cycle", cycle3_payload
+    )
+    cycle3_dir = successor_root / "cycle-3"
+    dump_yaml(cycle3_dir / "parent-binding.yaml", binding3)
+    dump_yaml(cycle3_dir / "cycle.yaml", cycle3)
 
     status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
 
-    assert status["latest_complete_cycle"] == 10
+    assert status["latest_complete_cycle"] == 3
     assert status["latest_attempted_cycle"] == 10
-    assert status["cycle"] == 10
+    assert status["cycle"] == 3
     assert status["incomplete_cycles"] == [
-        {"cycle": 2, "status": "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"}
+        {"cycle": 2, "status": "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"},
+        {"cycle": 10, "status": "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"},
     ]
+    assert status["parent_plan"] == "parent-from-latest-attempted-cycle"
     assert status["triggering_result_ids"] == [submission.submission_id]
+
+
+@pytest.mark.parametrize("incomplete", (False, True))
+def test_successor_cycle_directory_index_must_match_parent_binding(
+    tmp_path: Path, incomplete: bool
+) -> None:
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(parent_run_id=run.run_id, submission_ids=(submission.submission_id,))
+    successor_root = workflow.runs.resolve_artifact_path(
+        run.run_id, "successor-planning"
+    )
+    cycle_dir = successor_root / "cycle-1"
+    if incomplete:
+        (cycle_dir / "cycle.yaml").unlink()
+    cycle_dir.rename(successor_root / "cycle-10")
+
+    with pytest.raises(
+        ResultFeedbackError, match="INVALID_SUCCESSOR_CYCLE_DIRECTORY"
+    ):
+        result_feedback_status(run.run_id, workflow.runs)
 
 
 def test_completed_successor_cycle_is_not_reused_after_authority_tampering(

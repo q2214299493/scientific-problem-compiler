@@ -106,7 +106,6 @@ from ..serialization import content_hash, file_sha256, load_data
 from ..validators import (
     build_plan_validation_record,
     validate_approved_plan_authority,
-    validate_independent_approval_chain,
     validate_plan_compilation_receipt,
     validate_question_plan,
 )
@@ -1743,18 +1742,23 @@ class ScientificProblemWorkflow:
             run.candidate_compilation_receipts[candidate_index],
             PlanCompilationReceipt,
         )
-        if not validate_plan_compilation_receipt(
-            candidate, compilation_receipt
-        ).valid:
-            raise ValueError("evidence trigger compilation receipt is invalid")
-        if not validate_independent_approval_chain(
+        authority = validate_approved_plan_authority(
             candidate,
-            verdict,
+            validation,
             review_input,
             review,
+            verdict,
             approval_receipt,
-        ).valid:
-            raise ValueError("evidence trigger independent approval chain is invalid")
+            gate,
+            policy,
+            compilation_receipt,
+            require_passed=False,
+        )
+        if not authority.valid:
+            raise ValueError(
+                "evidence trigger approval authority is invalid: "
+                + ", ".join(item.code for item in authority.issues)
+            )
         if (
             gate.candidate_id != candidate.plan_id
             or gate.candidate_content_hash != content_hash(candidate)
@@ -1897,12 +1901,23 @@ class ScientificProblemWorkflow:
         )
         if expected_bindings != actual_bindings:
             raise ValueError("evidence request does not bind its archived approval trigger")
-        if not validate_plan_compilation_receipt(
-            candidate, compilation_receipt
-        ).valid or not validate_independent_approval_chain(
-            candidate, verdict, review_input, review, receipt
-        ).valid:
-            raise ValueError("archived evidence trigger approval chain is invalid")
+        authority = validate_approved_plan_authority(
+            candidate,
+            validation,
+            review_input,
+            review,
+            verdict,
+            receipt,
+            gate,
+            policy,
+            compilation_receipt,
+            require_passed=False,
+        )
+        if not authority.valid:
+            raise ValueError(
+                "archived evidence trigger approval authority is invalid: "
+                + ", ".join(item.code for item in authority.issues)
+            )
         if (
             review_input.candidate_plan != candidate
             or validation.plan_id != candidate.plan_id

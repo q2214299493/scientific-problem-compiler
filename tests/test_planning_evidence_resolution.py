@@ -35,7 +35,7 @@ from spc.planning import (
     resolve_planning_evidence_requests,
 )
 from spc.retrieval import PersistentKnowledgeRetriever, ScientificContextBuilder
-from spc.serialization import content_hash
+from spc.serialization import content_hash, dump_yaml, load_data
 from spc.workflow import ScientificProblemWorkflow, scientific_run_status
 import spc.workflow.service as workflow_service
 from test_knowledge_retrieval import _prepare
@@ -1121,6 +1121,53 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
+        workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
+
+
+def test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories, *_ = _prepare(tmp_path)
+    InsufficientThenApproveProvider.review_calls = 0
+    monkeypatch.setattr(
+        workflow_service,
+        "MockApprovalProvider",
+        InsufficientThenApproveProvider,
+    )
+    workflow = ScientificProblemWorkflow(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+    run = workflow.start(
+        "The mechanism is not sufficiently convincing without a distinguishing observation.",
+        "base",
+        approval_provider="mock",
+        max_plan_revisions=1,
+        max_evidence_resolution_cycles=1,
+    ).run
+    request_set = workflow.runs.load_artifact(
+        run.run_id,
+        "planning-evidence/cycle-1/request-set.yaml",
+        workflow_service.PlanningEvidenceRequestSet,
+    )
+    policy_path = workflow.runs.resolve_artifact_path(
+        run.run_id,
+        "planning-evidence/cycle-1/trigger/project-trust-policy.yaml",
+    )
+    policy_payload = load_data(policy_path)
+    policy_payload["approval_mode"] = "legacy_manual_allowed"
+    dump_yaml(policy_path, policy_payload)
+    downgraded_policy = workflow_service.ProjectTrustPolicy.model_validate(
+        policy_payload
+    )
+    gate_path = workflow.runs.resolve_artifact_path(
+        run.run_id, "planning-evidence/cycle-1/trigger/plan-gate.yaml"
+    )
+    gate_payload = load_data(gate_path)
+    gate_payload["trust_policy_hash"] = content_hash(downgraded_policy)
+    dump_yaml(gate_path, gate_payload)
+
+    with pytest.raises(ValueError, match="INDEPENDENT_APPROVAL_POLICY_REQUIRED"):
         workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
 
 

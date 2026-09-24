@@ -243,6 +243,42 @@ symlinked cycle directories fail closed.
 Regression evidence:
 `test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles`.
 
+### F-08 — stored successor selection was skipped on resume (confirmed, fixed)
+
+After a human candidate selection was saved, a resume without repeating the
+candidate ID could return to the human-choice outcome. Resume now validates the
+stored selection against the exact invocation, proposal, and candidate hash
+before deciding whether human input is still needed. A different explicit
+candidate conflicts with the immutable selection; an existing approval claim
+continues through approval-stage recovery.
+
+Regression evidence: stored selection resume before approval, interrupted
+approval recovery, and conflicting candidate selection tests in
+`tests/test_cross_loop_invariants.py`.
+
+### F-09 — evidence-trigger archive did not apply the shared trust policy (confirmed, fixed)
+
+Trigger archive checks now call `validate_approved_plan_authority` with
+`require_passed=False`, because an `INSUFFICIENT_EVIDENCE` review can trigger
+retrieval without approving the plan for export. Request-set, candidate, and
+trigger bindings remain additional checks. A test downgrades the archived
+policy and updates the gate hash to match; the archive still fails because the
+required independent approval mode is enforced.
+
+Regression evidence: `test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrade`.
+
+### F-10 — successor cycle directory could disagree with its lineage index (confirmed, fixed)
+
+Cycle inventory and status loading now require each stored
+`SuccessorParentBinding.successor_cycle_index` to match its numeric directory
+name. Completed cycles must also bind the parent-binding artifact in that
+directory. Status takes `parent_plan` from the latest attempted cycle binding,
+with result submissions used only when no cycle binding exists.
+
+Regression evidence: numeric cycle ordering with an incomplete gap, latest
+attempted parent-plan reporting, and complete/incomplete path-index mismatch
+tests in `tests/test_cross_loop_invariants.py`.
+
 ## Deliberately retained duplication
 
 - `validate_approved_plan_authority` covers the shared minimum authority chain.

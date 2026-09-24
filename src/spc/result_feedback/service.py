@@ -2778,6 +2778,26 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                         )
                     seen_cycle_indexes.add(cycle_index_value)
                     cycle_indexes.append(cycle_index_value)
+                    lineage_path = directory / "parent-binding.yaml"
+                    if lineage_path.is_symlink():
+                        raise ResultFeedbackError(
+                            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                            f"symlinked successor parent binding: {lineage_path.name}",
+                        )
+                    if lineage_path.exists():
+                        lineage = self.runs.load_artifact(
+                            parent_run_id,
+                            lineage_path.relative_to(
+                                self.runs.run_dir(parent_run_id)
+                            ).as_posix(),
+                            SuccessorParentBinding,
+                        )
+                        if lineage.successor_cycle_index != cycle_index_value:
+                            raise ResultFeedbackError(
+                                "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                                "successor cycle directory index does not match "
+                                "its parent-binding lineage index",
+                            )
                     invocation_path = directory / "invocation.yaml"
                     if not invocation_path.exists():
                         continue
@@ -2806,6 +2826,15 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                             ).as_posix(),
                             SuccessorPlanningCycle,
                         )
+                        if lineage_path.exists() and (
+                            matching_cycle.parent_binding_id,
+                            matching_cycle.parent_binding_hash,
+                        ) != (lineage.binding_id, lineage.content_hash):
+                            raise ResultFeedbackError(
+                                "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                                "completed successor cycle does not bind the "
+                                "parent-binding stored in its directory",
+                            )
             if matching_cycle is not None:
                 if (
                     matching_cycle.invocation_id != invocation.invocation_id
@@ -3149,6 +3178,47 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                         validation.validation_id,
                         validation,
                     )
+            candidate_ids = tuple(item.plan_id for item in compilation.candidates)
+            selection_path = self.runs.resolve_artifact_path(
+                parent_run_id, f"{prefix}/selection.yaml"
+            )
+            if selection_path.exists():
+                stored_selection = self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/selection.yaml",
+                    SuccessorCandidateSelection,
+                )
+                selected_candidate = next(
+                    (
+                        item
+                        for item in compilation.candidates
+                        if item.plan_id == stored_selection.candidate_id
+                    ),
+                    None,
+                )
+                if (
+                    stored_selection.invocation_id != invocation.invocation_id
+                    or stored_selection.invocation_hash != invocation.content_hash
+                    or stored_selection.proposal_id != proposal.proposal_id
+                    or stored_selection.proposal_hash != content_hash(proposal)
+                    or selected_candidate is None
+                    or stored_selection.candidate_hash
+                    != content_hash(selected_candidate)
+                ):
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_SELECTION_BINDING_INVALID",
+                        "stored selection does not bind this invocation, proposal "
+                        "and immutable candidate set",
+                    )
+                if (
+                    selected_candidate_id is not None
+                    and selected_candidate_id != stored_selection.candidate_id
+                ):
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_SELECTION_CONFLICT",
+                        "requested candidate differs from the stored immutable selection",
+                    )
+                selected_candidate_id = stored_selection.candidate_id
             if selected_candidate_id is None:
                 if len(compilation.candidates) != 1:
                     status = SuccessorPlanningStatus.HUMAN_SCIENTIFIC_DECISION_REQUIRED
@@ -3183,7 +3253,6 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     )
                     return cycle
                 selected_candidate_id = compilation.candidates[0].plan_id
-            candidate_ids = tuple(item.plan_id for item in compilation.candidates)
             if selected_candidate_id not in candidate_ids:
                 raise ResultFeedbackError(
                     "UNKNOWN_SUCCESSOR_CANDIDATE",
@@ -3211,20 +3280,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 "successor-selection",
                 selection_payload,
             )
-            selection_path = self.runs.resolve_artifact_path(
-                parent_run_id, f"{prefix}/selection.yaml"
-            )
             if selection_path.exists():
-                stored_selection = self.runs.load_artifact(
-                    parent_run_id,
-                    f"{prefix}/selection.yaml",
-                    SuccessorCandidateSelection,
-                )
-                if stored_selection != selection:
-                    raise ResultFeedbackError(
-                        "SUCCESSOR_SELECTION_CONFLICT",
-                        "the planning invocation already has another candidate selection",
-                    )
                 selection = stored_selection
             else:
                 self.runs.write_exclusive_artifact(
@@ -3376,6 +3432,7 @@ def result_feedback_status(
     cycles_by_index: dict[int, SuccessorPlanningCycle] = {}
     attempted_indexes: set[int] = set()
     incomplete_cycles: list[dict[str, Any]] = []
+    bindings_by_index: dict[int, SuccessorParentBinding] = {}
     successor_root = run_root / "successor-planning"
     if successor_root.exists():
         for directory in successor_root.glob("cycle-*"):
@@ -3400,13 +3457,43 @@ def result_feedback_status(
                     f"non-canonical successor cycle directory: {directory.name}",
                 )
             attempted_indexes.add(index)
+            binding_path = directory / "parent-binding.yaml"
+            if binding_path.is_symlink():
+                raise ResultFeedbackError(
+                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                    f"symlinked successor parent binding: {binding_path.name}",
+                )
+            if binding_path.exists():
+                binding = repository.load_artifact(
+                    parent_run_id,
+                    binding_path.relative_to(run_root).as_posix(),
+                    SuccessorParentBinding,
+                )
+                if binding.successor_cycle_index != index:
+                    raise ResultFeedbackError(
+                        "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                        "successor cycle directory index does not match "
+                        "its parent-binding lineage index",
+                    )
+                bindings_by_index[index] = binding
             cycle_path = directory / "cycle.yaml"
             if cycle_path.exists():
-                cycles_by_index[index] = repository.load_artifact(
+                cycle = repository.load_artifact(
                     parent_run_id,
                     cycle_path.relative_to(run_root).as_posix(),
                     SuccessorPlanningCycle,
                 )
+                binding = bindings_by_index.get(index)
+                if binding is None or (
+                    cycle.parent_binding_id,
+                    cycle.parent_binding_hash,
+                ) != (binding.binding_id, binding.content_hash):
+                    raise ResultFeedbackError(
+                        "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                        "completed successor cycle does not bind the "
+                        "parent-binding stored in its directory",
+                    )
+                cycles_by_index[index] = cycle
                 continue
             planning_outcome_path = directory / "planning-outcome.yaml"
             if planning_outcome_path.exists():
@@ -3466,21 +3553,13 @@ def result_feedback_status(
         latest_status = None
     binding_index = latest_attempted_index
     triggering_result_ids: list[str] = []
-    if binding_index is not None:
-        binding_path = (
-            run_root
-            / "successor-planning"
-            / f"cycle-{binding_index}"
-            / "parent-binding.yaml"
-        )
-        if binding_path.exists():
-            triggering_result_ids = list(
-                repository.load_artifact(
-                    parent_run_id,
-                    binding_path.relative_to(run_root).as_posix(),
-                    SuccessorParentBinding,
-                ).result_submission_ids
-            )
+    latest_binding = (
+        bindings_by_index.get(binding_index)
+        if binding_index is not None
+        else None
+    )
+    if latest_binding is not None:
+        triggering_result_ids = list(latest_binding.result_submission_ids)
     return {
         "result_evidence": {
             "submissions": len(submissions),
@@ -3538,7 +3617,9 @@ def result_feedback_status(
             ),
             "parent_run": parent_run_id,
             "parent_plan": (
-                submissions[-1].parent_plan_id if submissions else None
+                latest_binding.parent_plan_id
+                if latest_binding is not None
+                else submissions[-1].parent_plan_id if submissions else None
             ),
             "triggering_result_ids": triggering_result_ids,
         },
