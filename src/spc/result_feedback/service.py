@@ -15,7 +15,7 @@ from ..approval import (
     MockApprovalProvider,
     bind_gate_verdict,
 )
-from ..compiler import ScientificProblemCompiler
+from ..compiler import CompilationResult, ScientificProblemCompiler
 from ..domains import DomainPackLoader
 from ..downstream import DownstreamImportError, DownstreamImportValidator
 from ..interpretation.validators import validate_evidence_packet_integrity
@@ -66,6 +66,7 @@ from ..models import (
     SourceRole,
     SourceType,
     SuccessorParentBinding,
+    SuccessorCandidateSelection,
     SuccessorPlanningInvocation,
     SuccessorPlanningCycle,
     SuccessorPlanningStatus,
@@ -1699,6 +1700,32 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
             )
             if content_hash(selected) != cycle.selected_plan_hash:
                 raise ValueError("selected successor plan binding is invalid")
+            if cycle.selection_id is not None:
+                selection = self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/selection.yaml",
+                    SuccessorCandidateSelection,
+                )
+                if (
+                    cycle.selection_id,
+                    cycle.selection_hash,
+                    selection.invocation_id,
+                    selection.invocation_hash,
+                    selection.proposal_id,
+                    selection.proposal_hash,
+                    selection.candidate_id,
+                    selection.candidate_hash,
+                ) != (
+                    selection.selection_id,
+                    selection.content_hash,
+                    invocation.invocation_id,
+                    invocation.content_hash,
+                    cycle.planning_proposal_id,
+                    cycle.planning_proposal_hash,
+                    selected.plan_id,
+                    content_hash(selected),
+                ):
+                    raise ValueError("successor candidate selection binding is invalid")
             approval_prefix = f"{prefix}/approval"
             review_input = parse_approval_review_input(
                 load_data(
@@ -1772,6 +1799,241 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
         except (FileNotFoundError, OSError, StopIteration, ValueError) as error:
             raise ResultFeedbackError(
                 "SUCCESSOR_CYCLE_INTEGRITY_INVALID", str(error)
+            ) from error
+
+    def _load_complete_planning_stage(
+        self,
+        *,
+        parent_run_id: str,
+        prefix: str,
+        invocation: SuccessorPlanningInvocation,
+        planner: Any,
+    ) -> tuple[CompilationResult, tuple[PlanValidationRecord, ...]]:
+        """Load and verify a locally complete planning outcome without inference."""
+
+        try:
+            binding = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/parent-binding.yaml",
+                SuccessorParentBinding,
+            )
+            update = self.runs.load_artifact(
+                parent_run_id, f"{prefix}/research-update.yaml", ResearchUpdate
+            )
+            context = self.runs.load_artifact(
+                parent_run_id, f"{prefix}/context.yaml", ScientificContextPacket
+            )
+            packet = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/evidence-packet.yaml",
+                ScientificEvidencePacket,
+            )
+            planning_input = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/planning-input.yaml",
+                ScientificPlanningInput,
+            )
+            proposal = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/planning-proposal.yaml",
+                PlanningProposalSet,
+            )
+            expected = ScientificProblemCompiler(
+                planner, evidence_repository=self.composite_evidence
+            ).compile_proposal(planning_input, proposal)
+            plans = tuple(
+                self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/candidates/{plan.plan_id}.yaml",
+                    ScientificQuestionPlan,
+                )
+                for plan in expected.candidates
+            )
+            receipts = tuple(
+                self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/compilation-receipts/{receipt.receipt_id}.yaml",
+                    PlanCompilationReceipt,
+                )
+                for receipt in expected.compilation_receipts
+            )
+            validations = tuple(
+                self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/validation/validation-{content_hash(plan)[:24]}.yaml",
+                    PlanValidationRecord,
+                )
+                for plan in plans
+            )
+            if (
+                tuple(content_hash(item) for item in plans)
+                != tuple(content_hash(item) for item in expected.candidates)
+                or tuple(content_hash(item) for item in receipts)
+                != tuple(
+                    content_hash(item) for item in expected.compilation_receipts
+                )
+            ):
+                raise ValueError("stored planning output differs from materialization")
+            payload = {
+                "invocation_id": invocation.invocation_id,
+                "invocation_hash": invocation.content_hash,
+                "parent_binding_id": binding.binding_id,
+                "parent_binding_hash": binding.content_hash,
+                "research_update_id": update.update_id,
+                "research_update_hash": update.content_hash,
+                "context_id": context.context_id,
+                "context_hash": context.content_hash,
+                "evidence_packet_id": packet.packet_id,
+                "evidence_packet_hash": packet.content_hash,
+                "planning_input_id": planning_input.planning_input_id,
+                "planning_input_hash": planning_input.content_hash,
+                "planning_proposal_id": proposal.proposal_id,
+                "planning_proposal_hash": content_hash(proposal),
+                "candidate_plan_ids": tuple(item.plan_id for item in plans),
+                "candidate_plan_hashes": tuple(content_hash(item) for item in plans),
+                "status": SuccessorPlanningStatus.HUMAN_SCIENTIFIC_DECISION_REQUIRED,
+            }
+            planning_outcome = _build_content_bound(
+                SuccessorPlanningCycle, "successor-cycle", payload
+            )
+            self._validate_reusable_cycle(
+                parent_run_id=parent_run_id,
+                prefix=prefix,
+                cycle=planning_outcome,
+                invocation=invocation,
+            )
+            return (
+                CompilationResult(
+                    candidates=plans,
+                    reports=expected.reports,
+                    proposal_set=proposal,
+                    compilation_receipts=receipts,
+                ),
+                validations,
+            )
+        except ResultFeedbackError:
+            raise
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise ResultFeedbackError(
+                "SUCCESSOR_PLANNING_OUTPUT_INCOMPLETE", str(error)
+            ) from error
+
+    def _rebuild_complete_approval_cycle(
+        self,
+        *,
+        parent_run_id: str,
+        prefix: str,
+        invocation: SuccessorPlanningInvocation,
+        compilation: CompilationResult,
+        selection: SuccessorCandidateSelection,
+    ) -> SuccessorPlanningCycle:
+        """Reconstruct the final cycle only from a complete local approval chain."""
+
+        try:
+            binding = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/parent-binding.yaml",
+                SuccessorParentBinding,
+            )
+            update = self.runs.load_artifact(
+                parent_run_id, f"{prefix}/research-update.yaml", ResearchUpdate
+            )
+            context = self.runs.load_artifact(
+                parent_run_id, f"{prefix}/context.yaml", ScientificContextPacket
+            )
+            packet = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/evidence-packet.yaml",
+                ScientificEvidencePacket,
+            )
+            planning_input = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/planning-input.yaml",
+                ScientificPlanningInput,
+            )
+            proposal = compilation.proposal_set
+            if proposal is None:
+                raise ValueError("successor planning proposal is missing")
+            selected = next(
+                item
+                for item in compilation.candidates
+                if item.plan_id == selection.candidate_id
+            )
+            review = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/approval/approval-review.yaml",
+                ApprovalReviewRecord,
+            )
+            verdict = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/approval/approval-verdict.yaml",
+                ApprovalVerdict,
+            )
+            approval_receipt = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/approval/independent-approval-receipt.yaml",
+                IndependentApprovalReceipt,
+            )
+            gate = self.runs.load_artifact(
+                parent_run_id,
+                f"{prefix}/approval/plan-gate.yaml",
+                GateVerdict,
+            )
+            status = (
+                SuccessorPlanningStatus.APPROVED
+                if gate.passed
+                else SuccessorPlanningStatus.REJECTED
+            )
+            payload = {
+                "invocation_id": invocation.invocation_id,
+                "invocation_hash": invocation.content_hash,
+                "parent_binding_id": binding.binding_id,
+                "parent_binding_hash": binding.content_hash,
+                "research_update_id": update.update_id,
+                "research_update_hash": update.content_hash,
+                "context_id": context.context_id,
+                "context_hash": context.content_hash,
+                "evidence_packet_id": packet.packet_id,
+                "evidence_packet_hash": packet.content_hash,
+                "planning_input_id": planning_input.planning_input_id,
+                "planning_input_hash": planning_input.content_hash,
+                "planning_proposal_id": proposal.proposal_id,
+                "planning_proposal_hash": content_hash(proposal),
+                "candidate_plan_ids": tuple(
+                    item.plan_id for item in compilation.candidates
+                ),
+                "candidate_plan_hashes": tuple(
+                    content_hash(item) for item in compilation.candidates
+                ),
+                "selection_id": selection.selection_id,
+                "selection_hash": selection.content_hash,
+                "selected_plan_id": selected.plan_id,
+                "selected_plan_hash": content_hash(selected),
+                "approval_review_id": review.review_id,
+                "approval_review_hash": review.content_hash,
+                "approval_verdict_id": verdict.verdict_id,
+                "approval_verdict_hash": content_hash(verdict),
+                "approval_receipt_id": approval_receipt.receipt_id,
+                "approval_receipt_hash": approval_receipt.content_hash,
+                "gate_id": gate.gate_id,
+                "gate_hash": content_hash(gate),
+                "status": status,
+            }
+            cycle = _build_content_bound(
+                SuccessorPlanningCycle, "successor-cycle", payload
+            )
+            self._validate_reusable_cycle(
+                parent_run_id=parent_run_id,
+                prefix=prefix,
+                cycle=cycle,
+                invocation=invocation,
+            )
+            return cycle
+        except ResultFeedbackError:
+            raise
+        except (FileNotFoundError, OSError, StopIteration, ValueError) as error:
+            raise ResultFeedbackError(
+                "SUCCESSOR_APPROVAL_OUTPUT_INCOMPLETE", str(error)
             ) from error
 
     def _load_receipt(
@@ -2435,6 +2697,21 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     )
                 self._verify_archived_artifacts(submission)
 
+            bound_results = tuple(
+                sorted(
+                    zip(submissions, receipts, accepted_curations, strict=True),
+                    key=lambda item: (
+                        item[0].submission_id,
+                        item[0].content_hash,
+                        item[1].receipt_id,
+                        item[1].content_hash,
+                    ),
+                )
+            )
+            submissions = tuple(item[0] for item in bound_results)
+            receipts = tuple(item[1] for item in bound_results)
+            accepted_curations = tuple(item[2] for item in bound_results)
+
             planner = planning_provider or MockPlanningProvider()
             approver = approval_provider or MockApprovalProvider()
             invocation_payload = {
@@ -2460,12 +2737,6 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 "planning_provider_config_hash": content_hash(
                     planning_provider_config(planner)
                 ),
-                "approval_provider_id": approver.provider_id,
-                "approval_provider_version": approver.provider_version,
-                "approval_provider_config_hash": content_hash(
-                    planning_provider_config(approver)
-                ),
-                "selected_candidate_id": selected_candidate_id,
             }
             invocation = _build_content_bound(
                 SuccessorPlanningInvocation,
@@ -2479,16 +2750,34 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
             matching_prefix: str | None = None
             matching_cycle: SuccessorPlanningCycle | None = None
             if successor_root.exists():
-                for directory in sorted(successor_root.glob("cycle-*")):
+                seen_cycle_indexes: set[int] = set()
+                for directory in successor_root.glob("cycle-*"):
+                    if directory.is_symlink():
+                        raise ResultFeedbackError(
+                            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                            f"symlinked successor cycle directory: {directory.name}",
+                        )
                     if not directory.is_dir():
                         continue
                     try:
-                        cycle_indexes.append(int(directory.name.removeprefix("cycle-")))
+                        suffix = directory.name.removeprefix("cycle-")
+                        cycle_index_value = int(suffix)
                     except ValueError as error:
                         raise ResultFeedbackError(
                             "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
                             f"invalid successor cycle directory: {directory.name}",
                         ) from error
+                    if (
+                        cycle_index_value < 1
+                        or suffix != str(cycle_index_value)
+                        or cycle_index_value in seen_cycle_indexes
+                    ):
+                        raise ResultFeedbackError(
+                            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                            f"non-canonical successor cycle directory: {directory.name}",
+                        )
+                    seen_cycle_indexes.add(cycle_index_value)
+                    cycle_indexes.append(cycle_index_value)
                     invocation_path = directory / "invocation.yaml"
                     if not invocation_path.exists():
                         continue
@@ -2537,17 +2826,17 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     cycle=matching_cycle,
                     invocation=invocation,
                 )
-                return matching_cycle
-            if matching_prefix is not None:
-                call_root = self.runs.resolve_artifact_path(
-                    parent_run_id, f"{matching_prefix}/provider-calls"
-                )
-                if call_root.exists() and any(call_root.glob("*.yaml")):
+                if (
+                    selected_candidate_id is not None
+                    and matching_cycle.selected_plan_id != selected_candidate_id
+                ):
                     raise ResultFeedbackError(
-                        "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN",
-                        "a successor provider call started without a complete cycle; "
-                        "ordinary retry is disabled",
+                        "SUCCESSOR_SELECTION_CONFLICT",
+                        "the completed invocation is bound to another candidate",
                     )
+                return matching_cycle
+            resuming_existing = matching_prefix is not None
+            if matching_prefix is not None:
                 prefix = matching_prefix
                 cycle_index = int(prefix.rsplit("-", 1)[1])
             else:
@@ -2570,11 +2859,11 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 "materialization_receipt_ids": tuple(item.receipt_id for item in receipts),
                 "materialization_receipt_hashes": tuple(item.content_hash for item in receipts),
                 "accepted_evidence_ids": tuple(
-                    dict.fromkeys(
+                    sorted({
                         evidence_id
                         for receipt in receipts
                         for evidence_id in receipt.accepted_evidence_ids
-                    )
+                    })
                 ),
                 "successor_cycle_index": cycle_index,
             }
@@ -2619,58 +2908,109 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 update.update_id,
                 update,
             )
-            parent_context = self.runs.load_artifact(
-                parent_run_id,
-                parent.context_relative_path,
-                ScientificContextPacket,
-            )
-            parent_packet = self.runs.load_artifact(
-                parent_run_id,
-                parent.evidence_packet_relative_path,
-                ScientificEvidencePacket,
-            )
-            accepted_evidence = tuple(
-                self.composite_evidence.get_evidence(item)
-                for item in binding.accepted_evidence_ids
-            )
-            request = parent_context.original_request
-            if follow_up_request is not None:
-                request = f"{request}\nFollow-up request: {follow_up_request}"
-            context = self._successor_context(
-                parent_context,
-                binding,
-                accepted_evidence,
-                accepted_curations,
-                (*results, *observations, *methods, *models),
-                request,
-            )
-            packet = self._successor_packet(
-                parent_packet,
-                context,
-                binding,
-                results,
-                observations,
-                methods,
-                models,
-                receipts,
-                parent.task.capability_id,
-            )
             repositories = KnowledgeRepositories(self.knowledge_dir)
             pack = DomainPackLoader().load(parent.plan.domain)
             repositories.load_expert_cases(pack.expert_cases)
             repositories.load_workflow_patterns(pack.workflow_patterns)
             repositories.load_capabilities(pack.capabilities)
-            planning_input = PlanningContextResolver().resolve(
-                context, packet, repositories, self.composite_evidence
-            )
-            for name, artifact_type, identifier, value in (
-                ("context.yaml", "scientific_context_packet", context.context_id, context),
-                ("evidence-packet.yaml", "scientific_evidence_packet", packet.packet_id, packet),
-                ("planning-input.yaml", "scientific_planning_input", planning_input.planning_input_id, planning_input),
-            ):
-                self.runs.write_immutable_artifact(
-                    parent_run_id, f"{prefix}/{name}", artifact_type, identifier, value
+            if resuming_existing:
+                context = self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/context.yaml",
+                    ScientificContextPacket,
                 )
+                packet = self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/evidence-packet.yaml",
+                    ScientificEvidencePacket,
+                )
+                planning_input = self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/planning-input.yaml",
+                    ScientificPlanningInput,
+                )
+                if (
+                    packet.context_id != context.context_id
+                    or packet.context_hash != context.content_hash
+                    or planning_input.context_id != context.context_id
+                    or planning_input.context_hash != context.content_hash
+                    or planning_input.evidence_packet_id != packet.packet_id
+                    or planning_input.evidence_packet_hash != packet.content_hash
+                    or not validate_evidence_packet_integrity(
+                        packet, context, self.composite_evidence
+                    ).valid
+                ):
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_CYCLE_INTEGRITY_INVALID",
+                        "stored successor core artifacts failed binding validation",
+                    )
+            else:
+                parent_context = self.runs.load_artifact(
+                    parent_run_id,
+                    parent.context_relative_path,
+                    ScientificContextPacket,
+                )
+                parent_packet = self.runs.load_artifact(
+                    parent_run_id,
+                    parent.evidence_packet_relative_path,
+                    ScientificEvidencePacket,
+                )
+                accepted_evidence = tuple(
+                    self.composite_evidence.get_evidence(item)
+                    for item in binding.accepted_evidence_ids
+                )
+                request = parent_context.original_request
+                if follow_up_request is not None:
+                    request = f"{request}\nFollow-up request: {follow_up_request}"
+                context = self._successor_context(
+                    parent_context,
+                    binding,
+                    accepted_evidence,
+                    accepted_curations,
+                    (*results, *observations, *methods, *models),
+                    request,
+                )
+                packet = self._successor_packet(
+                    parent_packet,
+                    context,
+                    binding,
+                    results,
+                    observations,
+                    methods,
+                    models,
+                    receipts,
+                    parent.task.capability_id,
+                )
+                planning_input = PlanningContextResolver().resolve(
+                    context, packet, repositories, self.composite_evidence
+                )
+                for name, artifact_type, identifier, value in (
+                    (
+                        "context.yaml",
+                        "scientific_context_packet",
+                        context.context_id,
+                        context,
+                    ),
+                    (
+                        "evidence-packet.yaml",
+                        "scientific_evidence_packet",
+                        packet.packet_id,
+                        packet,
+                    ),
+                    (
+                        "planning-input.yaml",
+                        "scientific_planning_input",
+                        planning_input.planning_input_id,
+                        planning_input,
+                    ),
+                ):
+                    self.runs.write_immutable_artifact(
+                        parent_run_id,
+                        f"{prefix}/{name}",
+                        artifact_type,
+                        identifier,
+                        value,
+                    )
 
             if update.recommended_status != SuccessorPlanningStatus.FOLLOW_UP_PLAN_REQUIRED:
                 cycle_payload = {
@@ -2700,79 +3040,115 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 )
                 return cycle
 
-            self.runs.write_exclusive_artifact(
-                parent_run_id,
-                f"{prefix}/provider-calls/planning.yaml",
-                "successor_planning_invocation",
-                invocation.invocation_id,
-                invocation,
+            planning_marker = self.runs.resolve_artifact_path(
+                parent_run_id, f"{prefix}/provider-calls/planning.yaml"
             )
-            raw_proposal = planner.propose(planning_input)
-            proposal = self._bind_successor_proposal(
-                raw_proposal, planning_input, binding
-            )
-            if not validate_planning_proposal_set(proposal, planning_input).valid:
-                raise ResultFeedbackError(
-                    "SUCCESSOR_PLANNING_PROPOSAL_INVALID",
-                    "successor proposal failed deterministic validation",
+            if planning_marker.exists():
+                try:
+                    compilation, loaded_validations = (
+                        self._load_complete_planning_stage(
+                            parent_run_id=parent_run_id,
+                            prefix=prefix,
+                            invocation=invocation,
+                            planner=planner,
+                        )
+                    )
+                except ResultFeedbackError as error:
+                    if error.code != "SUCCESSOR_PLANNING_OUTPUT_INCOMPLETE":
+                        raise
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN",
+                        "a planning provider call was claimed without a complete "
+                        "verified local planning outcome; ordinary retry is disabled",
+                    ) from error
+                validation_records = list(loaded_validations)
+                proposal = compilation.proposal_set
+                if proposal is None:
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_PLANNING_OUTPUT_INCOMPLETE",
+                        "stored successor planning proposal is missing",
+                    )
+            else:
+                if self.runs.resolve_artifact_path(
+                    parent_run_id, f"{prefix}/planning-proposal.yaml"
+                ).exists():
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_PLANNING_STAGE_INVALID",
+                        "planning output exists without its provider call claim",
+                    )
+                self.runs.write_exclusive_artifact(
+                    parent_run_id,
+                    f"{prefix}/provider-calls/planning.yaml",
+                    "successor_planning_invocation",
+                    invocation.invocation_id,
+                    invocation,
                 )
-            compilation = ScientificProblemCompiler(
-                planner, evidence_repository=self.composite_evidence
-            ).compile_proposal(planning_input, proposal)
-            if not all(report.valid for report in compilation.reports):
-                issue_codes = sorted(
-                    {
-                        issue.code
-                        for report in compilation.reports
-                        for issue in report.issues
-                    }
+                raw_proposal = planner.propose(planning_input)
+                proposal = self._bind_successor_proposal(
+                    raw_proposal, planning_input, binding
                 )
-                raise ResultFeedbackError(
-                    "SUCCESSOR_PLAN_INVALID",
-                    "successor candidate failed deterministic plan validation: "
-                    + ", ".join(issue_codes),
-                )
-            self.runs.write_immutable_artifact(
-                parent_run_id,
-                f"{prefix}/planning-proposal.yaml",
-                "planning_proposal_set",
-                proposal.proposal_id,
-                proposal,
-            )
-            validation_records = []
-            for plan, receipt, report in zip(
-                compilation.candidates,
-                compilation.compilation_receipts,
-                compilation.reports[1 : 1 + len(compilation.candidates)],
-                strict=True,
-            ):
-                validation = build_plan_validation_record(
-                    plan,
-                    report,
-                    validation_id=f"validation-{content_hash(plan)[:24]}",
-                )
-                validation_records.append(validation)
+                if not validate_planning_proposal_set(proposal, planning_input).valid:
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_PLANNING_PROPOSAL_INVALID",
+                        "successor proposal failed deterministic validation",
+                    )
+                compilation = ScientificProblemCompiler(
+                    planner, evidence_repository=self.composite_evidence
+                ).compile_proposal(planning_input, proposal)
+                if not all(report.valid for report in compilation.reports):
+                    issue_codes = sorted(
+                        {
+                            issue.code
+                            for report in compilation.reports
+                            for issue in report.issues
+                        }
+                    )
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_PLAN_INVALID",
+                        "successor candidate failed deterministic plan validation: "
+                        + ", ".join(issue_codes),
+                    )
                 self.runs.write_immutable_artifact(
                     parent_run_id,
-                    f"{prefix}/candidates/{plan.plan_id}.yaml",
-                    "scientific_question_plan",
-                    plan.plan_id,
-                    plan,
+                    f"{prefix}/planning-proposal.yaml",
+                    "planning_proposal_set",
+                    proposal.proposal_id,
+                    proposal,
                 )
-                self.runs.write_immutable_artifact(
-                    parent_run_id,
-                    f"{prefix}/compilation-receipts/{receipt.receipt_id}.yaml",
-                    "plan_compilation_receipt",
-                    receipt.receipt_id,
-                    receipt,
-                )
-                self.runs.write_immutable_artifact(
-                    parent_run_id,
-                    f"{prefix}/validation/{validation.validation_id}.yaml",
-                    "plan_validation_record",
-                    validation.validation_id,
-                    validation,
-                )
+                validation_records = []
+                for plan, receipt, report in zip(
+                    compilation.candidates,
+                    compilation.compilation_receipts,
+                    compilation.reports[1 : 1 + len(compilation.candidates)],
+                    strict=True,
+                ):
+                    validation = build_plan_validation_record(
+                        plan,
+                        report,
+                        validation_id=f"validation-{content_hash(plan)[:24]}",
+                    )
+                    validation_records.append(validation)
+                    self.runs.write_immutable_artifact(
+                        parent_run_id,
+                        f"{prefix}/candidates/{plan.plan_id}.yaml",
+                        "scientific_question_plan",
+                        plan.plan_id,
+                        plan,
+                    )
+                    self.runs.write_immutable_artifact(
+                        parent_run_id,
+                        f"{prefix}/compilation-receipts/{receipt.receipt_id}.yaml",
+                        "plan_compilation_receipt",
+                        receipt.receipt_id,
+                        receipt,
+                    )
+                    self.runs.write_immutable_artifact(
+                        parent_run_id,
+                        f"{prefix}/validation/{validation.validation_id}.yaml",
+                        "plan_validation_record",
+                        validation.validation_id,
+                        validation,
+                    )
             if selected_candidate_id is None:
                 if len(compilation.candidates) != 1:
                     status = SuccessorPlanningStatus.HUMAN_SCIENTIFIC_DECISION_REQUIRED
@@ -2799,7 +3175,11 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                         SuccessorPlanningCycle, "successor-cycle", cycle_payload
                     )
                     self.runs.write_immutable_artifact(
-                        parent_run_id, f"{prefix}/cycle.yaml", "successor_planning_cycle", cycle.cycle_id, cycle
+                        parent_run_id,
+                        f"{prefix}/planning-outcome.yaml",
+                        "successor_planning_outcome",
+                        cycle.cycle_id,
+                        cycle,
                     )
                     return cycle
                 selected_candidate_id = compilation.candidates[0].plan_id
@@ -2813,6 +3193,47 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
             selected = compilation.candidates[selected_index]
             validation = validation_records[selected_index]
             compilation_receipt = compilation.compilation_receipts[selected_index]
+            selection_payload = {
+                "invocation_id": invocation.invocation_id,
+                "invocation_hash": invocation.content_hash,
+                "proposal_id": proposal.proposal_id,
+                "proposal_hash": content_hash(proposal),
+                "candidate_id": selected.plan_id,
+                "candidate_hash": content_hash(selected),
+                "selection_provenance": (
+                    "explicit_user_candidate_selection"
+                    if len(compilation.candidates) != 1
+                    else "deterministic_single_candidate"
+                ),
+            }
+            selection = _build_content_bound(
+                SuccessorCandidateSelection,
+                "successor-selection",
+                selection_payload,
+            )
+            selection_path = self.runs.resolve_artifact_path(
+                parent_run_id, f"{prefix}/selection.yaml"
+            )
+            if selection_path.exists():
+                stored_selection = self.runs.load_artifact(
+                    parent_run_id,
+                    f"{prefix}/selection.yaml",
+                    SuccessorCandidateSelection,
+                )
+                if stored_selection != selection:
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_SELECTION_CONFLICT",
+                        "the planning invocation already has another candidate selection",
+                    )
+                selection = stored_selection
+            else:
+                self.runs.write_exclusive_artifact(
+                    parent_run_id,
+                    f"{prefix}/selection.yaml",
+                    "successor_candidate_selection",
+                    selection.selection_id,
+                    selection,
+                )
             review_input = ApprovalContextResolver().resolve(
                 context,
                 packet,
@@ -2822,12 +3243,40 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 repositories,
                 self.composite_evidence,
             )
+            approval_marker = self.runs.resolve_artifact_path(
+                parent_run_id, f"{prefix}/provider-calls/approval.yaml"
+            )
+            if approval_marker.exists():
+                try:
+                    cycle = self._rebuild_complete_approval_cycle(
+                        parent_run_id=parent_run_id,
+                        prefix=prefix,
+                        invocation=invocation,
+                        compilation=compilation,
+                        selection=selection,
+                    )
+                except ResultFeedbackError as error:
+                    if error.code != "SUCCESSOR_APPROVAL_OUTPUT_INCOMPLETE":
+                        raise
+                    raise ResultFeedbackError(
+                        "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN",
+                        "an approval provider call was claimed without a complete "
+                        "verified local authority chain; ordinary retry is disabled",
+                    ) from error
+                self.runs.write_immutable_artifact(
+                    parent_run_id,
+                    f"{prefix}/cycle.yaml",
+                    "successor_planning_cycle",
+                    cycle.cycle_id,
+                    cycle,
+                )
+                return cycle
             self.runs.write_exclusive_artifact(
                 parent_run_id,
                 f"{prefix}/provider-calls/approval.yaml",
-                "successor_planning_invocation",
-                invocation.invocation_id,
-                invocation,
+                "successor_candidate_selection",
+                selection.selection_id,
+                selection,
             )
             approval = IndependentApprovalService(
                 approver, approver_id="independent-scientific-approver"
@@ -2866,42 +3315,12 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     identifier,
                     value,
                 )
-            status = (
-                SuccessorPlanningStatus.APPROVED
-                if passed
-                else SuccessorPlanningStatus.REJECTED
-            )
-            cycle_payload = {
-                "invocation_id": invocation.invocation_id,
-                "invocation_hash": invocation.content_hash,
-                "parent_binding_id": binding.binding_id,
-                "parent_binding_hash": binding.content_hash,
-                "research_update_id": update.update_id,
-                "research_update_hash": update.content_hash,
-                "context_id": context.context_id,
-                "context_hash": context.content_hash,
-                "evidence_packet_id": packet.packet_id,
-                "evidence_packet_hash": packet.content_hash,
-                "planning_input_id": planning_input.planning_input_id,
-                "planning_input_hash": planning_input.content_hash,
-                "planning_proposal_id": proposal.proposal_id,
-                "planning_proposal_hash": content_hash(proposal),
-                "candidate_plan_ids": candidate_ids,
-                "candidate_plan_hashes": tuple(content_hash(item) for item in compilation.candidates),
-                "selected_plan_id": selected.plan_id,
-                "selected_plan_hash": content_hash(selected),
-                "approval_review_id": approval.review.review_id,
-                "approval_review_hash": approval.review.content_hash,
-                "approval_verdict_id": approval.verdict.verdict_id,
-                "approval_verdict_hash": content_hash(approval.verdict),
-                "approval_receipt_id": approval.receipt.receipt_id,
-                "approval_receipt_hash": approval.receipt.content_hash,
-                "gate_id": gate.gate_id,
-                "gate_hash": content_hash(gate),
-                "status": status,
-            }
-            cycle = _build_content_bound(
-                SuccessorPlanningCycle, "successor-cycle", cycle_payload
+            cycle = self._rebuild_complete_approval_cycle(
+                parent_run_id=parent_run_id,
+                prefix=prefix,
+                invocation=invocation,
+                compilation=compilation,
+                selection=selection,
             )
             self.runs.write_immutable_artifact(
                 parent_run_id,
@@ -2954,15 +3373,64 @@ def result_feedback_status(
                 KnowledgeCurationRecord,
             )
         )
-    cycles: list[SuccessorPlanningCycle] = []
-    for path in sorted(run_root.glob("successor-planning/cycle-*/cycle.yaml")):
-        cycles.append(
-            repository.load_artifact(
-                parent_run_id,
-                path.relative_to(run_root).as_posix(),
-                SuccessorPlanningCycle,
-            )
-        )
+    cycles_by_index: dict[int, SuccessorPlanningCycle] = {}
+    attempted_indexes: set[int] = set()
+    incomplete_cycles: list[dict[str, Any]] = []
+    successor_root = run_root / "successor-planning"
+    if successor_root.exists():
+        for directory in successor_root.glob("cycle-*"):
+            if directory.is_symlink():
+                raise ResultFeedbackError(
+                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                    f"symlinked successor cycle directory: {directory.name}",
+                )
+            if not directory.is_dir():
+                continue
+            suffix = directory.name.removeprefix("cycle-")
+            try:
+                index = int(suffix)
+            except ValueError as error:
+                raise ResultFeedbackError(
+                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                    f"invalid successor cycle directory: {directory.name}",
+                ) from error
+            if index < 1 or suffix != str(index) or index in attempted_indexes:
+                raise ResultFeedbackError(
+                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+                    f"non-canonical successor cycle directory: {directory.name}",
+                )
+            attempted_indexes.add(index)
+            cycle_path = directory / "cycle.yaml"
+            if cycle_path.exists():
+                cycles_by_index[index] = repository.load_artifact(
+                    parent_run_id,
+                    cycle_path.relative_to(run_root).as_posix(),
+                    SuccessorPlanningCycle,
+                )
+                continue
+            planning_outcome_path = directory / "planning-outcome.yaml"
+            if planning_outcome_path.exists():
+                planning_outcome = repository.load_artifact(
+                    parent_run_id,
+                    planning_outcome_path.relative_to(run_root).as_posix(),
+                    SuccessorPlanningCycle,
+                )
+                incomplete_cycles.append(
+                    {"cycle": index, "status": planning_outcome.status.value}
+                )
+                continue
+            approval_claimed = (directory / "provider-calls" / "approval.yaml").exists()
+            planning_claimed = (directory / "provider-calls" / "planning.yaml").exists()
+            if approval_claimed:
+                status = "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"
+            elif planning_claimed and (directory / "planning-proposal.yaml").exists():
+                status = "PLANNING_COMPLETE_AWAITING_SELECTION_OR_APPROVAL"
+            elif planning_claimed:
+                status = "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"
+            else:
+                status = "SUCCESSOR_INVOCATION_RESERVED"
+            incomplete_cycles.append({"cycle": index, "status": status})
+    cycles = [cycles_by_index[index] for index in sorted(cycles_by_index)]
     assessment_by_submission = {item.submission_id: item for item in assessments}
     materialized_ids = {item.submission_id for item in receipts}
     superseded_curation_ids = {
@@ -2987,6 +3455,32 @@ def result_feedback_status(
         ResultEvidenceIntakeStatus.BLOCKED_CONTEXT_COMPATIBILITY,
         ResultEvidenceIntakeStatus.BLOCKED_SCIENTIFIC_ADMISSIBILITY,
     }
+    latest_complete_index = max(cycles_by_index, default=None)
+    latest_attempted_index = max(attempted_indexes, default=None)
+    incomplete_by_index = {item["cycle"]: item for item in incomplete_cycles}
+    if latest_attempted_index in cycles_by_index:
+        latest_status = cycles_by_index[latest_attempted_index].status.value
+    elif latest_attempted_index in incomplete_by_index:
+        latest_status = incomplete_by_index[latest_attempted_index]["status"]
+    else:
+        latest_status = None
+    binding_index = latest_attempted_index
+    triggering_result_ids: list[str] = []
+    if binding_index is not None:
+        binding_path = (
+            run_root
+            / "successor-planning"
+            / f"cycle-{binding_index}"
+            / "parent-binding.yaml"
+        )
+        if binding_path.exists():
+            triggering_result_ids = list(
+                repository.load_artifact(
+                    parent_run_id,
+                    binding_path.relative_to(run_root).as_posix(),
+                    SuccessorParentBinding,
+                ).result_submission_ids
+            )
     return {
         "result_evidence": {
             "submissions": len(submissions),
@@ -3035,22 +3529,17 @@ def result_feedback_status(
         },
         "successor_planning": {
             "cycles": len(cycles),
-            "latest_status": cycles[-1].status.value if cycles else None,
-            "cycle": len(cycles),
+            "latest_status": latest_status,
+            "cycle": latest_complete_index,
+            "latest_complete_cycle": latest_complete_index,
+            "latest_attempted_cycle": latest_attempted_index,
+            "incomplete_cycles": sorted(
+                incomplete_cycles, key=lambda item: item["cycle"]
+            ),
             "parent_run": parent_run_id,
             "parent_plan": (
                 submissions[-1].parent_plan_id if submissions else None
             ),
-            "triggering_result_ids": (
-                list(
-                    repository.load_artifact(
-                        parent_run_id,
-                        f"successor-planning/cycle-{len(cycles)}/parent-binding.yaml",
-                        SuccessorParentBinding,
-                    ).result_submission_ids
-                )
-                if cycles
-                else []
-            ),
+            "triggering_result_ids": triggering_result_ids,
         },
     }

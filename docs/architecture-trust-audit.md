@@ -64,7 +64,7 @@ requires a new validation and independent approval chain.
 | Evidence resolution | `planning-evidence/policy.yaml`, `cycle-N/request-attempt.yaml`, request/resolution/cycle records and trigger archive | top-level `context.yaml`, `evidence-packet.yaml`, `planning-input.yaml` are the selected current projection | a child context creates `evidence-hierarchy-N/` and `evidence-replan-N/`; old artifacts remain audit history |
 | Plan revision | immutable `round-N/` artifacts, attempt start/outcome records, and `plan-revisions/history/<hash>.yaml` | `plan-revisions/revision-chain.yaml` is the current pointer | parent plan, trigger review, input, provider config, candidate, receipt, validation and approval bindings are all checked |
 | Result intake | immutable submission, archived raw bytes, assessment, curation and materialization receipt under `result-evidence/` | result status summary is derived | exact parent plan/task/capability, checksums, fingerprints and explicit curation are required |
-| Successor planning | `cycle-N/invocation.yaml`, provider-call claim markers, parent binding, update, new context/input, plans and approval artifacts | `cycle-N/cycle.yaml` is the completed cycle record | exact invocation identity is idempotent; an incomplete claimed provider call is uncertain and is not retried automatically |
+| Successor planning | `cycle-N/invocation.yaml`, provider-call claim markers, parent binding, update, new context/input, plans, `selection.yaml`, and approval artifacts | `planning-outcome.yaml` records a human-selection wait; `cycle-N/cycle.yaml` is the completed authority | result/receipt pairs are canonically ordered; planning identity excludes candidate selection; only complete locally verified stage output permits resume |
 
 Top-level workflow files are not independent authorities. Consumers must follow
 their content-bound IDs/hashes and the owning chain/cycle records.
@@ -100,7 +100,8 @@ validators rather than alternative approval definitions.
 | hierarchy stage claim | starting directions, triage, or expansion for a bound input/provider | `HierarchicalPlanningStageAttempt` | resume reuses complete output; an uncertain stage is blocked, not called again |
 | `max_evidence_resolution_cycles` | a claimed evidence request cycle, before provider inference | immutable `PlanningEvidenceCyclePolicy` plus request attempt/cycle records | plan revisions and provider retries do not reset it |
 | `max_plan_revisions` | every started scientific revision attempt across base and every evidence-replan namespace | attempt start/outcome records; `revisions_used` remains the count of successful versions in the current chain | evidence resolution, hierarchy rerun and resume do not grant more attempts |
-| successor invocation | one exact parent/results/follow-up/provider configuration | `SuccessorPlanningInvocation` and call-claim markers | repeated identical calls return the completed cycle; uncertain external calls are not repeated |
+| successor invocation | one exact parent/canonical result set/follow-up/planning-provider configuration | `SuccessorPlanningInvocation` and planning call claim | CLI result order and later human candidate selection do not create another planning invocation |
+| successor candidate selection | one exact invocation/proposal/candidate and explicit selection provenance | `SuccessorCandidateSelection` | cannot select a candidate from another proposal, invocation or changed hash; does not call the planner |
 
 The revision count intentionally distinguishes started attempts from successful
 versions. `PlanRevisionChain.revisions_used` keeps its existing public meaning;
@@ -116,9 +117,11 @@ budget enforcement uses the globally collected attempt records.
   are reused; missing outcomes are reconciled only when a fully bound revision
   record exists, otherwise the chain terminates as uncertain.
 - Successor planning: the exact invocation is reserved before work. Planning
-  and approval call claims are written before each external provider call. A
-  complete matching cycle is returned idempotently. A claimed call without a
-  complete cycle fails as `SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN`.
+  and approval call claims are written before each external provider call.
+  Complete proposal/candidate/receipt/validation artifacts resume at selection
+  or approval without repeating planning. A complete approval authority chain
+  can reconstruct a missing final cycle record. A claimed call without its
+  complete stage output remains planning- or approval-specific uncertain state.
 - Run locking prevents two local resumes from claiming the same operation.
   It is a local-filesystem lock, not a distributed exactly-once guarantee.
 
@@ -184,6 +187,62 @@ base and evidence-replan namespaces.
 Regression evidence:
 `test_evidence_replan_does_not_reset_global_revision_attempt_budget`.
 
+### F-04 — successor result ordering changed invocation identity (confirmed, fixed)
+
+Submission IDs/hashes and their materialization receipt IDs/hashes were stored
+in CLI order. Reversing the same accepted set therefore created a second
+invocation. The service now validates each submission/receipt/curation binding
+first, then sorts the bound tuple as one unit and deterministically deduplicates
+accepted evidence IDs. Duplicate, cross-plan and mismatched bindings still fail
+closed.
+
+Regression evidence:
+`test_successor_result_set_order_has_one_canonical_invocation`.
+
+### F-05 — planning identity conflated model planning and human selection (confirmed, fixed)
+
+`selected_candidate_id` and approval-provider configuration previously changed
+`SuccessorPlanningInvocation`, so selecting an already materialized candidate
+could invoke the planner again. New invocation records bind only the parent,
+canonical result set, follow-up request and planning provider/config. Explicit
+selection is a separate immutable `SuccessorCandidateSelection` bound to the
+exact invocation, proposal and candidate hash. Legacy invocation fields remain
+readable but are not emitted for new invocations.
+
+Planning decision is not human candidate selection. Triage/proposal generation
+creates the candidate set; an explicit human selection chooses one immutable
+candidate for independent approval. Neither operation is itself scientific
+approval.
+
+Regression evidence:
+`test_human_candidate_selection_reuses_the_original_planning_output` and
+`test_candidate_from_another_successor_invocation_is_rejected`.
+
+### F-06 — successor resume collapsed distinct crash stages (confirmed, fixed)
+
+The previous implementation treated any call marker without `cycle.yaml` as a
+planning uncertainty, even when all planning or approval artifacts were already
+durably stored. Resume now validates each stage independently. It reuses a
+complete planning output, reconstructs a final cycle from a complete approval
+authority chain, and refuses to repeat a provider only when that provider's
+claimed outcome is incomplete or unverifiable. This is local reconciliation,
+not an exactly-once guarantee for remote inference.
+
+Regression evidence:
+`test_complete_planning_output_resumes_at_approval_without_replanning`,
+`test_approval_claim_without_complete_output_is_not_repeated`, and
+`test_complete_approval_output_rebuilds_cycle_without_provider_calls`.
+
+### F-07 — successor status inferred paths from lexical order/count (confirmed, fixed)
+
+Status now parses canonical numeric `cycle-N` indexes, reports latest complete
+and latest attempted indexes separately, retains intermediate incomplete states,
+and loads the parent binding from the actual indexed directory. Non-canonical or
+symlinked cycle directories fail closed.
+
+Regression evidence:
+`test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles`.
+
 ## Deliberately retained duplication
 
 - `validate_approved_plan_authority` covers the shared minimum authority chain.
@@ -220,12 +279,12 @@ requirements and was therefore not done.
 2. insufficient evidence to a fresh hierarchy and fresh approval;
 3. global revision budget across evidence re-planning;
 4. human-choice hierarchy blocking across resume;
-5. identical successor invocation idempotency;
-6. uncertain successor provider call non-repetition;
+5. canonical successor result-set invocation idempotency and separate human selection;
+6. stage-aware successor recovery and uncertain provider-call non-repetition;
 7. policy, gate, validation, compilation and review tampering;
 8. qualitative negative observation preservation without claim promotion;
 9. failed execution producing no scientific result/observation;
-10. exact parent/result/successor bindings through production services.
+10. exact parent/result/successor bindings and numeric cycle status through production services.
 
 The owning suites continue to cover multi-round feedback carry-forward,
 evidence-cycle exhaustion, concurrent revision resume, two-generation successor

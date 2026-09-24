@@ -6177,10 +6177,20 @@ class SuccessorPlanningInvocation(StrictModel):
     planning_provider_id: NonBlankStr
     planning_provider_version: NonBlankStr
     planning_provider_config_hash: Sha256Str
-    approval_provider_id: NonBlankStr
-    approval_provider_version: NonBlankStr
-    approval_provider_config_hash: Sha256Str
-    selected_candidate_id: NonBlankStr | None = None
+    # Legacy invocation fields remain readable, but new invocations keep approval and
+    # human selection outside the planning identity.
+    approval_provider_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    approval_provider_version: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    approval_provider_config_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    selected_candidate_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     content_hash: Sha256Str
 
     @model_validator(mode="after")
@@ -6203,6 +6213,15 @@ class SuccessorPlanningInvocation(StrictModel):
                 raise ValueError(f"successor invocation {label} must align")
             if len(set(identifiers)) != len(identifiers):
                 raise ValueError(f"successor invocation {label} must be unique")
+        approval_fields = (
+            self.approval_provider_id,
+            self.approval_provider_version,
+            self.approval_provider_config_hash,
+        )
+        if any(value is None for value in approval_fields) and any(
+            value is not None for value in approval_fields
+        ):
+            raise ValueError("legacy successor approval provider fields must be complete")
         identity = self.model_dump(
             mode="json",
             exclude={"invocation_id", "content_hash"},
@@ -6214,6 +6233,33 @@ class SuccessorPlanningInvocation(StrictModel):
         payload = {"invocation_id": expected_id, **identity}
         if self.content_hash != content_hash(payload):
             raise ValueError("SuccessorPlanningInvocation content_hash is invalid")
+        return self
+
+
+class SuccessorCandidateSelection(StrictModel):
+    selection_id: NonBlankStr
+    invocation_id: NonBlankStr
+    invocation_hash: Sha256Str
+    proposal_id: NonBlankStr
+    proposal_hash: Sha256Str
+    candidate_id: NonBlankStr
+    candidate_hash: Sha256Str
+    selection_provenance: NonBlankStr
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> SuccessorCandidateSelection:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"selection_id", "content_hash"}
+        )
+        expected_id = f"successor-selection-{content_hash(identity)[:24]}"
+        if self.selection_id != expected_id:
+            raise ValueError("SuccessorCandidateSelection ID is not content-bound")
+        payload = {"selection_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("SuccessorCandidateSelection content_hash is invalid")
         return self
 
 
@@ -6239,6 +6285,12 @@ class SuccessorPlanningCycle(StrictModel):
     planning_proposal_hash: Sha256Str | None = None
     candidate_plan_ids: tuple[NonBlankStr, ...] = ()
     candidate_plan_hashes: tuple[Sha256Str, ...] = ()
+    selection_id: NonBlankStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    selection_hash: Sha256Str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     selected_plan_id: NonBlankStr | None = None
     selected_plan_hash: Sha256Str | None = None
     approval_review_id: NonBlankStr | None = None
@@ -6259,6 +6311,7 @@ class SuccessorPlanningCycle(StrictModel):
         pairs = (
             (self.invocation_id, self.invocation_hash),
             (self.planning_proposal_id, self.planning_proposal_hash),
+            (self.selection_id, self.selection_hash),
             (self.selected_plan_id, self.selected_plan_hash),
             (self.approval_review_id, self.approval_review_hash),
             (self.approval_verdict_id, self.approval_verdict_hash),
@@ -6293,7 +6346,9 @@ class SuccessorPlanningCycle(StrictModel):
             raise ValueError(
                 "reviewed successor status requires complete plan and approval bindings"
             )
-        identity = self.model_dump(mode="json", exclude={"cycle_id", "content_hash"})
+        identity = self.model_dump(
+            mode="json", exclude={"cycle_id", "content_hash"}, exclude_none=True
+        )
         expected_id = f"successor-cycle-{content_hash(identity)[:24]}"
         if self.cycle_id != expected_id:
             raise ValueError("SuccessorPlanningCycle ID is not content-bound")
