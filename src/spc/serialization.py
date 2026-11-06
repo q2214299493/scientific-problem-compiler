@@ -77,8 +77,21 @@ def load_data(path: Path) -> Any:
     return json.loads(text)
 
 
-def load_model(path: Path, model_type: type[ModelT]) -> ModelT:
-    return model_type.model_validate(load_data(path))
+def load_model(
+    path: Path, model_type: type[ModelT], *, _file_hashes: dict[Path, str] | None = None
+) -> ModelT:
+    if _file_hashes is None:
+        return model_type.model_validate(load_data(path))
+    if path.suffix.lower() != ".json":
+        raise ValueError("read-scoped record fingerprints require JSON")
+    # Hash the same immutable byte buffer that is parsed, never a second read
+    # after validation (which could have observed different file contents).
+    raw = path.read_bytes()
+    record = model_type.model_validate(json.loads(raw.decode("utf-8")))
+    digest = hashlib.sha256(raw).hexdigest()
+    if _file_hashes.setdefault(path, digest) != digest:
+        raise ValueError("repository record changed during trusted read")
+    return record
 
 
 def export_json_schemas(output_dir: Path, model_types: Iterable[type[BaseModel]]) -> list[Path]:

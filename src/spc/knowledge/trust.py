@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,12 +178,21 @@ class _ValidatedTrustedRead:
             MappingProxyType(dict(validator.records)),
             selection,
             MappingProxyType(dict(structure_selections)),
-            MappingProxyType(cls._structure_file_hashes(repositories, structure_selections)),
+            MappingProxyType(
+                dict(validator._k1f_index.validated_structure_file_hashes())
+                if validator._k1f_index is not None else {}
+            ),
         )
 
     @staticmethod
     def _file_hash(path: Path) -> str:
-        if path.is_symlink() or not path.is_file():
+        try:
+            regular_file = stat.S_ISREG(path.lstat().st_mode)
+        except OSError as error:
+            raise TrustedKnowledgeError(
+                "TRUSTED_READ_STRUCTURE_CHANGED", f"structure file is unavailable: {path}"
+            ) from error
+        if not regular_file:
             raise TrustedKnowledgeError(
                 "TRUSTED_READ_STRUCTURE_CHANGED", f"structure file is unavailable: {path}"
             )
@@ -352,6 +362,9 @@ class TrustedKnowledgeValidator:
         self._k1f_index = K1FCompilationAuthorityIndex(
             self.repositories, self.evidence_store, current,
             evidence_validator=self._verify_evidence,
+            structure_fingerprinter=lambda selections: _ValidatedTrustedRead._structure_file_hashes(
+                self.repositories, selections
+            ),
         )
         accepted = {
             key: curation

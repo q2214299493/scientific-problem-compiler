@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..models import (
     DocumentStructureArtifact,
     DocumentStructureSelection,
@@ -224,10 +226,13 @@ def validate_structure_selection(
     selection: str | DocumentStructureSelection,
     repositories: KnowledgeRepositories,
     evidence_store: EvidenceStore | None = None,
+    *,
+    _file_hashes: dict[Path, str] | None = None,
 ) -> DocumentStructureSelection:
     store = evidence_store or repositories.evidence_store
-    record = repositories.document_structure_selections.get(selection) if isinstance(selection, str) else selection
-    stored = repositories.document_structure_selections.get(record.selection_id)
+    read_options = {"_file_hashes": _file_hashes} if _file_hashes is not None else {}
+    record = repositories.document_structure_selections.get(selection, **read_options) if isinstance(selection, str) else selection
+    stored = repositories.document_structure_selections.get(record.selection_id, **read_options)
     if stored != record:
         raise ValueError("document structure selection differs from repository record")
     if (
@@ -239,7 +244,7 @@ def validate_structure_selection(
     validate_literature_representation(representation, repositories, store)
     from .structure import validate_document_structure
 
-    structure = validate_document_structure(record.structure_id, repositories, store)
+    structure = validate_document_structure(record.structure_id, repositories, store, **read_options)
     if (
         record.literature_id != representation.literature_id
         or record.representation_hash != representation.content_hash

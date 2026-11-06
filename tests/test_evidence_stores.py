@@ -69,6 +69,111 @@ def add_text_evidence(
     return source, evidence
 
 
+def _shared_source_evidence(tmp_path: Path):
+    store = FilesystemEvidenceStore(tmp_path / "store")
+    source, first = add_text_evidence(
+        store, tmp_path, source_id="shared-source", evidence_id="ev-a", text="shared UTF-8 evidence"
+    )
+    second = EvidenceSpan.model_validate({**first.model_dump(mode="json"), "evidence_id": "ev-b"})
+    store.add_evidence(second)
+    return store, source, first, second
+
+
+def test_list_evidence_shares_sources_only_within_one_closed_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _source, first, second = _shared_source_evidence(tmp_path)
+    original = store._verified_source_bytes
+    calls = 0
+
+    def counted(source):
+        nonlocal calls
+        calls += 1
+        return original(source)
+
+    monkeypatch.setattr(store, "_verified_source_bytes", counted)
+    assert store.list_evidence() == (first, second)
+    assert calls == 2
+    assert store.list_evidence() == (first, second)
+    assert calls == 4
+
+
+def test_list_evidence_keeps_verification_when_source_cache_budget_is_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spc import repositories as repository_module
+
+    store, _source, first, second = _shared_source_evidence(tmp_path)
+    monkeypatch.setattr(repository_module, "_MAX_LIST_SOURCE_BYTES", 0)
+    original = store._verified_source_bytes
+    calls = 0
+
+    def counted(source):
+        nonlocal calls
+        calls += 1
+        return original(source)
+
+    monkeypatch.setattr(store, "_verified_source_bytes", counted)
+    assert store.list_evidence() == (first, second)
+    assert calls == 4  # Discovery, two ordinary verifications, and closing check.
+
+
+@pytest.mark.parametrize("target", ["source_bytes", "source_record", "evidence_record", "evidence_deleted"])
+def test_list_evidence_rejects_changes_during_shared_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    from spc import repositories as repository_module
+
+    store, source, first, second = _shared_source_evidence(tmp_path)
+    original = repository_module.load_model
+    changed = False
+
+    def change_during_second_record(path, *args, **kwargs):
+        nonlocal changed
+        record = original(path, *args, **kwargs)
+        if path.name == f"{second.evidence_id}.json" and not changed:
+            changed = True
+            if target == "source_bytes":
+                changed_path = store.root / source.stored_path
+                changed_path.chmod(0o600)
+                changed_path.write_text("tampered source", encoding="utf-8")
+            elif target == "evidence_deleted":
+                (store.evidence_records.root / f"{first.evidence_id}.json").unlink()
+            else:
+                changed_path = (
+                    store.source_records.root / f"{source.source_id}--{source.version}.json"
+                    if target == "source_record"
+                    else store.evidence_records.root / f"{first.evidence_id}.json"
+                )
+                payload = json.loads(changed_path.read_text(encoding="utf-8"))
+                payload["title" if target == "source_record" else "locator"] = "changed during enumeration"
+                changed_path.write_text(json.dumps(payload), encoding="utf-8")
+        return record
+
+    monkeypatch.setattr(repository_module, "load_model", change_during_second_record)
+    with pytest.raises(ValueError):
+        store.list_evidence()
+    assert changed
+
+
+@pytest.mark.parametrize("hook", ["verify_source_integrity", "verify_evidence_integrity", "get_evidence", "evidence_getter", "source_getter"])
+def test_list_evidence_keeps_custom_integrity_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook: str
+) -> None:
+    store, _source, _first, _second = _shared_source_evidence(tmp_path)
+
+    def reject(_record):
+        raise ValueError("custom integrity policy")
+
+    if hook in {"evidence_getter", "source_getter"}:
+        repository = store.evidence_records if hook == "evidence_getter" else store.source_records
+        monkeypatch.setattr(repository, "get", reject)
+    else:
+        monkeypatch.setattr(store, hook, reject)
+    with pytest.raises(ValueError, match="custom integrity policy"):
+        store.list_evidence()
+
+
 def accept_record(
     repositories: KnowledgeRepositories,
     *,

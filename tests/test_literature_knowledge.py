@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -628,6 +629,209 @@ def test_snapshot_reuses_trusted_structure_and_detects_later_block_change(
     )
     with pytest.raises(TrustedKnowledgeError, match="TRUSTED_READ_STRUCTURE_CHANGED"):
         repositories.create_snapshot(store, profile, _validated_read=trusted_read)
+
+
+def _fingerprinted_structure_index(repositories, store):
+    return K1FCompilationAuthorityIndex(
+        repositories, store,
+        TrustedKnowledgeValidator(repositories, store).resolve_current_curations(),
+        structure_fingerprinter=lambda selections: _ValidatedTrustedRead._structure_file_hashes(
+            repositories, selections
+        ),
+    )
+
+
+def test_structure_read_witness_uses_exact_bytes_and_rejects_changed_reread(tmp_path: Path) -> None:
+    repositories, _store, _outcome, structure = setup_html_literature(tmp_path)
+    block_id = next(iter(structure.artifact.block_hashes))
+    repository = repositories.document_structure_blocks
+    path = repository.root / f"{block_id}.json"
+    witnesses = {}
+    repository.get(block_id, _file_hashes=witnesses)
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert witnesses[path] == expected
+    path.write_bytes(path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="repository record changed during trusted read"):
+        repository.get(block_id, _file_hashes=witnesses)
+    assert witnesses[path] == expected
+
+
+def test_identity_bound_list_loads_and_checks_each_record_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spc import repositories as repository_module
+
+    repositories, _store, _outcome, _structure = setup_html_literature(tmp_path)
+    repository = repositories.document_structure_blocks
+    original = repository_module.load_model
+    reads = []
+
+    def counted(path, *args, **kwargs):
+        reads.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "load_model", counted)
+    records = repository.list()
+    expected_paths = sorted(repository.root.glob("*.json"))
+    assert reads == expected_paths
+    assert [record.block_id for record in records] == [path.stem for path in expected_paths]
+
+
+def test_identity_bound_list_rejects_record_under_another_filename(tmp_path: Path) -> None:
+    repositories, _store, _outcome, structure = setup_html_literature(tmp_path)
+    block_id = next(iter(structure.artifact.block_hashes))
+    repository = repositories.document_structure_blocks
+    source = repository.root / f"{block_id}.json"
+    (repository.root / "wrong-record-key.json").write_bytes(source.read_bytes())
+    with pytest.raises(ValueError, match="stored record ID does not match repository key"):
+        repository.list()
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "missing"])
+def test_structure_file_hash_rejects_unavailable_or_nonregular_file(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "structure.json"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}", encoding="utf-8")
+        try:
+            path.symlink_to(target)
+        except OSError:
+            pytest.skip("creating file symlinks requires Windows privileges")
+    with pytest.raises(TrustedKnowledgeError, match="TRUSTED_READ_STRUCTURE_CHANGED"):
+        _ValidatedTrustedRead._file_hash(path)
+
+
+def test_structure_fingerprint_reuses_complete_validation_only_within_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+    selection = repositories.document_structure_selections.resolve_current(outcome.representation_id or "")
+    original = structure_selection_module.validate_structure_selection
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(structure_selection_module, "validate_structure_selection", counted)
+    for expected_calls in (1, 2):
+        index = _fingerprinted_structure_index(repositories, store)
+        first = index._validate_structure_once(selection, repositories, store)
+        assert index._validate_structure_once(selection, repositories, store) == first
+        index.revalidate_structures()
+        assert index.validated_structure_file_hashes()
+        assert calls == expected_calls
+
+
+def test_structure_fingerprint_is_bound_before_initial_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+    selection = repositories.document_structure_selections.resolve_current(outcome.representation_id or "")
+    artifact = repositories.document_structure_artifacts.get(selection.structure_id)
+    block_id = next(iter(artifact.block_hashes))
+    original = structure_selection_module.validate_structure_selection
+
+    def change_after_validation(*args, **kwargs):
+        checked = original(*args, **kwargs)
+        (repositories.document_structure_blocks.root / f"{block_id}.json").write_text("{}", encoding="utf-8")
+        return checked
+
+    monkeypatch.setattr(structure_selection_module, "validate_structure_selection", change_after_validation)
+    index = _fingerprinted_structure_index(repositories, store)
+    index._validate_structure_once(selection, repositories, store)
+    with pytest.raises(ValueError, match="structure changed during trusted read"):
+        index.revalidate_structures()
+
+
+def test_structure_fingerprint_catches_change_during_source_revalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spc.knowledge import acquisition
+
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+    selection = repositories.document_structure_selections.resolve_current(outcome.representation_id or "")
+    artifact = repositories.document_structure_artifacts.get(selection.structure_id)
+    block_id = next(iter(artifact.block_hashes))
+    index = _fingerprinted_structure_index(repositories, store)
+    index._validate_structure_once(selection, repositories, store)
+    original = acquisition.validate_literature_representation
+
+    def change_after_source_check(*args, **kwargs):
+        checked = original(*args, **kwargs)
+        (repositories.document_structure_blocks.root / f"{block_id}.json").write_text("{}", encoding="utf-8")
+        return checked
+
+    monkeypatch.setattr(acquisition, "validate_literature_representation", change_after_source_check)
+    with pytest.raises(ValueError, match="structure changed during trusted read"):
+        index.revalidate_structures()
+
+
+@pytest.mark.parametrize("target", ["selection", "structure", "block", "table", "cell", "figure", "representation"])
+def test_structure_fingerprint_rechecks_every_structure_component(tmp_path: Path, target: str) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+    selection = repositories.document_structure_selections.resolve_current(outcome.representation_id or "")
+    artifact = repositories.document_structure_artifacts.get(selection.structure_id)
+    table = repositories.table_structures.get(next(iter(artifact.table_hashes)))
+    repository, identity = {
+        "selection": (repositories.document_structure_selections, selection.selection_id),
+        "structure": (repositories.document_structure_artifacts, artifact.structure_id),
+        "block": (repositories.document_structure_blocks, next(iter(artifact.block_hashes))),
+        "table": (repositories.table_structures, table.table_id),
+        "cell": (repositories.table_cell_structures, table.cell_refs[0]),
+        "figure": (repositories.figure_structures, next(iter(artifact.figure_hashes))),
+        "representation": (repositories.literature_representation_refs, selection.representation_id),
+    }[target]
+    index = _fingerprinted_structure_index(repositories, store)
+    index._validate_structure_once(selection, repositories, store)
+    path = repository.root / f"{identity}.json"
+    # A byte-only edit keeps the parsed record valid. It must still invalidate
+    # the structure manifest instead of being silently recaptured as trusted.
+    path.write_bytes(path.read_bytes() + b"\n")
+    if target == "representation":
+        # Representation metadata uses its owner's canonical content binding;
+        # test an actual payload corruption rather than JSON whitespace.
+        path.write_text("{}", encoding="utf-8")
+    with pytest.raises((ValueError, KeyError)):
+        index.revalidate_structures()
+
+
+@pytest.mark.parametrize("setup", [setup_html_literature, setup_pdf_literature])
+@pytest.mark.parametrize("target", ["raw", "canonical", "source"])
+def test_structure_fingerprint_keeps_complete_source_chain_checks(
+    tmp_path: Path, setup, target: str
+) -> None:
+    if setup is setup_pdf_literature:
+        repositories, store, _outcome, representation, _structure = setup(tmp_path)
+        representation_id = representation.representation_id
+    else:
+        repositories, store, outcome, _structure = setup(tmp_path)
+        representation_id = outcome.representation_id or ""
+    selection = repositories.document_structure_selections.resolve_current(representation_id)
+    representation = repositories.literature_representation_refs.get(selection.representation_id)
+    if target == "source":
+        record = store.get_source(representation.source_id, representation.source_version)
+        path = store.root / record.stored_path
+    else:
+        is_pdf = setup is setup_pdf_literature
+        repository = (
+            repositories.raw_literature_artifacts if is_pdf else repositories.raw_html_literature_artifacts
+        ) if target == "raw" else (
+            repositories.canonical_text_artifacts if is_pdf else repositories.canonical_html_text_artifacts
+        )
+        record = repository.get(
+            representation.raw_artifact_id if target == "raw" else representation.canonical_text_id
+        )
+        path = repositories.root / record.stored_path
+    index = _fingerprinted_structure_index(repositories, store)
+    index._validate_structure_once(selection, repositories, store)
+    path.chmod(0o600)
+    path.write_bytes(b"tampered after complete structure validation")
+    with pytest.raises((ValueError, KeyError)):
+        index.revalidate_structures()
 
 
 def _compile_grounding_inventory(tmp_path: Path):

@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 import hashlib
 from html.parser import HTMLParser
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 from typing import Protocol
 
@@ -1187,10 +1188,18 @@ def validate_document_structure(
     structure: str | DocumentStructureArtifact,
     repositories: KnowledgeRepositories,
     evidence_store: EvidenceStore | None = None,
+    *,
+    _file_hashes: dict[Path, str] | None = None,
 ) -> DocumentStructureArtifact:
     store = evidence_store or repositories.evidence_store
-    artifact = repositories.document_structure_artifacts.get(structure) if isinstance(structure, str) else structure
-    stored = repositories.document_structure_artifacts.get(artifact.structure_id)
+
+    def read(repository, identity):
+        if _file_hashes is None:
+            return repository.get(identity)
+        return repository.get(identity, _file_hashes=_file_hashes)
+
+    artifact = read(repositories.document_structure_artifacts, structure) if isinstance(structure, str) else structure
+    stored = read(repositories.document_structure_artifacts, artifact.structure_id)
     if stored != artifact:
         raise ValueError("document structure differs from repository record")
     representation = repositories.literature_representation_refs.get(artifact.representation_id)
@@ -1204,11 +1213,11 @@ def validate_document_structure(
     # Large papers contain many independently stored immutable blocks. Preserve
     # manifest order while bounding parallel file reads; each get still validates
     # the repository key and record identity before the full structure check.
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        blocks = tuple(executor.map(repositories.document_structure_blocks.get, artifact.block_hashes))
-    tables = tuple(repositories.table_structures.get(table_id) for table_id in artifact.table_hashes)
-    figures = tuple(repositories.figure_structures.get(figure_id) for figure_id in artifact.figure_hashes)
-    cells = tuple(repositories.table_cell_structures.get(cell_id) for table in tables for cell_id in table.cell_refs)
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        blocks = tuple(executor.map(partial(read, repositories.document_structure_blocks), artifact.block_hashes))
+    tables = tuple(read(repositories.table_structures, table_id) for table_id in artifact.table_hashes)
+    figures = tuple(read(repositories.figure_structures, figure_id) for figure_id in artifact.figure_hashes)
+    cells = tuple(read(repositories.table_cell_structures, cell_id) for table in tables for cell_id in table.cell_refs)
     _validate_structure_records(artifact, blocks, tables, cells, figures, representation, canonical, text)
     return artifact
 

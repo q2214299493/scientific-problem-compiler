@@ -77,6 +77,7 @@ from .serialization import (
 )
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+_MAX_LIST_SOURCE_BYTES = 8 * 1024 * 1024
 
 
 def source_documents_equivalent(
@@ -138,9 +139,12 @@ class ModelRepository(Generic[ModelT]):
         dump_json(path, model)
         return path
 
-    def get(self, key: str) -> ModelT:
+    def get(self, key: str, *, _file_hashes: dict[Path, str] | None = None) -> ModelT:
         require_safe_path_component(key, field="repository key")
-        return load_model(self.root / f"{key}.json", self.model_type)
+        path = self.root / f"{key}.json"
+        if _file_hashes is None:
+            return load_model(path, self.model_type)
+        return load_model(path, self.model_type, _file_hashes=_file_hashes)
 
     def list(self) -> tuple[ModelT, ...]:
         if not self.root.exists():
@@ -173,19 +177,22 @@ class IdentityBoundRepository(ModelRepository[ModelT]):
             )
         return super().put(key, model)
 
-    def get(self, key: str) -> ModelT:
-        record = super().get(key)
+    def get(self, key: str, *, _file_hashes: dict[Path, str] | None = None) -> ModelT:
+        record = super().get(key, _file_hashes=_file_hashes)
         if self._record_id(record) != key:
             raise ValueError("stored record ID does not match repository key")
         return record
 
     def list(self) -> tuple[ModelT, ...]:
-        records = super().list()
+        if not self.root.exists():
+            return ()
+        # get() checks the filename/key against the same validated record we
+        # return. Loading first and then reopening by record ID duplicates I/O
+        # and can validate a different version than the one being returned.
+        records = tuple(self.get(path.stem) for path in sorted(self.root.glob("*.json")))
         record_ids = [self._record_id(record) for record in records]
         if len(set(record_ids)) != len(record_ids):
             raise ValueError("repository contains duplicate record IDs")
-        for record_id in record_ids:
-            self.get(record_id)
         return records
 
 
@@ -278,21 +285,72 @@ class FilesystemEvidenceStore:
         records: list[EvidenceSpan] = []
         if not self.evidence_records.root.exists():
             return ()
+        # Preserve custom verification hooks. The standard path can share
+        # verified source text inside this call and close every binding below.
+        reuse_sources = all(
+            getattr(getattr(self, name), "__func__", None) is getattr(FilesystemEvidenceStore, name)
+            for name in ("get_source", "get_evidence", "verify_source_integrity", "verify_evidence_integrity", "_verify_evidence_against_source")
+        ) and (
+            getattr(self.evidence_records, "model_type", None) is EvidenceSpan
+            and getattr(self.evidence_records.get, "__func__", None) is ModelRepository.get
+            and getattr(self.source_records, "model_type", None) is SourceDocument
+            and getattr(self.source_records.get, "__func__", None) is ModelRepository.get
+        )
+        sources: dict[tuple[str, str], tuple[SourceDocument, str | None]] = {}
+        cached_source_bytes = 0
+        file_hashes: dict[Path, str] = {}
         for path in sorted(self.evidence_records.root.glob("*.json")):
             if path.is_symlink():
                 raise ValueError("EvidenceSpan repository record cannot be a symlink")
-            evidence = load_model(path, EvidenceSpan)
+            evidence = load_model(path, EvidenceSpan, _file_hashes=file_hashes) if reuse_sources else load_model(path, EvidenceSpan)
             if path.stem != evidence.evidence_id:
                 raise ValueError(
                     "EvidenceSpan repository key does not match record identity"
                 )
             try:
-                self.verify_evidence_integrity(evidence)
+                if reuse_sources:
+                    require_safe_path_component(evidence.evidence_id, field="evidence_id")
+                    key = (evidence.source_id, evidence.source_version)
+                    verified = sources.get(key)
+                    if verified is None:
+                        source = self.get_source(*key)
+                        content = self._verified_source_bytes(source)
+                        text = None
+                        if cached_source_bytes + len(content) <= _MAX_LIST_SOURCE_BYTES:
+                            try:
+                                text = content.decode("utf-8")
+                            except UnicodeDecodeError as error:
+                                raise ValueError("EvidenceSpan offsets require UTF-8 source content") from error
+                            cached_source_bytes += len(content)
+                        del content
+                        verified = sources[key] = (source, text)
+                    if verified[1] is None:
+                        self.verify_evidence_integrity(evidence)
+                    else:
+                        self._verify_evidence_against_source(evidence, _verified_source=verified)
+                else:
+                    self.verify_evidence_integrity(evidence)
             except (FileNotFoundError, OSError, ValueError) as error:
                 raise ValueError(
                     f"EvidenceSpan integrity failed for {evidence.evidence_id}: {error}"
                 ) from error
             records.append(evidence)
+        for source, _text in sources.values():
+            try:
+                self.verify_source_integrity(source)
+            except (FileNotFoundError, OSError, ValueError) as error:
+                raise ValueError(f"SourceDocument integrity failed during evidence read: {error}") from error
+        # Detect changes during enumeration, including record changes made
+        # while the shared sources were being reverified.
+        for path, expected_hash in file_hashes.items():
+            if path.is_symlink():
+                raise ValueError("EvidenceSpan repository record cannot be a symlink")
+            try:
+                current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as error:
+                raise ValueError(f"EvidenceSpan repository record is unavailable: {path.stem}") from error
+            if current_hash != expected_hash:
+                raise ValueError(f"EvidenceSpan repository record changed during list read: {path.stem}")
         return tuple(records)
 
     def list_sources(self) -> tuple[SourceDocument, ...]:
@@ -319,6 +377,12 @@ class FilesystemEvidenceStore:
         return tuple(records)
 
     def verify_source_integrity(self, source: SourceDocument) -> SourceDocument:
+        self._verified_source_bytes(source)
+        return source
+
+
+    def _verified_source_bytes(self, source: SourceDocument) -> bytes:
+        """Return the exact bytes whose complete source binding was verified."""
         require_safe_path_component(source.source_id, field="source_id")
         require_safe_path_component(source.version, field="source version")
         stored_source = self.get_source(source.source_id, source.version)
@@ -340,7 +404,7 @@ class FilesystemEvidenceStore:
         content = content_path.read_bytes()
         if hashlib.sha256(content).hexdigest() != source.content_sha256:
             raise ValueError("stored source content hash does not match SourceDocument")
-        return source
+        return content
 
     def source_content_path(self, source: SourceDocument) -> Path:
         self.verify_source_integrity(source)
@@ -379,24 +443,29 @@ class FilesystemEvidenceStore:
         self.source_records.put(record_key, source)
         return self.verify_source_integrity(source)
 
-    def _verify_evidence_against_source(self, evidence: EvidenceSpan) -> SourceDocument:
+    def _verify_evidence_against_source(
+        self, evidence: EvidenceSpan, *, _verified_source: tuple[SourceDocument, str] | None = None
+    ) -> SourceDocument:
         require_safe_path_component(evidence.source_id, field="evidence source_id")
         require_safe_path_component(evidence.source_version, field="evidence source_version")
-        source = self.get_source(evidence.source_id, evidence.source_version)
+        source = self.get_source(evidence.source_id, evidence.source_version) if _verified_source is None else _verified_source[0]
         if (source.source_id, source.version) != (
             evidence.source_id,
             evidence.source_version,
         ):
             raise ValueError("SourceDocument source_id/version does not match EvidenceSpan")
-        self.verify_source_integrity(source)
+        if _verified_source is None:
+            self.verify_source_integrity(source)
         if source.content_sha256 != evidence.content_sha256:
             raise ValueError("EvidenceSpan content hash does not match SourceDocument")
-        content_path = self.state_root.joinpath(*PurePosixPath(source.stored_path).parts)
-        content = content_path.read_bytes()
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ValueError("EvidenceSpan offsets require UTF-8 source content") from error
+        if _verified_source is None:
+            content = self.state_root.joinpath(*PurePosixPath(source.stored_path).parts).read_bytes()
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError("EvidenceSpan offsets require UTF-8 source content") from error
+        else:
+            text = _verified_source[1]
         if evidence.end_offset > len(text):
             raise ValueError("EvidenceSpan exceeds stored source content")
         if text[evidence.start_offset : evidence.end_offset] != evidence.text:
