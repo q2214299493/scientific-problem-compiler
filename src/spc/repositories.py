@@ -6,9 +6,12 @@ import shutil
 import tempfile
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Generic, Iterable, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Iterable, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from .knowledge.trust import _ValidatedTrustedRead
 
 from .models import (
     AcquisitionAttemptRecord,
@@ -1917,6 +1920,8 @@ class KnowledgeRepositories:
         self,
         evidence_store: EvidenceStore,
         domain_profile: DomainProfile,
+        *,
+        _validated_read: _ValidatedTrustedRead | None = None,
     ) -> KnowledgeSnapshot:
         from .knowledge.trust import TrustedKnowledgeValidator
 
@@ -1931,7 +1936,11 @@ class KnowledgeRepositories:
             snapshot_evidence = CompositeEvidenceStore(
                 self.evidence_store, evidence_store
             )
-        trusted = TrustedKnowledgeValidator(self, snapshot_evidence).validate()
+        if _validated_read is None:
+            trusted = TrustedKnowledgeValidator(self, snapshot_evidence).validate()
+        else:
+            _validated_read.require_same_sources(self, snapshot_evidence)
+            trusted = _validated_read.selection
         literature_source_keys = {
             (item.source_id, item.source_version)
             for item in self.literature_ingestions.list()
@@ -1946,6 +1955,11 @@ class KnowledgeRepositories:
             for (record_type, record_id) in trusted.trusted_records
             if record_type == "evidence_span"
         }
+        trusted_evidence = {
+            record_id: record
+            for (record_type, record_id), record in trusted.trusted_records.items()
+            if record_type == "evidence_span" and isinstance(record, EvidenceSpan)
+        }
         trusted_source_keys = {
             (record.source_id, record.version)
             for (record_type, _), record in trusted.trusted_records.items()
@@ -1953,11 +1967,12 @@ class KnowledgeRepositories:
             and isinstance(record, SourceDocument)
         }
         from .knowledge.structure import (
-            verify_structured_evidence_locator,
+            _verify_locator_against_validated_structure,
         )
         from .knowledge.structure_selection import (
             resolve_current_structure_selection,
         )
+        from .knowledge.acquisition import validate_literature_representation
 
         trusted_representation_ids = {
             record_id
@@ -1965,13 +1980,34 @@ class KnowledgeRepositories:
             if record_type == "literature_representation_ref"
         }
         trusted_structure_selections: list[DocumentStructureSelection] = []
+        if _validated_read is not None:
+            _validated_read.require_unchanged_structures()
         for representation_id in sorted(trusted_representation_ids):
             try:
-                selection = resolve_current_structure_selection(
-                    representation_id, self, snapshot_evidence
+                current = self.document_structure_selections.resolve_current(
+                    representation_id
                 )
             except FileNotFoundError:
                 continue
+            cached = (
+                _validated_read.structure_selections.get(current.selection_id)
+                if _validated_read is not None else None
+            )
+            if cached is None:
+                selection = resolve_current_structure_selection(
+                    representation_id, self, snapshot_evidence
+                )
+            else:
+                if current != cached or cached.representation_id != representation_id:
+                    raise ValueError("validated structure selection changed")
+                structure = self.document_structure_artifacts.get(cached.structure_id)
+                if structure.content_hash != cached.structure_hash:
+                    raise ValueError("validated structure artifact changed")
+                representation = self.literature_representation_refs.get(representation_id)
+                validate_literature_representation(
+                    representation, self, snapshot_evidence
+                )
+                selection = cached
             trusted_structure_selections.append(selection)
         trusted_structures = tuple(
             self.document_structure_artifacts.get(selection.structure_id)
@@ -1980,12 +2016,20 @@ class KnowledgeRepositories:
         trusted_structure_ids = {
             item.structure_id for item in trusted_structures
         }
+        trusted_structure_by_id = {
+            item.structure_id: item for item in trusted_structures
+        }
         trusted_locators = tuple(
-            verify_structured_evidence_locator(item, self, snapshot_evidence)
+            _verify_locator_against_validated_structure(
+                item, trusted_structure_by_id[item.structure_id], self, snapshot_evidence,
+                verified_evidence=trusted_evidence[item.evidence_id],
+            )
             for item in self.structured_evidence_locators.list()
             if item.structure_id in trusted_structure_ids
             and item.evidence_id in trusted_evidence_ids
         )
+        # The trusted read rechecked cached structure files above. Evidence is
+        # reverified by list_evidence() below before the snapshot can return.
         payload = {
             "domain_profile_hash": content_hash(domain_profile),
             "expert_case_hashes": {

@@ -1,11 +1,24 @@
 from __future__ import annotations
 
-from ...interpretation.validators import source_quote_record_issues
-from ...models import CurationStatus, KnowledgeCurationRecord
+from dataclasses import dataclass
+from typing import Callable
+
+from ...interpretation.validators import _source_quote_binding_issues, source_quote_record_issues
+from ...models import (
+    CurationStatus,
+    DocumentStructureArtifact,
+    DocumentStructureSelection,
+    EvidenceSpan,
+    KnowledgeCurationRecord,
+    LiteratureDocument,
+    LiteratureRepresentationReference,
+    LiteratureRepresentationSelection,
+    SourceDocument,
+)
 from ...repositories import EvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
 from ..ingestion import LiteratureRepresentationSelector
-from ..structure import validate_document_structure, verify_structured_evidence_locator
+from ..structure import _verify_locator_against_validated_structure
 from ..structure_selection import validate_structure_selection
 from .contracts import LiteratureKnowledgeGroundingRecord
 from .repositories import LiteratureKnowledgeGroundingRepository
@@ -98,39 +111,150 @@ def validate_grounding_record(
     require_current: bool,
 ) -> LiteratureKnowledgeGroundingRecord:
     store = evidence_store or repositories.evidence_store
-    stored = LiteratureKnowledgeGroundingRepository(repositories.root).get(record.grounding_id)
-    if stored != record:
-        raise ValueError("literature knowledge grounding differs from repository record")
+    authority = _validate_grounding_authority(record, repositories, store)
+    _validate_grounding_against_authority(record, authority, repositories, store)
+    if require_current:
+        _require_current_grounding_authority(authority, repositories)
+    return record
+
+
+@dataclass(frozen=True)
+class _GroundingAuthority:
+    document: LiteratureDocument
+    representation_selection: LiteratureRepresentationSelection
+    representation: LiteratureRepresentationReference
+    structure_selection: DocumentStructureSelection
+    structure: DocumentStructureArtifact
+
+
+def _validate_grounding_authority(
+    record: LiteratureKnowledgeGroundingRecord,
+    repositories: KnowledgeRepositories,
+    store: EvidenceStore,
+    *,
+    structure_selection_validator: Callable[..., DocumentStructureSelection] | None = None,
+) -> _GroundingAuthority:
     document = repositories.literature_documents.get(record.literature_id)
     representation_selection = repositories.literature_representation_selections.get(
         record.representation_selection_id
     )
     representation = LiteratureRepresentationSelector.resolve_selection(
-        representation_selection,
-        repositories,
-        store,
+        representation_selection, repositories, store
     )
-    structure_selection = validate_structure_selection(
-        record.structure_selection_id,
-        repositories,
-        store,
+    structure_selection = (structure_selection_validator or validate_structure_selection)(
+        record.structure_selection_id, repositories, store
     )
-    structure = validate_document_structure(record.structure_id, repositories, store)
+    if record.structure_id != structure_selection.structure_id:
+        raise ValueError("grounding structure differs from validated selection")
+    structure = repositories.document_structure_artifacts.get(record.structure_id)
+    return _GroundingAuthority(
+        document, representation_selection, representation, structure_selection, structure
+    )
+
+
+def validate_grounding_inventory(
+    records: tuple[LiteratureKnowledgeGroundingRecord, ...],
+    repositories: KnowledgeRepositories,
+    evidence_store: EvidenceStore,
+    *,
+    require_current: bool,
+    structure_selection_validator: Callable[..., DocumentStructureSelection] | None = None,
+    evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
+) -> None:
+    """Validate one compilation's common authority once and each exact grounding."""
+    if not records:
+        return
+    authority = _validate_grounding_authority(
+        records[0], repositories, evidence_store,
+        structure_selection_validator=structure_selection_validator,
+    )
+    for record in records:
+        _validate_grounding_against_authority(
+            record,
+            authority,
+            repositories,
+            evidence_store,
+            evidence_validator=evidence_validator,
+        )
+    # Recheck the shared structure/selection after the inventory read. This also
+    # catches a changed non-cited block instead of trusting a long-lived cache.
+    (structure_selection_validator or validate_structure_selection)(
+        authority.structure_selection, repositories, evidence_store
+    )
+    LiteratureRepresentationSelector.resolve_selection(
+        authority.representation_selection, repositories, evidence_store
+    )
+    # Every grounding was checked against this exact authority. Resolve its
+    # current selections once, after all reads, instead of rescanning both
+    # complete selection repositories for every grounding.
+    if require_current:
+        _require_current_grounding_authority(authority, repositories)
+
+
+def _require_current_grounding_authority(
+    authority: _GroundingAuthority,
+    repositories: KnowledgeRepositories,
+) -> None:
+    current_representation = repositories.literature_representation_selections.resolve_current(
+        authority.document.literature_id
+    )
+    current_structure = repositories.document_structure_selections.resolve_current(
+        authority.representation.representation_id
+    )
+    if (
+        current_representation != authority.representation_selection
+        or current_structure != authority.structure_selection
+    ):
+        raise ValueError("literature knowledge grounding is not current")
+
+
+def _validate_grounding_against_authority(
+    record: LiteratureKnowledgeGroundingRecord,
+    authority: _GroundingAuthority,
+    repositories: KnowledgeRepositories,
+    store: EvidenceStore,
+    *,
+    evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
+) -> LiteratureKnowledgeGroundingRecord:
+    stored = LiteratureKnowledgeGroundingRepository(repositories.root).get(record.grounding_id)
+    if stored != record:
+        raise ValueError("literature knowledge grounding differs from repository record")
+    document = authority.document
+    representation_selection = authority.representation_selection
+    representation = authority.representation
+    structure_selection = authority.structure_selection
+    structure = authority.structure
+    if (
+        record.literature_id != document.literature_id
+        or record.representation_selection_id != representation_selection.selection_id
+        or record.structure_selection_id != structure_selection.selection_id
+        or record.structure_id != structure.structure_id
+    ):
+        raise ValueError("grounding belongs to another validated authority")
     block = repositories.document_structure_blocks.get(record.block_id)
-    evidence = store.get_evidence(record.evidence_id)
-    store.verify_evidence_integrity(evidence)
-    locator = verify_structured_evidence_locator(record.locator_id, repositories, store)
+    if evidence_validator is None:
+        evidence = store.get_evidence(record.evidence_id)
+        source = store.verify_evidence_integrity(evidence)
+    else:
+        evidence, source = evidence_validator(record.evidence_id)
+    locator_record = repositories.structured_evidence_locators.get(record.locator_id)
+    locator = _verify_locator_against_validated_structure(
+        locator_record, structure, repositories, store, verified_evidence=evidence
+    )
     from .context import resolve_figure_ownership, resolve_table_ownership
 
     table_ownership = resolve_table_ownership(block, structure, repositories)
     table, cell = table_ownership if table_ownership is not None else (None, None)
     figure = resolve_figure_ownership(block, structure, repositories)
     quote = repositories.source_quotes.get(record.quote_id)
-    issues, _source = source_quote_record_issues(
-        quote,
-        store,
-        path=f"source_quote:{quote.quote_id}",
-    )
+    if evidence_validator is None:
+        issues, _source = source_quote_record_issues(
+            quote, store, path=f"source_quote:{quote.quote_id}",
+        )
+    else:
+        issues = _source_quote_binding_issues(
+            quote, evidence, source, path=f"source_quote:{quote.quote_id}",
+        )
     if issues:
         raise ValueError(f"invalid grounded SourceQuote: {issues[0].code}")
     actual = (
@@ -169,16 +293,4 @@ def validate_grounding_record(
         or locator.figure_id != (figure.figure_id if figure is not None else None)
     ):
         raise ValueError("literature knowledge grounding provenance is invalid")
-    if require_current:
-        current_representation = repositories.literature_representation_selections.resolve_current(
-            document.literature_id
-        )
-        current_structure = repositories.document_structure_selections.resolve_current(
-            representation.representation_id
-        )
-        if (
-            current_representation.selection_id != representation_selection.selection_id
-            or current_structure.selection_id != structure_selection.selection_id
-        ):
-            raise ValueError("literature knowledge grounding is not current")
     return record

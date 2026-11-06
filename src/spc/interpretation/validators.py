@@ -7,6 +7,7 @@ import re
 from typing import Iterable
 
 from ..models import (
+    EvidenceSpan,
     EpistemicStatus,
     MethodFact,
     ModelFact,
@@ -124,6 +125,18 @@ def source_quote_record_issues(
             )
         )
         return issues, None
+    return _source_quote_binding_issues(quote, evidence, source, path=path), source
+
+
+def _source_quote_binding_issues(
+    quote: SourceQuote,
+    evidence: EvidenceSpan,
+    source: SourceDocument,
+    *,
+    path: str,
+) -> list[ValidationIssue]:
+    """Check exact quote bindings against evidence verified in this trusted read."""
+    issues: list[ValidationIssue] = []
     if quote.relative_end_offset > len(evidence.text):
         issues.append(
             ValidationIssue(
@@ -142,7 +155,9 @@ def source_quote_record_issues(
                 path=path,
             )
         )
-    if (
+    if evidence.evidence_id != quote.evidence_ref or (
+        evidence.source_id, evidence.source_version
+    ) != (source.source_id, source.version) or (
         quote.source_id,
         quote.source_version,
         quote.source_role,
@@ -160,7 +175,7 @@ def source_quote_record_issues(
                 path=path,
             )
         )
-    return issues, source
+    return issues
 
 
 def source_claim_binding_issues(

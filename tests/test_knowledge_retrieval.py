@@ -9,7 +9,11 @@ from spc.cli import app
 from spc.compiler import ScientificProblemCompiler
 from spc.domains import DomainPackLoader
 from spc.interpretation import MockInterpretationProvider, ScientificEvidencePacketBuilder
-from spc.knowledge.trust import TrustedKnowledgeError
+from spc.knowledge.trust import (
+    TrustedKnowledgeError,
+    TrustedKnowledgeValidator,
+    _ValidatedTrustedRead,
+)
 from spc.models import (
     CurationStatus,
     EpistemicStatus,
@@ -366,6 +370,74 @@ def _retrieve(repositories, store, text: str, **options):
     snapshot = repositories.create_snapshot(store, pack.profile)
     query = build_retrieval_query(text, "base", pack.profile)
     return PersistentKnowledgeRetriever().retrieve(query, repositories, store, pack.profile, snapshot, **options)
+
+
+def test_shared_trusted_read_preserves_identity_without_revalidating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, *_ = _prepare(tmp_path)
+    pack = DomainPackLoader().load("base")
+    query = build_retrieval_query("activation barrier DFT", "base", pack.profile)
+    expected_snapshot = repositories.create_snapshot(store, pack.profile)
+    expected_context = PersistentKnowledgeRetriever().retrieve(
+        query, repositories, store, pack.profile, expected_snapshot
+    )
+    original_validate = TrustedKnowledgeValidator.validate
+    validation_calls = 0
+
+    def counted_validate(self: TrustedKnowledgeValidator):
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(self)
+
+    monkeypatch.setattr(TrustedKnowledgeValidator, "validate", counted_validate)
+    trusted_read = _ValidatedTrustedRead.prepare(repositories, store)
+    snapshot = repositories.create_snapshot(
+        store, pack.profile, _validated_read=trusted_read
+    )
+    context = PersistentKnowledgeRetriever().retrieve(
+        query,
+        repositories,
+        store,
+        pack.profile,
+        snapshot,
+        _validated_read=trusted_read,
+    )
+    assert validation_calls == 1
+    assert snapshot.snapshot_id == expected_snapshot.snapshot_id
+    assert snapshot.model_dump(exclude={"created_at"}) == expected_snapshot.model_dump(
+        exclude={"created_at"}
+    )
+    assert context == expected_context
+
+
+def test_shared_trusted_read_rejects_other_store_and_tampering(tmp_path: Path) -> None:
+    repositories, store, *_ = _prepare(tmp_path)
+    pack = DomainPackLoader().load("base")
+    trusted_read = _ValidatedTrustedRead.prepare(repositories, store)
+    other_store = ProjectEvidenceStore(tmp_path / "other-project")
+    with pytest.raises(TrustedKnowledgeError, match="TRUSTED_READ_SOURCE_MISMATCH"):
+        repositories.create_snapshot(
+            other_store, pack.profile, _validated_read=trusted_read
+        )
+    evidence_path = store.evidence_records.root / "ev-k1h-literature.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+    with pytest.raises((ValueError, KeyError)):
+        repositories.create_snapshot(
+            store, pack.profile, _validated_read=trusted_read
+        )
+
+
+def test_read_scoped_evidence_reuse_rechecks_changed_record(tmp_path: Path) -> None:
+    repositories, store, *_ = _prepare(tmp_path)
+    validator = TrustedKnowledgeValidator(repositories, store)
+    first = validator._verify_evidence("ev-k1h-literature")
+    assert validator._verify_evidence("ev-k1h-literature") == first
+
+    evidence_path = store.evidence_records.root / "ev-k1h-literature.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+    with pytest.raises((ValueError, KeyError)):
+        validator._revalidate_cached_evidence()
 
 
 def test_trusted_cross_source_retrieval_and_graph_provenance(tmp_path: Path) -> None:

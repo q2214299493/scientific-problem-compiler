@@ -18,6 +18,7 @@ from .trust import (
     REPOSITORY_NODE_SPECS,
     TrustedKnowledgeSelection,
     TrustedKnowledgeValidator,
+    _ValidatedTrustedRead,
 )
 
 
@@ -50,16 +51,30 @@ class KnowledgeGraphBuilder:
         view_mode: KnowledgeViewMode | str = KnowledgeViewMode.TRUSTED,
         domain: str | None = None,
         topic: str | None = None,
+        _validated_read: _ValidatedTrustedRead | None = None,
     ) -> KnowledgeGraph:
         mode = KnowledgeViewMode(view_mode)
         domain_filter = self._normalize_filter(domain, "domain")
         topic_filter = self._normalize_filter(topic, "topic")
-        validator = TrustedKnowledgeValidator(repositories, evidence_store)
-        all_records = validator.record_index(repositories)
-        current = validator.resolve_current_curations()
+        if _validated_read is not None:
+            if mode != KnowledgeViewMode.TRUSTED:
+                raise KnowledgeGraphError("a validated trusted read cannot be used for audit mode")
+            _validated_read.require_same_sources(
+                repositories, evidence_store or repositories.evidence_store
+            )
+            all_records = _validated_read.records
+            current = _validated_read.selection.current_curations
+        else:
+            validator = TrustedKnowledgeValidator(repositories, evidence_store)
+            all_records = validator.records
+            current = validator.resolve_current_curations()
 
         if mode == KnowledgeViewMode.TRUSTED:
-            trusted = validator.validate()
+            trusted = (
+                _validated_read.selection
+                if _validated_read is not None
+                else validator.validate()
+            )
             relations = self._scientific_relations(trusted.relations)
             allowed_keys = self._trusted_record_keys(trusted)
         else:

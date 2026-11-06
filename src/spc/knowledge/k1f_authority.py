@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Callable, Mapping
 
 from pydantic import BaseModel
 
-from ..models import CurationStatus, KnowledgeCurationRecord
+from ..models import (
+    CurationStatus,
+    DocumentStructureSelection,
+    EvidenceSpan,
+    KnowledgeCurationRecord,
+    SourceDocument,
+)
 
 if TYPE_CHECKING:
     from ..repositories import EvidenceStore, KnowledgeRepositories
@@ -45,11 +51,10 @@ def _validate_compilation_input(
     repositories: KnowledgeRepositories,
     store: EvidenceStore,
     current_curations: Mapping[tuple[str, str], KnowledgeCurationRecord],
+    structure_selection_validator: Callable[..., DocumentStructureSelection] | None = None,
 ):
     from .ingestion import LiteratureRepresentationSelector
-    from .structure import validate_document_structure
     from .structure_selection import (
-        resolve_current_structure_selection,
         validate_structure_selection,
     )
 
@@ -84,10 +89,14 @@ def _validate_compilation_input(
     representation = LiteratureRepresentationSelector.resolve_selection(
         selection, repositories, store
     )
-    structure_selection = validate_structure_selection(
+    structure_selection = (structure_selection_validator or validate_structure_selection)(
         record.structure_selection_id, repositories, store
     )
-    structure = validate_document_structure(record.structure_id, repositories, store)
+    # validate_structure_selection already performed the complete structure
+    # integrity check; read the same bound artifact without repeating it.
+    if structure_selection.structure_id != record.structure_id:
+        raise ValueError("K1F compilation structure selection is inconsistent")
+    structure = repositories.document_structure_artifacts.get(record.structure_id)
     actual = (
         document.content_hash,
         selection.content_hash,
@@ -121,8 +130,8 @@ def _validate_compilation_input(
     )
     if current_representation.selection_id != selection.selection_id:
         return False, record
-    current_structure = resolve_current_structure_selection(
-        representation.representation_id, repositories, store
+    current_structure = repositories.document_structure_selections.resolve_current(
+        representation.representation_id
     )
     if current_structure.selection_id != structure_selection.selection_id:
         return False, record
@@ -151,11 +160,15 @@ def validate_k1f_compilation_authority(
     repositories: KnowledgeRepositories,
     evidence_store: EvidenceStore,
     current_curations: Mapping[tuple[str, str], KnowledgeCurationRecord],
+    *,
+    structure_selection_validator: Callable[..., DocumentStructureSelection] | None = None,
+    evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
 ) -> K1FScientificAuthorityStatus:
-    from .literature_knowledge.validation import validate_grounding_record
+    from .literature_knowledge.validation import validate_grounding_inventory
 
     is_current, compilation_input = _validate_compilation_input(
-        compilation, repositories, evidence_store, current_curations
+        compilation, repositories, evidence_store, current_curations,
+        structure_selection_validator,
     )
     groundings = tuple(
         repositories.literature_knowledge_groundings.get(grounding_id)
@@ -165,13 +178,14 @@ def validate_k1f_compilation_authority(
         compilation.grounding_hashes
     ):
         raise ValueError("K1F compilation grounding inventory is invalid")
+    validate_grounding_inventory(
+        groundings, repositories, evidence_store, require_current=is_current,
+        structure_selection_validator=structure_selection_validator,
+        # Historical compilations still require integrity, but do not acquire
+        # current scientific eligibility through the trusted record cache.
+        evidence_validator=evidence_validator if is_current else None,
+    )
     for grounding in groundings:
-        validate_grounding_record(
-            grounding,
-            repositories,
-            evidence_store,
-            require_current=is_current,
-        )
         if (
             grounding.literature_id != compilation_input.literature_id
             or grounding.representation_selection_id
@@ -235,3 +249,90 @@ def classify_k1f_scientific_authority(
     if K1FScientificAuthorityStatus.CURRENT in statuses:
         return K1FScientificAuthorityStatus.CURRENT
     return K1FScientificAuthorityStatus.STALE
+
+
+class K1FCompilationAuthorityIndex:
+    """Reuse complete compilation checks only within one trusted read."""
+
+    def __init__(
+        self,
+        repositories: KnowledgeRepositories,
+        evidence_store: EvidenceStore,
+        current_curations: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        *,
+        evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
+    ) -> None:
+        self.repositories = repositories
+        self.evidence_store = evidence_store
+        self.current_curations = current_curations
+        self._evidence_validator = evidence_validator
+        self._compilations: dict[tuple[str, str], list] = {}
+        self._validated: dict[str, K1FScientificAuthorityStatus] = {}
+        self._validated_structures: dict[str, DocumentStructureSelection] = {}
+        for compilation in repositories.literature_knowledge_compilations.list():
+            for record_type, (field_name, _, _) in K1F_RECORD_FIELDS.items():
+                for record_id in getattr(compilation, field_name):
+                    self._compilations.setdefault((record_type, record_id), []).append(
+                        compilation
+                    )
+
+    def classify(
+        self, record_type: str, record_id: str
+    ) -> K1FScientificAuthorityStatus:
+        if record_type not in K1F_RECORD_FIELDS:
+            return K1FScientificAuthorityStatus.NOT_K1F
+        compilations = self._compilations.get((record_type, record_id), ())
+        if not compilations:
+            return K1FScientificAuthorityStatus.NOT_K1F
+        statuses = set()
+        for compilation in compilations:
+            status = self._validated.get(compilation.compilation_id)
+            if status is None:
+                status = validate_k1f_compilation_authority(
+                    compilation,
+                    self.repositories,
+                    self.evidence_store,
+                    self.current_curations,
+                    structure_selection_validator=self._validate_structure_once,
+                    evidence_validator=self._evidence_validator,
+                )
+                self._validated[compilation.compilation_id] = status
+            statuses.add(status)
+        if K1FScientificAuthorityStatus.CURRENT in statuses:
+            return K1FScientificAuthorityStatus.CURRENT
+        return K1FScientificAuthorityStatus.STALE
+
+    def _validate_structure_once(
+        self,
+        selection: str | DocumentStructureSelection,
+        repositories: KnowledgeRepositories,
+        evidence_store: EvidenceStore,
+    ) -> DocumentStructureSelection:
+        from .structure_selection import validate_structure_selection
+
+        selection_id = selection if isinstance(selection, str) else selection.selection_id
+        cached = self._validated_structures.get(selection_id)
+        if cached is None:
+            cached = validate_structure_selection(selection, repositories, evidence_store)
+            self._validated_structures[selection_id] = cached
+            return cached
+        if repositories.document_structure_selections.get(selection_id) != cached:
+            raise ValueError("document structure selection changed during trusted read")
+        structure = repositories.document_structure_artifacts.get(cached.structure_id)
+        if structure.content_hash != cached.structure_hash:
+            raise ValueError("document structure changed during trusted read")
+        return cached
+
+    def revalidate_structures(self) -> None:
+        """Close the read-scoped cache by checking every structure again."""
+        from .structure_selection import validate_structure_selection
+
+        for selection_id, cached in sorted(self._validated_structures.items()):
+            if validate_structure_selection(
+                selection_id, self.repositories, self.evidence_store
+            ) != cached:
+                raise ValueError("document structure changed during trusted read")
+
+    def validated_structure_selections(self) -> Mapping[str, DocumentStructureSelection]:
+        """Return structures fully checked during this trusted read."""
+        return dict(self._validated_structures)

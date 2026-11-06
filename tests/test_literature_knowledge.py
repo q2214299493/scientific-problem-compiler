@@ -57,14 +57,29 @@ from spc.knowledge.literature_knowledge import (
 from spc.knowledge.literature_knowledge.materializer import (
     _has_adjacent_numeric_unit_pair,
 )
+from spc.knowledge.literature_knowledge import validation as grounding_validation
+from spc.knowledge.literature_knowledge.context import (
+    resolve_figure_ownership,
+    resolve_table_ownership,
+)
+from spc.knowledge.k1f_authority import (
+    K1FCompilationAuthorityIndex,
+    validate_k1f_compilation_authority,
+)
 from spc.knowledge.structure import (
     DocumentStructureService,
     HTMLDocumentStructureExtractor,
 )
 from spc.knowledge.structure_selection import DocumentStructureSelector
-from spc.knowledge.trust import TrustedKnowledgeError, TrustedKnowledgeValidator
+from spc.knowledge import structure_selection as structure_selection_module
+from spc.knowledge.trust import (
+    TrustedKnowledgeError,
+    TrustedKnowledgeValidator,
+    _ValidatedTrustedRead,
+)
 from spc.models import (
     CurationStatus,
+    DocumentBlockType,
     DocumentContentRegion,
     EpistemicStatus,
     KnowledgePredicate,
@@ -401,6 +416,8 @@ def test_two_exact_quotes_support_one_hypothesis_without_epistemic_promotion(tmp
     assert compiled.materialized.record.rejected_proposals == ()
 
 
+
+
 def test_absent_and_ambiguous_quotes_are_rejected_without_free_floating_claim(tmp_path: Path) -> None:
     repositories, store, outcome, _structure = setup_html_literature(tmp_path)
 
@@ -511,6 +528,305 @@ def test_method_model_numeric_result_and_relation_materialize_only_from_explicit
     assert len(compiled.materialized.relations) == 1
     assert any(item.rejection_code == "MISSING_RESULT_UNIT" for item in compiled.materialized.record.rejected_proposals)
     assert any("increased substantially" in claim.text for claim in compiled.materialized.source_claims)
+
+
+@pytest.mark.parametrize(
+    "block_type",
+    (
+        DocumentBlockType.PARAGRAPH,
+        DocumentBlockType.OTHER_TEXT,
+        DocumentBlockType.HEADING,
+        DocumentBlockType.LIST_ITEM,
+        DocumentBlockType.PAGE,
+    ),
+)
+def test_non_structural_block_ownership_never_scans_tables_or_figures(
+    block_type: DocumentBlockType,
+) -> None:
+    block = SimpleNamespace(block_type=block_type)
+    structure = SimpleNamespace()
+    repositories = SimpleNamespace()
+
+    assert resolve_table_ownership(block, structure, repositories) is None
+    assert resolve_figure_ownership(block, structure, repositories) is None
+
+
+def test_read_scoped_k1f_structure_reuse_rechecks_changed_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+    curations = TrustedKnowledgeValidator(repositories, store).resolve_current_curations()
+    index = K1FCompilationAuthorityIndex(repositories, store, curations)
+    selection = repositories.document_structure_selections.resolve_current(
+        outcome.representation_id or ""
+    )
+    original = structure_selection_module.validate_structure_selection
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(structure_selection_module, "validate_structure_selection", counted)
+    first = index._validate_structure_once(selection.selection_id, repositories, store)
+    assert index._validate_structure_once(selection.selection_id, repositories, store) == first
+    assert calls == 1
+    index.revalidate_structures()
+    assert calls == 2
+
+    artifact = repositories.document_structure_artifacts.get(selection.structure_id)
+    block_id = next(iter(artifact.block_hashes))
+    (repositories.document_structure_blocks.root / f"{block_id}.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    with pytest.raises((ValueError, KeyError)):
+        index.revalidate_structures()
+
+
+def test_snapshot_reuses_trusted_structure_and_detects_later_block_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+    compiled = LiteratureKnowledgeCompiler().compile(
+        outcome.literature_id or "", MockLiteratureKnowledgeProvider(), repositories, store
+    )
+    claim = compiled.materialized.source_claims[0]
+    curate_knowledge_record(
+        repositories,
+        target_type="source_claim",
+        target_id=claim.claim_id,
+        status=CurationStatus.ACCEPTED,
+        curator_id="human-reviewer",
+        rationale="Accept the test's exact source claim.",
+    )
+    profile = DomainPackLoader().load("base").profile
+    baseline = repositories.create_snapshot(store, profile)
+    trusted_read = _ValidatedTrustedRead.prepare(repositories, store)
+    selection = repositories.document_structure_selections.resolve_current(
+        outcome.representation_id or ""
+    )
+    assert selection.selection_id in trusted_read.structure_selections
+
+    def unexpected_structure_validation(*args, **kwargs):
+        raise AssertionError("snapshot repeated a validated structure traversal")
+
+    monkeypatch.setattr(
+        structure_selection_module,
+        "validate_structure_selection",
+        unexpected_structure_validation,
+    )
+    snapshot = repositories.create_snapshot(
+        store, profile, _validated_read=trusted_read
+    )
+    assert snapshot.snapshot_id == baseline.snapshot_id
+
+    artifact = repositories.document_structure_artifacts.get(selection.structure_id)
+    block_id = next(iter(artifact.block_hashes))
+    (repositories.document_structure_blocks.root / f"{block_id}.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    with pytest.raises(TrustedKnowledgeError, match="TRUSTED_READ_STRUCTURE_CHANGED"):
+        repositories.create_snapshot(store, profile, _validated_read=trusted_read)
+
+
+def _compile_grounding_inventory(tmp_path: Path):
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+
+    def response(chunks):
+        quotes = tuple(
+            LiteratureQuoteProposal(
+                quote_key=f"quote-{index}",
+                chunk_id=chunk.chunk_id,
+                block_id=chunk.block_refs[0],
+                exact_text=text,
+            )
+            for index, text in enumerate(("Sentence A.", "Sentence B."))
+            for chunk in (chunk_with(chunks, text),)
+        )
+        return LiteratureKnowledgeLLMResponse(
+            quote_proposals=quotes,
+            claim_proposals=(LiteratureClaimProposal(
+                claim_key="combined",
+                text="Two source statements.",
+                claim_type="source_statement",
+                quote_keys=tuple(quote.quote_key for quote in quotes),
+                claim_strength="source-reported",
+                epistemic_status=EpistemicStatus.SOURCE_REPORTED,
+            ),),
+        )
+
+    compiled = LiteratureKnowledgeCompiler().compile(
+        outcome.literature_id or "", StaticProvider(response), repositories, store
+    )
+    assert len(compiled.materialized.groundings) == 2
+    return repositories, store, compiled.materialized
+
+
+def test_grounding_inventory_checks_shared_current_authority_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, compiled = _compile_grounding_inventory(tmp_path)
+    counts = {"representation": 0, "structure": 0, "evidence": 0}
+
+    def count_method(target, method, label):
+        original = getattr(target, method)
+
+        def counted(*args, **kwargs):
+            counts[label] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(target, method, counted)
+
+    count_method(repositories.literature_representation_selections, "resolve_current", "representation")
+    count_method(repositories.document_structure_selections, "resolve_current", "structure")
+    count_method(store, "verify_evidence_integrity", "evidence")
+    grounding_validation.validate_grounding_inventory(
+        compiled.groundings, repositories, store, require_current=True
+    )
+    assert counts == {"representation": 1, "structure": 1, "evidence": 4}
+
+
+def test_trusted_compilation_and_quotes_share_read_scoped_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, compiled = _compile_grounding_inventory(tmp_path)
+    claim = compiled.source_claims[0]
+    curate_knowledge_record(
+        repositories, target_type="source_claim", target_id=claim.claim_id,
+        status=CurationStatus.ACCEPTED, curator_id="test-reviewer",
+        rationale="Accept the exact multi-quote fixture claim.",
+    )
+    original = store.verify_evidence_integrity
+    counts = {}
+
+    def counted(evidence):
+        counts[evidence.evidence_id] = counts.get(evidence.evidence_id, 0) + 1
+        return original(evidence)
+
+    monkeypatch.setattr(store, "verify_evidence_integrity", counted)
+    validator = TrustedKnowledgeValidator(repositories, store)
+    first = validator.validate()
+    assert ("source_claim", claim.claim_id) in first.trusted_records
+    for grounding in compiled.groundings:
+        # One complete initial verification and one complete closing check.
+        assert counts[grounding.evidence_id] == 2
+    second = validator.validate()
+    assert first == second
+    for grounding in compiled.groundings:
+        assert counts[grounding.evidence_id] == 4
+
+
+@pytest.mark.parametrize("target", ["evidence", "source"])
+def test_trusted_compilation_rechecks_reused_evidence_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    repositories, store, compiled = _compile_grounding_inventory(tmp_path)
+    claim = compiled.source_claims[0]
+    curate_knowledge_record(
+        repositories, target_type="source_claim", target_id=claim.claim_id,
+        status=CurationStatus.ACCEPTED, curator_id="test-reviewer",
+        rationale="Accept before testing closing integrity checks.",
+    )
+    grounding = compiled.groundings[-1]
+    original = K1FCompilationAuthorityIndex.revalidate_structures
+    changed = False
+
+    def tamper_at_closing_check(index):
+        nonlocal changed
+        original(index)
+        if target == "evidence":
+            (store.evidence_records.root / f"{grounding.evidence_id}.json").write_text("{}", encoding="utf-8")
+        else:
+            evidence = store.get_evidence(grounding.evidence_id)
+            source = store.get_source(evidence.source_id, evidence.source_version)
+            path = store.root / source.stored_path
+            path.chmod(0o600)
+            path.write_text("tampered after compilation validation", encoding="utf-8")
+        changed = True
+
+    monkeypatch.setattr(K1FCompilationAuthorityIndex, "revalidate_structures", tamper_at_closing_check)
+    with pytest.raises((ValueError, KeyError)):
+        TrustedKnowledgeValidator(repositories, store).validate()
+    assert changed
+
+
+@pytest.mark.parametrize("selection_kind", ["representation", "structure"])
+def test_compilation_rejects_authority_changed_after_last_grounding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection_kind: str
+) -> None:
+    repositories, store, compiled = _compile_grounding_inventory(tmp_path)
+    original = grounding_validation._validate_grounding_against_authority
+    seen = 0
+
+    def change_after_last_grounding(record, *args, **kwargs):
+        nonlocal seen
+        result = original(record, *args, **kwargs)
+        seen += 1
+        if seen == len(compiled.groundings):
+            if selection_kind == "representation":
+                repository = repositories.literature_representation_selections
+                previous = repository.get(record.representation_selection_id)
+                prefix = "literature-selection"
+            else:
+                repository = repositories.document_structure_selections
+                previous = repository.get(record.structure_selection_id)
+                prefix = "document-structure-selection"
+            identity = previous.model_dump(
+                mode="json", exclude_none=True, exclude={"selection_id", "content_hash"}
+            )
+            identity["supersedes_selection_id"] = previous.selection_id
+            identity["rationale"] = "Test a new authority selected during the inventory read."
+            selection_id = f"{prefix}-{content_hash(identity)[:24]}"
+            payload = {"selection_id": selection_id, **identity}
+            successor = type(previous)(**payload, content_hash=content_hash(payload))
+            repository.put(selection_id, successor)
+        return result
+
+    monkeypatch.setattr(
+        grounding_validation, "_validate_grounding_against_authority", change_after_last_grounding
+    )
+    current = TrustedKnowledgeValidator(repositories, store).resolve_current_curations()
+    with pytest.raises(ValueError, match="grounding is not current"):
+        validate_k1f_compilation_authority(compiled.record, repositories, store, current)
+
+
+@pytest.mark.parametrize("target", ["evidence", "source", "locator", "quote"])
+def test_grounding_locator_reuse_keeps_later_integrity_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    repositories, store, compiled = _compile_grounding_inventory(tmp_path)
+    grounding = compiled.groundings[0]
+    original = grounding_validation._verify_locator_against_validated_structure
+    changed = False
+
+    def tamper_before_locator(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            if target == "source":
+                evidence = store.get_evidence(grounding.evidence_id)
+                source = store.get_source(evidence.source_id, evidence.source_version)
+                path = store.root / source.stored_path
+                path.chmod(0o600)
+                path.write_text("tampered source", encoding="utf-8")
+            else:
+                repository, record_id = {
+                    "evidence": (store.evidence_records, grounding.evidence_id),
+                    "locator": (repositories.structured_evidence_locators, grounding.locator_id),
+                    "quote": (repositories.source_quotes, grounding.quote_id),
+                }[target]
+                (repository.root / f"{record_id}.json").write_text("{}", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        grounding_validation, "_verify_locator_against_validated_structure", tamper_before_locator
+    )
+    with pytest.raises((ValueError, KeyError)):
+        grounding_validation.validate_grounding_inventory(
+            compiled.groundings, repositories, store, require_current=True
+        )
+    assert changed
 
 
 def test_table_chunks_preserve_topology_and_support_multi_quote_result(tmp_path: Path) -> None:

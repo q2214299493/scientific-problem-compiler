@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -9,12 +12,13 @@ from pydantic import BaseModel
 from ..interpretation.validators import (
     result_context_record_issues,
     source_claim_binding_issues,
-    source_quote_record_issues,
+    _source_quote_binding_issues,
 )
 from ..models import (
     CanonicalHTMLTextArtifact,
     CanonicalTextArtifact,
     CurationStatus,
+    DocumentStructureSelection,
     EvidenceSpan,
     ExpertAttributionRecord,
     ExpertCase,
@@ -45,6 +49,7 @@ from ..models import (
 )
 from ..serialization import content_hash
 from .k1f_authority import (
+    K1FCompilationAuthorityIndex,
     K1FScientificAuthorityStatus,
     classify_k1f_scientific_authority,
 )
@@ -147,6 +152,94 @@ class TrustedKnowledgeSelection:
     trusted_records: Mapping[tuple[str, str], BaseModel]
 
 
+@dataclass(frozen=True)
+class _ValidatedTrustedRead:
+    repositories: KnowledgeRepositories
+    evidence_store: EvidenceStore
+    records: Mapping[tuple[str, str], BaseModel]
+    selection: TrustedKnowledgeSelection
+    structure_selections: Mapping[str, DocumentStructureSelection]
+    structure_file_hashes: Mapping[Path, str]
+
+    @classmethod
+    def prepare(
+        cls, repositories: KnowledgeRepositories, evidence_store: EvidenceStore
+    ) -> _ValidatedTrustedRead:
+        validator = TrustedKnowledgeValidator(repositories, evidence_store)
+        selection = validator.validate()
+        structure_selections = (
+            validator._k1f_index.validated_structure_selections()
+            if validator._k1f_index is not None else {}
+        )
+        return cls(
+            repositories,
+            evidence_store,
+            MappingProxyType(dict(validator.records)),
+            selection,
+            MappingProxyType(dict(structure_selections)),
+            MappingProxyType(cls._structure_file_hashes(repositories, structure_selections)),
+        )
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        if path.is_symlink() or not path.is_file():
+            raise TrustedKnowledgeError(
+                "TRUSTED_READ_STRUCTURE_CHANGED", f"structure file is unavailable: {path}"
+            )
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @classmethod
+    def _structure_file_hashes(
+        cls,
+        repositories: KnowledgeRepositories,
+        selections: Mapping[str, DocumentStructureSelection],
+    ) -> dict[Path, str]:
+        paths: set[Path] = set()
+        for selection in selections.values():
+            structure = repositories.document_structure_artifacts.get(selection.structure_id)
+            paths.add(repositories.document_structure_selections.root / f"{selection.selection_id}.json")
+            paths.add(repositories.document_structure_artifacts.root / f"{structure.structure_id}.json")
+            paths.update(
+                repositories.document_structure_blocks.root / f"{block_id}.json"
+                for block_id in structure.block_hashes
+            )
+            for table_id in structure.table_hashes:
+                table = repositories.table_structures.get(table_id)
+                paths.add(repositories.table_structures.root / f"{table_id}.json")
+                paths.update(
+                    repositories.table_cell_structures.root / f"{cell_id}.json"
+                    for cell_id in table.cell_refs
+                )
+            paths.update(
+                repositories.figure_structures.root / f"{figure_id}.json"
+                for figure_id in structure.figure_hashes
+            )
+        ordered_paths = sorted(paths)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            digests = tuple(executor.map(cls._file_hash, ordered_paths))
+        return dict(zip(ordered_paths, digests, strict=True))
+
+    def require_unchanged_structures(self) -> None:
+        paths = tuple(self.structure_file_hashes)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            digests = tuple(executor.map(self._file_hash, paths))
+        for path, digest in zip(paths, digests, strict=True):
+            if digest != self.structure_file_hashes[path]:
+                raise TrustedKnowledgeError(
+                    "TRUSTED_READ_STRUCTURE_CHANGED",
+                    f"structure file changed after validation: {path}",
+                )
+
+    def require_same_sources(
+        self, repositories: KnowledgeRepositories, evidence_store: EvidenceStore
+    ) -> None:
+        if self.repositories is not repositories or self.evidence_store is not evidence_store:
+            raise TrustedKnowledgeError(
+                "TRUSTED_READ_SOURCE_MISMATCH",
+                "validated trusted read belongs to another repository or evidence store",
+            )
+
+
 class TrustedKnowledgeValidator:
     def __init__(
         self,
@@ -159,6 +252,9 @@ class TrustedKnowledgeValidator:
         self._reachable: dict[tuple[str, str], BaseModel] = {}
         self._all_literature_ingestion_sources: set[tuple[str, str]] = set()
         self._trusted_current_literature_sources: set[tuple[str, str]] = set()
+        self._current_curations: Mapping[tuple[str, str], KnowledgeCurationRecord] = {}
+        self._k1f_index: K1FCompilationAuthorityIndex | None = None
+        self._verified_evidence: dict[str, tuple[EvidenceSpan, SourceDocument]] = {}
 
     @staticmethod
     def record_index(
@@ -249,7 +345,14 @@ class TrustedKnowledgeValidator:
                 "trusted knowledge validation requires an EvidenceStore",
             )
         self._reachable = {}
+        self._k1f_index = None
+        self._verified_evidence = {}
         current = self.resolve_current_curations()
+        self._current_curations = current
+        self._k1f_index = K1FCompilationAuthorityIndex(
+            self.repositories, self.evidence_store, current,
+            evidence_validator=self._verify_evidence,
+        )
         accepted = {
             key: curation
             for key, curation in current.items()
@@ -341,6 +444,12 @@ class TrustedKnowledgeValidator:
         for key in sorted(roots):
             self._validate_record(key, current, set())
 
+        # The K1F index shares fully validated structures only inside this read.
+        # Reopen each one before returning trusted records so a changed block
+        # cannot be hidden by the temporary cache.
+        self._k1f_index.revalidate_structures()
+        self._revalidate_cached_evidence()
+
         documents = self._records_of_type("literature_document", LiteratureDocument)
         profiles = self._records_of_type("expert_profile", ExpertProfile)
         attributions = self._records_of_type(
@@ -361,6 +470,27 @@ class TrustedKnowledgeValidator:
             current_curations=current,
             trusted_records=MappingProxyType(dict(sorted(self._reachable.items()))),
         )
+
+
+    def _revalidate_cached_evidence(self) -> None:
+        if self.evidence_store is None:
+            raise TrustedKnowledgeError(
+                "EVIDENCE_STORE_REQUIRED",
+                "trusted knowledge validation requires an EvidenceStore",
+            )
+        for evidence_id, (evidence, source) in sorted(self._verified_evidence.items()):
+            current_evidence = self.evidence_store.get_evidence(evidence_id)
+            if current_evidence != evidence:
+                raise TrustedKnowledgeError(
+                    "INVALID_KNOWLEDGE_EVIDENCE",
+                    f"evidence changed during trusted read: {evidence_id}",
+                )
+            current_source = self.evidence_store.verify_evidence_integrity(current_evidence)
+            if current_source != source:
+                raise TrustedKnowledgeError(
+                    "INVALID_KNOWLEDGE_EVIDENCE",
+                    f"source changed during trusted read: {evidence_id}",
+                )
 
     def _validate_record(
         self,
@@ -527,6 +657,8 @@ class TrustedKnowledgeValidator:
         if self.evidence_store is None:
             return K1FScientificAuthorityStatus.NOT_K1F
         try:
+            if self._k1f_index is not None and current is self._current_curations:
+                return self._k1f_index.classify(key[0], key[1])
             return classify_k1f_scientific_authority(
                 key[0],
                 key[1],
@@ -535,7 +667,7 @@ class TrustedKnowledgeValidator:
                 current,
             )
         except (FileNotFoundError, ValueError) as error:
-            if isinstance(error, TrustedKnowledgeError):
+            if isinstance(error, TrustedKnowledgeError) and error.code != "INVALID_KNOWLEDGE_EVIDENCE":
                 raise
             raise TrustedKnowledgeError(
                 "INVALID_K1F_SCIENTIFIC_AUTHORITY",
@@ -952,16 +1084,12 @@ class TrustedKnowledgeValidator:
                 "EVIDENCE_STORE_REQUIRED",
                 "trusted knowledge validation requires an EvidenceStore",
             )
-        issues, source = source_quote_record_issues(
-            quote,
-            self.evidence_store,
-            path=f"source_quote:{quote.quote_id}",
+        evidence, source = self._verify_evidence(quote.evidence_ref)
+        issues = _source_quote_binding_issues(
+            quote, evidence, source, path=f"source_quote:{quote.quote_id}",
         )
         self._raise_issues(issues)
-        evidence, evidence_source = self._verify_evidence(quote.evidence_ref)
-        self._remember_evidence(evidence, evidence_source)
-        if source is not None:
-            self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+        self._remember_evidence(evidence, source)
 
     def _validate_source_claim(
         self,
@@ -1032,6 +1160,9 @@ class TrustedKnowledgeValidator:
                 "EVIDENCE_STORE_REQUIRED",
                 "trusted knowledge validation requires an EvidenceStore",
             )
+        cached = self._verified_evidence.get(evidence_id)
+        if cached is not None:
+            return cached
         try:
             evidence = self.evidence_store.get_evidence(evidence_id)
             source = self.evidence_store.verify_evidence_integrity(evidence)
@@ -1046,6 +1177,7 @@ class TrustedKnowledgeValidator:
             and source_key not in self._trusted_current_literature_sources
         ):
             self._require_historical_authorization(evidence, source)
+        self._verified_evidence[evidence_id] = (evidence, source)
         return evidence, source
 
     def _require_historical_authorization(

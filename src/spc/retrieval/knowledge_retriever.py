@@ -11,7 +11,7 @@ from ..knowledge.k1f_authority import (
     K1FScientificAuthorityStatus,
     classify_k1f_scientific_authority,
 )
-from ..knowledge.trust import TrustedKnowledgeValidator
+from ..knowledge.trust import TrustedKnowledgeValidator, _ValidatedTrustedRead
 from ..models import (
     CurationStatus,
     DomainProfile,
@@ -88,6 +88,7 @@ class PersistentKnowledgeRetriever:
         graph_hops: int = 1,
         max_graph_hits: int = 40,
         excluded_hit_ids: frozenset[str] = frozenset(),
+        _validated_read: _ValidatedTrustedRead | None = None,
     ) -> KnowledgeRetrievalContext:
         retrieval_mode = KnowledgeViewMode(mode)
         if min(max_literature_hits, max_expert_hits, max_expert_cases, max_graph_hits) <= 0:
@@ -95,11 +96,17 @@ class PersistentKnowledgeRetriever:
         if graph_hops not in {0, 1, 2}:
             raise KnowledgeRetrievalError("graph_hops must be 0, 1, or 2")
 
-        validator = TrustedKnowledgeValidator(repositories, evidence_store)
-        trusted = validator.validate()
-        all_records = validator.record_index(repositories)
+        if _validated_read is not None:
+            _validated_read.require_same_sources(repositories, evidence_store)
+            trusted = _validated_read.selection
+            all_records = _validated_read.records
+            current_curations = trusted.current_curations
+        else:
+            validator = TrustedKnowledgeValidator(repositories, evidence_store)
+            trusted = validator.validate()
+            all_records = validator.records
+            current_curations = trusted.current_curations
         trusted_keys = set(trusted.trusted_records)
-        current_curations = validator.resolve_current_curations()
         candidate_keys = trusted_keys if retrieval_mode == KnowledgeViewMode.TRUSTED else set(all_records)
         literature_metadata = self._literature_metadata(repositories)
         grounding_refs = self._grounding_refs(repositories, all_records)
@@ -143,6 +150,9 @@ class PersistentKnowledgeRetriever:
             evidence_store,
             view_mode=retrieval_mode,
             domain=query.domain,
+            _validated_read=(
+                _validated_read if retrieval_mode == KnowledgeViewMode.TRUSTED else None
+            ),
         )
         initial_hits = (*literature_hits, *expert_hits)
         expanded_hits = self._expand_graph(

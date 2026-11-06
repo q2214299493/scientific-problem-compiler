@@ -63,7 +63,12 @@ class ScientificContextBuilder:
             evidence_store,
             pack.profile,
         )
-        snapshot = knowledge.create_snapshot(evidence_store, pack.profile)
+        from ..knowledge.trust import _ValidatedTrustedRead
+
+        trusted_read = _ValidatedTrustedRead.prepare(knowledge, evidence_store)
+        snapshot = knowledge.create_snapshot(
+            evidence_store, pack.profile, _validated_read=trusted_read
+        )
         evidence_hits = tuple(
             hit
             for hit in all_evidence_hits
@@ -88,6 +93,7 @@ class ScientificContextBuilder:
             excluded_hit_ids=frozenset(
                 hit.hit_id for hit in (*workflow_hits, *capability_hits)
             ),
+            _validated_read=trusted_read,
         )
         literature_hits = knowledge_context.initial_literature_hits
         expert_opinion_hits = tuple(

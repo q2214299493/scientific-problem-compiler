@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
 from html.parser import HTMLParser
@@ -1200,7 +1201,11 @@ def validate_document_structure(
     else:
         canonical = repositories.canonical_html_text_artifacts.get(artifact.canonical_text_id)
         text = repositories.canonical_html_text_artifacts.read_text(artifact.canonical_text_id)
-    blocks = tuple(repositories.document_structure_blocks.get(block_id) for block_id in artifact.block_hashes)
+    # Large papers contain many independently stored immutable blocks. Preserve
+    # manifest order while bounding parallel file reads; each get still validates
+    # the repository key and record identity before the full structure check.
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        blocks = tuple(executor.map(repositories.document_structure_blocks.get, artifact.block_hashes))
     tables = tuple(repositories.table_structures.get(table_id) for table_id in artifact.table_hashes)
     figures = tuple(repositories.figure_structures.get(figure_id) for figure_id in artifact.figure_hashes)
     cells = tuple(repositories.table_cell_structures.get(cell_id) for table in tables for cell_id in table.cell_refs)
@@ -1239,14 +1244,33 @@ def verify_structured_evidence_locator(
 ) -> StructuredEvidenceLocator:
     store = evidence_store or repositories.evidence_store
     record = repositories.structured_evidence_locators.get(locator) if isinstance(locator, str) else locator
+    artifact = validate_document_structure(record.structure_id, repositories, store)
+    return _verify_locator_against_validated_structure(record, artifact, repositories, store)
+
+
+def _verify_locator_against_validated_structure(
+    record: StructuredEvidenceLocator,
+    artifact: DocumentStructureArtifact,
+    repositories: KnowledgeRepositories,
+    store: EvidenceStore,
+    *,
+    verified_evidence: EvidenceSpan | None = None,
+) -> StructuredEvidenceLocator:
+    """Check one locator after its complete structure was validated in this read."""
     stored = repositories.structured_evidence_locators.get(record.locator_id)
     if stored != record:
         raise ValueError("structured evidence locator differs from repository record")
-    artifact = validate_document_structure(record.structure_id, repositories, store)
-    evidence = store.get_evidence(record.evidence_id)
-    store.verify_evidence_integrity(evidence)
+    if verified_evidence is None:
+        evidence = store.get_evidence(record.evidence_id)
+        store.verify_evidence_integrity(evidence)
+    else:
+        evidence = verified_evidence
+        if evidence.evidence_id != record.evidence_id:
+            raise ValueError("locator evidence differs from validated evidence")
     block = repositories.document_structure_blocks.get(record.block_id)
     if (
+        record.structure_id != artifact.structure_id
+        or
         record.source_id != evidence.source_id
         or record.source_version != evidence.source_version
         or record.source_id != artifact.source_id

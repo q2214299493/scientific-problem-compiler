@@ -167,6 +167,8 @@ def resolve_table_ownership(
     structure: DocumentStructureArtifact,
     repositories: KnowledgeRepositories,
 ) -> tuple[TableStructure, TableCellStructure | None] | None:
+    if block.block_type not in {DocumentBlockType.TABLE_CAPTION, DocumentBlockType.TABLE_CELL}:
+        return None
     canonical_blocks = _canonical_block_map(structure, repositories)
     matches: list[tuple[TableStructure, TableCellStructure | None]] = []
     for table_id, expected_hash in structure.table_hashes.items():
@@ -236,6 +238,8 @@ def resolve_figure_ownership(
     structure: DocumentStructureArtifact,
     repositories: KnowledgeRepositories,
 ) -> FigureStructure | None:
+    if block.block_type != DocumentBlockType.FIGURE_CAPTION:
+        return None
     matches = []
     for figure_id, expected_hash in structure.figure_hashes.items():
         figure = repositories.figure_structures.get(figure_id)
