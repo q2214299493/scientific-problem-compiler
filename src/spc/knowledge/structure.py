@@ -28,13 +28,24 @@ from ..models import (
     TableCellStructure,
     TableStructure,
 )
-from ..repositories import EvidenceStore, KnowledgeRepositories
+from ..repositories import (
+    CanonicalHTMLTextArtifactRepository,
+    CanonicalTextArtifactRepository,
+    EvidenceStore,
+    KnowledgeRepositories,
+)
 from ..serialization import content_hash
 from .acquisition import validate_literature_representation
 from .ingestion import create_evidence_span_from_canonical_text
 
 
 CanonicalArtifact = CanonicalTextArtifact | CanonicalHTMLTextArtifact
+
+# Function identities only: custom readers must retain their original path.
+_CANONICAL_READERS = {
+    repository_type: (repository_type.get, repository_type.read_text)
+    for repository_type in (CanonicalTextArtifactRepository, CanonicalHTMLTextArtifactRepository)
+}
 
 
 @dataclass(frozen=True)
@@ -1204,12 +1215,25 @@ def validate_document_structure(
         raise ValueError("document structure differs from repository record")
     representation = repositories.literature_representation_refs.get(artifact.representation_id)
     validate_literature_representation(representation, repositories, store)
-    if artifact.representation_kind == LiteratureRepresentationKind.PDF:
-        canonical: CanonicalArtifact = repositories.canonical_text_artifacts.get(artifact.canonical_text_id)
-        text = repositories.canonical_text_artifacts.read_text(artifact.canonical_text_id)
+    canonical_repository = (
+        repositories.canonical_text_artifacts
+        if artifact.representation_kind == LiteratureRepresentationKind.PDF
+        else repositories.canonical_html_text_artifacts
+    )
+    standard_readers = _CANONICAL_READERS.get(type(canonical_repository))
+    if (
+        _file_hashes is not None
+        and standard_readers is not None
+        and getattr(canonical_repository.get, "__func__", None) is standard_readers[0]
+        and getattr(canonical_repository.read_text, "__func__", None) is standard_readers[1]
+    ):
+        # Retain the text from the same read that passed every canonical check.
+        # This value lives only in this validation; the trusted read still
+        # revalidates the representation/source dependencies before returning.
+        canonical, text = canonical_repository._read_validated_text(artifact.canonical_text_id)
     else:
-        canonical = repositories.canonical_html_text_artifacts.get(artifact.canonical_text_id)
-        text = repositories.canonical_html_text_artifacts.read_text(artifact.canonical_text_id)
+        canonical = canonical_repository.get(artifact.canonical_text_id)
+        text = canonical_repository.read_text(artifact.canonical_text_id)
     # Large papers contain many independently stored immutable blocks. Preserve
     # manifest order while bounding parallel file reads; each get still validates
     # the repository key and record identity before the full structure check.

@@ -1010,6 +1010,9 @@ class CanonicalTextArtifactRepository(RawLiteratureArtifactRepository):
         return self.get(canonical_text_id)
 
     def get(self, canonical_text_id: str) -> CanonicalTextArtifact:
+        return self._read_validated_text(canonical_text_id)[0]
+
+    def _read_validated_text(self, canonical_text_id: str) -> tuple[CanonicalTextArtifact, str]:
         require_safe_path_component(canonical_text_id, field="canonical_text_id")
         directory = self.root / canonical_text_id
         content_path = directory / "content.txt"
@@ -1027,7 +1030,7 @@ class CanonicalTextArtifactRepository(RawLiteratureArtifactRepository):
         if hashlib.sha256(text.encode("utf-8")).hexdigest() != record.text_sha256:
             raise ValueError("canonical text hash changed")
         self._verify_blocks(record, text)
-        return record
+        return record, text
 
     def read_text(self, canonical_text_id: str) -> str:
         record = self.get(canonical_text_id)
@@ -1206,6 +1209,9 @@ class CanonicalHTMLTextArtifactRepository(RawLiteratureArtifactRepository):
         return self.get(canonical_text_id)
 
     def get(self, canonical_text_id: str) -> CanonicalHTMLTextArtifact:
+        return self._read_validated_text(canonical_text_id)[0]
+
+    def _read_validated_text(self, canonical_text_id: str) -> tuple[CanonicalHTMLTextArtifact, str]:
         require_safe_path_component(canonical_text_id, field="canonical_text_id")
         directory = self.root / canonical_text_id
         content_path = directory / "content.txt"
@@ -1223,7 +1229,7 @@ class CanonicalHTMLTextArtifactRepository(RawLiteratureArtifactRepository):
         if hashlib.sha256(text.encode("utf-8")).hexdigest() != record.text_sha256:
             raise ValueError("HTML canonical text hash changed")
         self._verify_blocks(record, text)
-        return record
+        return record, text
 
     def read_text(self, canonical_text_id: str) -> str:
         record = self.get(canonical_text_id)
