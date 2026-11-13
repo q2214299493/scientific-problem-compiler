@@ -454,12 +454,19 @@ class FilesystemEvidenceStore:
             evidence.source_version,
         ):
             raise ValueError("SourceDocument source_id/version does not match EvidenceSpan")
+        content = None
         if _verified_source is None:
-            self.verify_source_integrity(source)
+            if getattr(self.verify_source_integrity, "__func__", None) is _STANDARD_SOURCE_INTEGRITY_CHECK:
+                # Keep the exact bytes that passed the full source check for
+                # this evidence verification only. Closing checks read afresh.
+                content = self._verified_source_bytes(source)
+            else:
+                self.verify_source_integrity(source)
         if source.content_sha256 != evidence.content_sha256:
             raise ValueError("EvidenceSpan content hash does not match SourceDocument")
         if _verified_source is None:
-            content = self.state_root.joinpath(*PurePosixPath(source.stored_path).parts).read_bytes()
+            if content is None:
+                content = self.state_root.joinpath(*PurePosixPath(source.stored_path).parts).read_bytes()
             try:
                 text = content.decode("utf-8")
             except UnicodeDecodeError as error:
@@ -550,6 +557,10 @@ class FilesystemEvidenceStore:
         if record_path.is_symlink():
             raise ValueError("EvidenceSpan repository record cannot be a symlink")
         return self.evidence_records.put(evidence.evidence_id, evidence)
+
+
+# A function identity, not a source cache: overridden checks retain their path.
+_STANDARD_SOURCE_INTEGRITY_CHECK = FilesystemEvidenceStore.verify_source_integrity
 
 
 class ProjectEvidenceStore(FilesystemEvidenceStore):
