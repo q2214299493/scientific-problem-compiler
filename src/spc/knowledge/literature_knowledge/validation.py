@@ -14,6 +14,8 @@ from ...models import (
     LiteratureRepresentationReference,
     LiteratureRepresentationSelection,
     SourceDocument,
+    TableCellStructure,
+    TableStructure,
 )
 from ...repositories import EvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
@@ -160,6 +162,7 @@ def validate_grounding_inventory(
     require_current: bool,
     structure_selection_validator: Callable[..., DocumentStructureSelection] | None = None,
     evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
+    _table_records: dict[str, tuple[TableStructure, tuple[TableCellStructure, ...]]] | None = None,
 ) -> None:
     """Validate one compilation's common authority once and each exact grounding."""
     if not records:
@@ -175,6 +178,7 @@ def validate_grounding_inventory(
             repositories,
             evidence_store,
             evidence_validator=evidence_validator,
+            _table_records=_table_records,
         )
     # Recheck the shared structure/selection after the inventory read. This also
     # catches a changed non-cited block instead of trusting a long-lived cache.
@@ -215,6 +219,7 @@ def _validate_grounding_against_authority(
     store: EvidenceStore,
     *,
     evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
+    _table_records: dict[str, tuple[TableStructure, tuple[TableCellStructure, ...]]] | None = None,
 ) -> LiteratureKnowledgeGroundingRecord:
     stored = LiteratureKnowledgeGroundingRepository(repositories.root).get(record.grounding_id)
     if stored != record:
@@ -243,7 +248,8 @@ def _validate_grounding_against_authority(
     )
     from .context import resolve_figure_ownership, resolve_table_ownership
 
-    table_ownership = resolve_table_ownership(block, structure, repositories)
+    read_options = {"_table_records": _table_records} if _table_records is not None else {}
+    table_ownership = resolve_table_ownership(block, structure, repositories, **read_options)
     table, cell = table_ownership if table_ownership is not None else (None, None)
     figure = resolve_figure_ownership(block, structure, repositories)
     quote = repositories.source_quotes.get(record.quote_id)

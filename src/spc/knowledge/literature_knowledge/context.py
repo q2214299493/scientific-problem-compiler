@@ -13,7 +13,13 @@ from ...models import (
     TableCellStructure,
     TableStructure,
 )
-from ...repositories import EvidenceStore, KnowledgeRepositories
+from ...repositories import (
+    EvidenceStore,
+    KnowledgeRepositories,
+    ModelRepository,
+    TableCellStructureRepository,
+    TableStructureRepository,
+)
 from ...serialization import content_hash
 from ..ingestion import LiteratureRepresentationSelector
 from ..structure import validate_document_structure
@@ -24,6 +30,11 @@ from .repositories import (
     LiteratureKnowledgeChunkRepository,
     LiteratureKnowledgeCompilationInputRepository,
 )
+
+
+_STANDARD_TABLE_GET = TableStructureRepository.get
+_STANDARD_TABLE_ID_CHECK = TableStructureRepository._record_id
+_STANDARD_MODEL_GET = ModelRepository.get
 
 
 COMPILER_POLICY_ID = "spc-literature-knowledge-current-authority"
@@ -166,19 +177,43 @@ def resolve_table_ownership(
     block,
     structure: DocumentStructureArtifact,
     repositories: KnowledgeRepositories,
+    *,
+    _table_records: dict[str, tuple[TableStructure, tuple[TableCellStructure, ...]]] | None = None,
 ) -> tuple[TableStructure, TableCellStructure | None] | None:
     if block.block_type not in {DocumentBlockType.TABLE_CAPTION, DocumentBlockType.TABLE_CELL}:
         return None
+    if _table_records is not None and not (
+        type(repositories.table_structures) is TableStructureRepository
+        and type(repositories.table_cell_structures) is TableCellStructureRepository
+        and repositories.table_structures.model_type is TableStructure
+        and repositories.table_cell_structures.model_type is TableCellStructure
+        and repositories.table_structures.identity_field == "table_id"
+        and repositories.table_cell_structures.identity_field == "cell_id"
+        and ModelRepository.get is _STANDARD_MODEL_GET
+        and all(
+            getattr(repository.get, "__func__", None) is _STANDARD_TABLE_GET
+            and getattr(repository._record_id, "__func__", None) is _STANDARD_TABLE_ID_CHECK
+            for repository in (repositories.table_structures, repositories.table_cell_structures)
+        )
+    ):
+        # Preserve custom repository/model/identity checks on every lookup.
+        _table_records = None
     canonical_blocks = _canonical_block_map(structure, repositories)
     matches: list[tuple[TableStructure, TableCellStructure | None]] = []
     for table_id, expected_hash in structure.table_hashes.items():
-        table = repositories.table_structures.get(table_id)
+        cached = _table_records.get(table_id) if _table_records is not None else None
+        table = repositories.table_structures.get(table_id) if cached is None else cached[0]
         if table.structure_id != structure.structure_id or table.content_hash != expected_hash:
             raise ValueError("table is not bound to the selected structure")
         if table.caption_block_ref == block.block_id:
             matches.append((table, None))
-        for cell_id in table.cell_refs:
-            cell = repositories.table_cell_structures.get(cell_id)
+        cells = cached[1] if cached is not None else (
+            repositories.table_cell_structures.get(cell_id) for cell_id in table.cell_refs
+        )
+        collected = [] if _table_records is not None and cached is None else None
+        for cell in cells:
+            if collected is not None:
+                collected.append(cell)
             if cell.table_id != table.table_id:
                 raise ValueError("table cell belongs to another table")
             if cell.canonical_block_refs:
@@ -202,6 +237,8 @@ def resolve_table_ownership(
                 )
             if owns_block:
                 matches.append((table, cell))
+        if collected is not None:
+            _table_records[table_id] = (table, tuple(collected))
     if len(matches) > 1:
         raise ValueError("document block has ambiguous table ownership")
     return matches[0] if matches else None

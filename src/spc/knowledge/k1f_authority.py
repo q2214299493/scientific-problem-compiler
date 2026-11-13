@@ -12,6 +12,8 @@ from ..models import (
     EvidenceSpan,
     KnowledgeCurationRecord,
     SourceDocument,
+    TableCellStructure,
+    TableStructure,
 )
 
 if TYPE_CHECKING:
@@ -164,6 +166,7 @@ def validate_k1f_compilation_authority(
     *,
     structure_selection_validator: Callable[..., DocumentStructureSelection] | None = None,
     evidence_validator: Callable[[str], tuple[EvidenceSpan, SourceDocument]] | None = None,
+    _table_records: dict[str, tuple[TableStructure, tuple[TableCellStructure, ...]]] | None = None,
 ) -> K1FScientificAuthorityStatus:
     from .literature_knowledge.validation import validate_grounding_inventory
 
@@ -185,6 +188,7 @@ def validate_k1f_compilation_authority(
         # Historical compilations still require integrity, but do not acquire
         # current scientific eligibility through the trusted record cache.
         evidence_validator=evidence_validator if is_current else None,
+        _table_records=_table_records,
     )
     for grounding in groundings:
         if (
@@ -294,6 +298,9 @@ class K1FCompilationAuthorityIndex:
         for compilation in compilations:
             status = self._validated.get(compilation.compilation_id)
             if status is None:
+                # Parsed table/cell records live only during this compilation
+                # check. Reuse requires the trusted read's closing fingerprints.
+                read_options = {"_table_records": {}} if self._structure_fingerprinter is not None else {}
                 status = validate_k1f_compilation_authority(
                     compilation,
                     self.repositories,
@@ -301,6 +308,7 @@ class K1FCompilationAuthorityIndex:
                     self.current_curations,
                     structure_selection_validator=self._validate_structure_once,
                     evidence_validator=self._evidence_validator,
+                    **read_options,
                 )
                 self._validated[compilation.compilation_id] = status
             statuses.add(status)
