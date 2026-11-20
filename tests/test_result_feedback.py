@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from spc import result_feedback
 from spc.approval import MockApprovalProvider
+from spc.cli import app
 from spc.models import (
     ApprovalDecision,
     CurationStatus,
@@ -210,6 +212,11 @@ def test_cross_plan_stale_or_fabricated_bindings_fail_closed(
 
     assert assessment.status == ResultEvidenceIntakeStatus.BLOCKED_PLAN_BINDING
     assert issue_code in {item.code for item in assessment.issues}
+    with pytest.raises(ResultFeedbackError) as exc:
+        SuccessorPlanningService(
+            state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+        ).compile(parent_run_id=run.run_id, submission_ids=(submission.submission_id,))
+    assert exc.value.code == issue_code
 
 
 def test_tampered_raw_artifact_checksum_blocks_intake(tmp_path: Path) -> None:
@@ -282,7 +289,7 @@ def test_archived_result_tampering_before_curation_is_rejected(tmp_path: Path) -
         f"{submission.submission_id}/raw/result.txt",
     )
     archived.chmod(0o644)
-    archived.write_text("tampered before curation\n", encoding="utf-8")
+    archived.write_bytes(b"X" * archived.stat().st_size)
 
     with pytest.raises(ResultFeedbackError, match="TAMPERED_ACCEPTED_RESULT_ARTIFACT"):
         service.curate(
@@ -578,7 +585,7 @@ def test_partial_and_null_results_are_preserved_without_fabricating_missing_valu
 
 
 def test_accepted_result_builds_new_context_input_and_independently_approved_successor(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repositories, workflow, run, plan = _approved_parent(tmp_path)
     submission, artifact_root, _ = _submission(
@@ -587,10 +594,16 @@ def test_accepted_result_builds_new_context_input_and_independently_approved_suc
         plan,
         untrusted_interpretation="This result proves mechanism A is true.",
     )
-    _, receipt = _intake_and_accept(
-        tmp_path, repositories, run, submission, artifact_root
-    )
+    def unexpected_service_init(*args, **kwargs):
+        pytest.fail("This operation initialized the other result-feedback service")
 
+    with monkeypatch.context() as guard:
+        guard.setattr(SuccessorPlanningService, "__init__", unexpected_service_init)
+        _, receipt = _intake_and_accept(
+            tmp_path, repositories, run, submission, artifact_root
+        )
+
+    monkeypatch.setattr(ResultEvidenceIntakeService, "__init__", unexpected_service_init)
     cycle = SuccessorPlanningService(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
     ).compile(
@@ -773,7 +786,7 @@ def test_tampered_accepted_raw_artifact_blocks_successor(tmp_path: Path) -> None
         f"{submission.submission_id}/raw/result.txt",
     )
     archived.chmod(0o644)
-    archived.write_text("tampered accepted bytes\n", encoding="utf-8")
+    archived.write_bytes(b"X" * archived.stat().st_size)
 
     with pytest.raises(ResultFeedbackError, match="TAMPERED_ACCEPTED_RESULT_ARTIFACT"):
         SuccessorPlanningService(
@@ -866,11 +879,28 @@ def test_rejected_curation_blocks_successor_despite_prior_receipt(tmp_path: Path
         )
     assert exc.value.code == "RESULT_REQUIRES_CURATION"
 
-    from spc.cli import app
-
     response = CliRunner().invoke(
-        app, ["successor-plan-status", "--parent-run-id", run.run_id,
-              "--state-dir", str(tmp_path / ".spc")]
+        app,
+        ["successor-plan-status", "--parent-run-id", run.run_id, "--state-dir", str(tmp_path / ".spc")],
     )
     assert response.exit_code == 0, response.output
     assert json.loads(response.output) == result_feedback_status(run.run_id, workflow.runs)
+
+
+def test_result_feedback_exports_independent_services() -> None:
+    from spc.result_feedback import service
+    from spc.result_feedback.intake import ResultEvidenceIntakeService as Intake
+    from spc.result_feedback.successor import SuccessorPlanningService as Successor
+
+    assert not issubclass(Successor, Intake)
+    assert result_feedback.ResultEvidenceIntakeService is Intake
+    assert result_feedback.SuccessorPlanningService is Successor
+    for name in (
+        "RESULT_FEEDBACK_VERSION",
+        "ResultFeedbackError",
+        "ResultEvidenceIntakeService",
+        "SuccessorPlanningService",
+        "build_result_evidence_submission",
+        "result_feedback_status",
+    ):
+        assert getattr(service, name) is getattr(result_feedback, name)
