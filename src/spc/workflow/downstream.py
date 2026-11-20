@@ -18,8 +18,8 @@ from ..models import (
     parse_approval_review_input,
 )
 from ..serialization import file_sha256, load_data
+from .knowledge_access import open_knowledge
 from .repository import ScientificProblemRunRepository
-from .stages.planning import open_knowledge
 from .state import update_run
 
 

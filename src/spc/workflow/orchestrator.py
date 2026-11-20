@@ -16,13 +16,14 @@ from ..planning.hierarchical import (
 )
 from ..serialization import content_hash
 from .downstream import export_downstream
+from .knowledge_access import blocking_curations, open_knowledge
 from .providers import ProviderSettings
 from .repository import ScientificProblemRunRepository
 from .resume import ProviderOutcomeUncertain, locked_run
 from .stages.approval import ApprovalStage
 from .stages.evidence_resolution import EvidenceResolutionBlocked, EvidenceResolutionStage
 from .stages.hierarchy import HierarchicalPlanningStage
-from .stages.planning import PlanningStage, blocking_curations, open_knowledge
+from .stages.planning import PlanningStage
 from .stages.revision import RevisionStage
 from .state import WorkflowResult, fail_run, sanitize_failure, snapshot_hash, update_run
 from .status import dry_run_report

@@ -30,8 +30,8 @@ from ..repositories import (
     KnowledgeRepositories,
     ProjectEvidenceStore,
 )
+from .knowledge_access import CURATED_TYPES
 from .repository import ScientificProblemRunRepository
-from .stages.planning import CURATED_TYPES
 from .state import sanitize_failure
 
 

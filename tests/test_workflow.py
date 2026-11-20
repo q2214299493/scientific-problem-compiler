@@ -28,6 +28,17 @@ from test_knowledge_retrieval import _prepare
 REQUEST = "The mechanism is not sufficiently convincing without a distinguishing observation."
 
 
+def test_workflow_service_compatibility_exports() -> None:
+    from spc.workflow import service
+    from spc.workflow.repository import ScientificProblemRunRepository as Repository
+    from spc.workflow.service import ScientificProblemRunRepository
+
+    assert ScientificProblemRunRepository is Repository
+    assert "ScientificProblemRunRepository" in service.__all__
+    for name in service.__all__:
+        assert hasattr(service, name), name
+
+
 def test_trusted_prepared_knowledge_dry_run_is_offline_and_bounded(tmp_path: Path) -> None:
     repositories, *_ = _prepare(tmp_path)
     workflow = ScientificProblemWorkflow(
