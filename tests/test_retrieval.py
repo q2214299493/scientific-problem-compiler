@@ -137,6 +137,43 @@ def test_weighted_scoring_prioritizes_phrase_then_synonym_then_token() -> None:
     assert exact[0] > synonym[0] > overlap[0]
 
 
+def test_original_chinese_fe110_barrier_request_recognizes_scientific_terms() -> None:
+    profile = DomainPackLoader().load("fischer_tropsch").profile
+    query = build_retrieval_query(
+        "我要算一个Fe110表面CO解离的能垒 怎么做", "fischer_tropsch", profile
+    )
+    assert "fe 110" in query.system_terms
+    assert "co dissociation" in query.concepts
+    assert "activation barrier" in query.concepts
+
+
+def test_original_chinese_fe110_barrier_request_retrieves_real_planning_capability(
+    tmp_path,
+) -> None:
+    packet = build_context(tmp_path, "我要算一个Fe110表面CO解离的能垒 怎么做")
+    capability_ids = {hit.record_id for hit in packet.capability_hits}
+    assert "ft_elementary_step_barrier_plan" in capability_ids
+    repository = KnowledgeRepositories(tmp_path / "knowledge")
+    for capability_id in capability_ids:
+        assert repository.capabilities.get(capability_id).domain == "fischer_tropsch"
+
+
+def test_chinese_request_prefers_matching_facet_and_keeps_latin_boundaries() -> None:
+    profile = DomainPackLoader().load("fischer_tropsch").profile
+    query = build_retrieval_query(
+        "我要算一个Fe110表面CO解离的能垒 怎么做", "fischer_tropsch", profile
+    )
+    target = score_text(query, "CO dissociation activation barrier on Fe(110)", profile)
+    other_facet = score_text(
+        query, "CO dissociation activation barrier on Fe(100)", profile
+    )
+    wrong_species = score_text(query, "CO2 dissociation on Fe(110)", profile)
+    assert target is not None and other_facet is not None
+    assert target[0] > other_facet[0]
+    assert wrong_species is not None
+    assert "co dissociation" not in wrong_species[1]
+
+
 def test_missing_source_record_cannot_create_retrieval_hit(tmp_path) -> None:
     store = SourceEvidenceStore(tmp_path / ".spc")
     store.evidence_records.put(
@@ -282,7 +319,7 @@ def test_retrieval_is_fully_offline(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(socket, "create_connection", reject_network)
     packet = build_context(tmp_path, "CO activation chain growth")
-    assert packet.retrieval_manifest.retriever_version == "lexical-graph-2.0.0"
+    assert packet.retrieval_manifest.retriever_version == "lexical-graph-2.1.0"
 
 
 def test_retrieve_cli_writes_context_packet(tmp_path) -> None:

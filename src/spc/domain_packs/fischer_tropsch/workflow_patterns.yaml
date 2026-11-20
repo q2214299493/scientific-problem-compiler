@@ -4,3 +4,9 @@
   workflow_capabilities: [ft_evidence_review, ft_pathway_comparison_plan]
   limitations: [Requires compatible local evidence before reporting energetic differences]
   evidence_refs: []
+- pattern_id: ft-elementary-step-barrier-001
+  domain: fischer_tropsch
+  trigger: Plan a CO dissociation activation barrier on Fe(110) with comparable endpoints and a validated transition state
+  workflow_capabilities: [ft_elementary_step_barrier_plan]
+  limitations: [Planning only; surface model and energy reference require explicit validation]
+  evidence_refs: []

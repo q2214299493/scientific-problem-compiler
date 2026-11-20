@@ -6,6 +6,8 @@ from pathlib import Path, PurePosixPath
 import re
 import unicodedata
 from typing import Any, Mapping, Protocol
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 import pypdf
 from pydantic import Field
@@ -22,6 +24,7 @@ from ..models import (
     LiteratureRepresentationReference,
     LiteratureRepresentationSelection,
     LiteratureRepresentationSelectionOutcome,
+    LiteratureSupplementarySource,
     NonBlankStr,
     RawLiteratureArtifact,
     SourceRole,
@@ -30,7 +33,7 @@ from ..models import (
     StrictModel,
     literature_identity_id,
 )
-from ..repositories import EvidenceStore, KnowledgeRepositories
+from ..repositories import EvidenceStore, KnowledgeEvidenceStore, KnowledgeRepositories
 from ..serialization import content_hash
 
 
@@ -203,6 +206,113 @@ class PypdfLiteratureTextExtractor:
     @staticmethod
     def _has_usable_text(text: str) -> bool:
         return any(character.isalnum() for character in text)
+
+
+class DocxSupplementaryTextExtractor:
+    """Extract deterministic paragraph/cell text; DOCX has no asserted page map."""
+
+    parser_id = "docx-supplementary-wordprocessingml"
+
+    def __init__(self, *, parser_version: str = "1.0.0") -> None:
+        self.parser_version = parser_version
+        self.parser_config_hash = content_hash(
+            {"format": "wordprocessingml", "layout": "paragraph-and-table-cell-order"}
+        )
+
+    def extract(
+        self, artifact: RawLiteratureArtifact, artifact_path: Path
+    ) -> LiteratureTextExtraction:
+        if artifact.media_type != (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ):
+            raise ValueError("DOCX extractor requires a DOCX raw artifact")
+        if artifact_path.is_symlink() or not artifact_path.is_file():
+            raise ValueError("raw DOCX path must be a regular non-symlink file")
+        if artifact_path.stat().st_size != artifact.byte_size:
+            raise ValueError("raw DOCX changed before extraction")
+        try:
+            with ZipFile(artifact_path) as archive:
+                member = archive.getinfo("word/document.xml")
+                if member.file_size > 20_000_000 or member.flag_bits & 1:
+                    raise LiteratureExtractionError("DOCX document XML is unsupported")
+                xml = archive.read(member)
+            if b"<!DOCTYPE" in xml.upper():
+                raise LiteratureExtractionError("DOCX document XML contains a DTD")
+            root = ElementTree.fromstring(xml)
+        except (BadZipFile, KeyError, ElementTree.ParseError, RuntimeError) as error:
+            raise LiteratureExtractionError("DOCX text extraction failed") from error
+
+        namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        body = root.find(f"{namespace}body")
+        if body is None:
+            raise LiteratureExtractionError("DOCX has no document body")
+        pieces: list[tuple[str, tuple[str, ...], str]] = []
+
+        def paragraph_text(paragraph: ElementTree.Element) -> str:
+            joined = "".join(
+                node.text or ""
+                for node in paragraph.iter(f"{namespace}t")
+            )
+            return PypdfLiteratureTextExtractor._canonicalize_page(joined)
+
+        table_index = 0
+        paragraph_index = 0
+        for child in body:
+            if child.tag == f"{namespace}p":
+                paragraph_index += 1
+                value = paragraph_text(child)
+                if value:
+                    pieces.append(("docx_paragraph", (f"paragraph:{paragraph_index}",), value))
+            elif child.tag == f"{namespace}tbl":
+                table_index += 1
+                for row_index, row in enumerate(child.findall(f"{namespace}tr"), 1):
+                    for cell_index, cell in enumerate(row.findall(f"{namespace}tc"), 1):
+                        value = "\n".join(
+                            part
+                            for paragraph in cell.findall(f"{namespace}p")
+                            if (part := paragraph_text(paragraph))
+                        )
+                        if value:
+                            pieces.append(
+                                (
+                                    "docx_table_cell",
+                                    (
+                                        f"table:{table_index}",
+                                        f"row:{row_index}",
+                                        f"cell:{cell_index}",
+                                    ),
+                                    value,
+                                )
+                            )
+        if not pieces:
+            raise LiteratureExtractionError("DOCX has no extractable text")
+        separator = "\n\n"
+        text = separator.join(piece[2] for piece in pieces)
+        blocks: list[CanonicalTextBlock] = []
+        offset = 0
+        for block_type, section_path, value in pieces:
+            identity = {
+                "page_number": 1,
+                "block_type": block_type,
+                "section_path": section_path,
+                "start_offset": offset,
+                "end_offset": offset + len(value),
+                "text_hash": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            }
+            blocks.append(
+                CanonicalTextBlock(
+                    block_id=f"canonical-block-{content_hash(identity)[:24]}",
+                    **identity,
+                )
+            )
+            offset += len(value) + len(separator)
+        return LiteratureTextExtraction(
+            text=text,
+            page_texts=(text,),  # One logical segment; DOCX pagination is not known.
+            blocks=tuple(blocks),
+            warnings=("DOCX physical page numbers are unavailable",),
+            requires_ocr=False,
+        )
 
 
 class LiteratureIngestionService:
@@ -418,7 +528,8 @@ def validate_literature_ingestion_chain(
     )
     raw = repositories.raw_literature_artifacts.get(ingestion.raw_artifact_id)
     if (
-        ingestion.raw_artifact_hash != raw.content_hash
+        raw.media_type != "application/pdf"
+        or ingestion.raw_artifact_hash != raw.content_hash
         or ingestion.canonical_text_hash != canonical.content_hash
         or ingestion.literature_id != canonical.literature_id
         or ingestion.literature_id != raw.literature_id
@@ -675,6 +786,230 @@ def create_evidence_span_from_canonical_text(
         end_offset=end_offset,
         text=recovered,
         locator=locator,
+    )
+    evidence_store.add_evidence(evidence)
+    return evidence
+
+
+def ingest_literature_supplementary_pdf(
+    pdf_path: Path,
+    literature_id: str,
+    repositories: KnowledgeRepositories,
+    evidence_store: KnowledgeEvidenceStore,
+    *,
+    extractor: LiteratureTextExtractor | None = None,
+) -> LiteratureSupplementarySource:
+    """Store an independent SI PDF without replacing the selected main article."""
+    return _ingest_literature_supplementary(
+        pdf_path,
+        literature_id,
+        repositories,
+        evidence_store,
+        extractor=extractor or PypdfLiteratureTextExtractor(),
+        allow_docx=False,
+    )
+
+
+def ingest_literature_supplementary_docx(
+    docx_path: Path,
+    literature_id: str,
+    repositories: KnowledgeRepositories,
+    evidence_store: KnowledgeEvidenceStore,
+) -> LiteratureSupplementarySource:
+    """Store an original SI DOCX with a deterministic non-paginated text view."""
+    return _ingest_literature_supplementary(
+        docx_path,
+        literature_id,
+        repositories,
+        evidence_store,
+        extractor=DocxSupplementaryTextExtractor(),
+        allow_docx=True,
+    )
+
+
+def _ingest_literature_supplementary(
+    source_path: Path,
+    literature_id: str,
+    repositories: KnowledgeRepositories,
+    evidence_store: KnowledgeEvidenceStore,
+    *,
+    extractor: LiteratureTextExtractor,
+    allow_docx: bool,
+) -> LiteratureSupplementarySource:
+    if allow_docx:
+        if source_path.is_symlink() or not source_path.is_file():
+            raise ValueError("raw DOCX path must be a regular non-symlink file")
+        with source_path.open("rb") as handle:
+            if handle.read(4) != b"PK\x03\x04":
+                raise ValueError("supplementary DOCX must retain its original DOCX format")
+    if evidence_store.root.resolve() != repositories.evidence_store.root.resolve():
+        raise ValueError("supplementary sources must use this knowledge repository's evidence store")
+    document = repositories.literature_documents.get(literature_id)
+    selection = repositories.literature_representation_selections.resolve_current(
+        literature_id
+    )
+    main = LiteratureRepresentationSelector.resolve_selection(
+        selection, repositories, evidence_store
+    )
+    raw = repositories.raw_literature_artifacts.put(
+        source_path, literature_id, allow_docx=allow_docx
+    )
+    if raw.artifact_id == main.raw_artifact_id:
+        raise ValueError("supplementary source must differ from the selected main article")
+    raw_path = repositories.root.joinpath(*PurePosixPath(raw.stored_path).parts)
+    extraction = extractor.extract(raw, raw_path)
+    if extraction.requires_ocr or extraction.text is None:
+        raise ValueError("supplementary source has no extractable canonical text")
+    canonical = repositories.canonical_text_artifacts.put(
+        extraction.text,
+        literature_id=literature_id,
+        raw_artifact=raw,
+        parser_id=extractor.parser_id,
+        parser_version=extractor.parser_version,
+        parser_config_hash=extractor.parser_config_hash,
+        page_count=extraction.total_pages,
+        blocks=extraction.blocks,
+    )
+    canonical_path = repositories.root.joinpath(
+        *PurePosixPath(canonical.stored_path).parts
+    )
+    source = evidence_store.ingest_source(
+        canonical_path,
+        f"source-supplement-{literature_id}",
+        f"canonical-{canonical.canonical_text_id.removeprefix('canonical-text-')}",
+        f"{document.title} [Supporting Information]",
+        source_role=SourceRole.LITERATURE_AUTHOR,
+        source_type=SourceType.SUPPORTING_INFORMATION,
+    )
+    identity = {
+        "literature_id": literature_id,
+        "literature_hash": document.content_hash,
+        "main_selection_id": selection.selection_id,
+        "main_selection_hash": selection.content_hash,
+        "raw_artifact_id": raw.artifact_id,
+        "raw_artifact_hash": raw.content_hash,
+        "canonical_text_id": canonical.canonical_text_id,
+        "canonical_text_hash": canonical.content_hash,
+        "source_id": source.source_id,
+        "source_version": source.version,
+        "source_sha256": source.content_sha256,
+    }
+    supplement_id = f"literature-supplement-{content_hash(identity)[:24]}"
+    payload = {"supplement_id": supplement_id, **identity}
+    supplement = LiteratureSupplementarySource(
+        **payload, content_hash=content_hash(payload)
+    )
+    repositories.literature_supplementary_sources.put(supplement_id, supplement)
+    return supplement
+
+
+def validate_literature_supplementary_source(
+    supplement: LiteratureSupplementarySource,
+    repositories: KnowledgeRepositories,
+    evidence_store: EvidenceStore,
+) -> tuple[RawLiteratureArtifact, CanonicalTextArtifact, SourceDocument]:
+    """Verify raw/canonical/source binding for an independent SI source."""
+    document = repositories.literature_documents.get(supplement.literature_id)
+    selection = repositories.literature_representation_selections.get(
+        supplement.main_selection_id
+    )
+    main = LiteratureRepresentationSelector.resolve_selection(
+        selection, repositories, evidence_store
+    )
+    raw = repositories.raw_literature_artifacts.get(supplement.raw_artifact_id)
+    canonical = repositories.canonical_text_artifacts.get(
+        supplement.canonical_text_id
+    )
+    source = evidence_store.get_source(
+        supplement.source_id, supplement.source_version
+    )
+    evidence_store.verify_source_integrity(source)
+    if (
+        document.content_hash != supplement.literature_hash
+        or selection.literature_id != supplement.literature_id
+        or selection.content_hash != supplement.main_selection_hash
+        or main.literature_id != supplement.literature_id
+        or main.raw_artifact_id == raw.artifact_id
+        or main.source_id == source.source_id
+        or raw.literature_id != supplement.literature_id
+        or raw.content_hash != supplement.raw_artifact_hash
+        or canonical.literature_id != supplement.literature_id
+        or canonical.raw_artifact_id != raw.artifact_id
+        or canonical.raw_artifact_hash != raw.content_hash
+        or canonical.content_hash != supplement.canonical_text_hash
+        or source.source_id != f"source-supplement-{supplement.literature_id}"
+        or source.version
+        != f"canonical-{canonical.canonical_text_id.removeprefix('canonical-text-')}"
+        or source.content_sha256 != canonical.text_sha256
+        or source.content_sha256 != supplement.source_sha256
+        or source.source_role != SourceRole.LITERATURE_AUTHOR
+        or source.source_type != SourceType.SUPPORTING_INFORMATION
+    ):
+        raise ValueError("supplementary raw/canonical/source binding is invalid")
+    return raw, canonical, source
+
+
+def create_supplementary_evidence_span(
+    supplement_id: str,
+    page_number: int,
+    exact_text: str,
+    locator: str,
+    repositories: KnowledgeRepositories,
+    evidence_store: KnowledgeEvidenceStore,
+    *,
+    block_id: str | None = None,
+) -> EvidenceSpan:
+    """Bind a unique verbatim SI passage to a verified source segment."""
+    if not exact_text or not locator.strip():
+        raise ValueError("supplementary evidence requires text and a locator")
+    supplement = repositories.literature_supplementary_sources.get(supplement_id)
+    raw, canonical, source = validate_literature_supplementary_source(
+        supplement, repositories, evidence_store
+    )
+    text = repositories.canonical_text_artifacts.read_text(canonical.canonical_text_id)
+    if raw.media_type == "application/pdf":
+        pages = tuple(
+            block for block in canonical.blocks if block.page_number == page_number
+        )
+        if len(pages) != 1:
+            raise ValueError("supplementary page has no unique canonical block")
+        block = pages[0]
+        if block_id is not None and block.block_id != block_id:
+            raise ValueError("supplementary block ID does not match the stated page")
+        source_locator = f"SI PDF page {page_number}"
+    else:
+        if page_number != 1:
+            raise ValueError("DOCX has no physical page numbers; use logical segment 1")
+        matches = tuple(
+            block
+            for block in canonical.blocks
+            if block_id is None or block.block_id == block_id
+            if exact_text in text[block.start_offset : block.end_offset]
+        )
+        if len(matches) != 1:
+            raise ValueError("supplementary DOCX quote must identify one block")
+        block = matches[0]
+        source_locator = f"SI DOCX {'/'.join(block.section_path)}; no physical page"
+    block_text = text[block.start_offset : block.end_offset]
+    if block_text.count(exact_text) != 1:
+        raise ValueError("supplementary quote must occur exactly once in its block")
+    start_offset = block.start_offset + block_text.index(exact_text)
+    end_offset = start_offset + len(exact_text)
+    identity = {
+        "canonical_text_id": canonical.canonical_text_id,
+        "start_offset": start_offset,
+        "end_offset": end_offset,
+        "text_hash": content_hash({"text": exact_text}),
+    }
+    evidence = EvidenceSpan(
+        evidence_id=f"evidence-{content_hash(identity)[:24]}",
+        source_id=source.source_id,
+        source_version=source.version,
+        content_sha256=source.content_sha256,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        text=exact_text,
+        locator=f"{source_locator}; {locator}",
     )
     evidence_store.add_evidence(evidence)
     return evidence

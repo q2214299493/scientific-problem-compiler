@@ -1,5 +1,5 @@
 agent_id: ft-agent
-version: 1.0.0
+version: 1.1.0
 capabilities:
   - capability_id: ft.review_evidence
     version: 1.0.0
@@ -15,3 +15,10 @@ capabilities:
       requires: [hypotheses, model, observables, baseline]
     output_contract:
       produces: [pathway_comparison_specification]
+  - capability_id: ft.prepare_barrier_study
+    version: 1.0.0
+    supports_scientific_capability_ids: [ft_elementary_step_barrier_plan]
+    input_contract:
+      requires: [scientific_objective, hypothesis, model, observables, comparison_baselines, system_fingerprint_ref, method_fingerprint_ref, evidence_refs, success_criteria]
+    output_contract:
+      produces: [barrier_study_specification]

@@ -135,6 +135,33 @@ def _label(text: str, prefix: str, fallback_number: int) -> str:
     return " ".join(match.group(1).split()) if match else f"{prefix.title()} {fallback_number}"
 
 
+_PDF_CAPTION_RE = re.compile(
+    r"^(?P<label>(?:Extended Data\s+)?(?:Table|Fig(?:ure)?\.?)\s+\d+[A-Za-z]?)"
+    r"(?P<separator>\s*\|\s*|\s*:\s*|\.\s+)"
+    r"(?P<title>\S.*)$",
+    re.IGNORECASE,
+)
+_PDF_BARE_TABLE_RE = re.compile(r"^(?P<label>Table\s+\d+[A-Za-z]?)$", re.IGNORECASE)
+
+
+def _pdf_caption(text: str) -> tuple[DocumentBlockType, str] | None:
+    match = _PDF_CAPTION_RE.match(text)
+    if match is None:
+        bare_table = _PDF_BARE_TABLE_RE.match(text)
+        if bare_table is None:
+            return None
+        return DocumentBlockType.TABLE_CAPTION, " ".join(bare_table.group("label").split())
+    label = " ".join(match.group("label").split())
+    if match.group("separator").lstrip().startswith(".") and re.search(r"\d+[A-Za-z]$", label):
+        return None  # A panel reference such as "Fig. 7h. Note ..." is not a caption.
+    block_type = (
+        DocumentBlockType.TABLE_CAPTION
+        if re.search(r"(?i)\btable\b", label)
+        else DocumentBlockType.FIGURE_CAPTION
+    )
+    return block_type, label
+
+
 def _heading_level(text: str) -> int | None:
     stripped = text.strip()
     numbered = re.match(r"^(\d+(?:\.\d+)+)[.)]?\s+\S", stripped)
@@ -210,6 +237,7 @@ def _make_figure(
     page_number: int | None,
     section_path: tuple[str, ...],
     caption_block_ref: str,
+    status: StructureExtractionStatus = StructureExtractionStatus.COMPLETE,
 ) -> FigureStructure:
     identity = {
         "structure_id": structure_id,
@@ -218,7 +246,7 @@ def _make_figure(
         "page_number": page_number,
         "section_path": section_path,
         "caption_block_ref": caption_block_ref,
-        "extraction_status": StructureExtractionStatus.COMPLETE,
+        "extraction_status": status,
     }
     identity = {key: value for key, value in identity.items() if value is not None}
     figure_id = f"figure-structure-{content_hash(identity)[:24]}"
@@ -228,15 +256,17 @@ def _make_figure(
 
 class PDFDocumentStructureExtractor:
     extractor_id = "pdf-canonical-structure"
-    extractor_version = "3.0.0"
+    extractor_version = "3.0.2"
     representation_kind = LiteratureRepresentationKind.PDF
     extractor_config_hash = content_hash(
         {
             "source": "canonical_page_blocks",
             "heading_policy": "hierarchical_numbered_heading_only_v3",
             "paragraph_policy": "unresolved_without_layout",
-            "caption_policy": "line_prefix_table_figure_v1",
+            "caption_policy": "title_delimiter_and_panel_guard_v3",
+            "figure_caption_status": "partial_first_line_only",
             "table_cells": "never_infer",
+            "warning_policy": "deduplicate_by_first_occurrence",
         }
     )
 
@@ -278,17 +308,13 @@ class PDFDocumentStructureExtractor:
                 block_type = DocumentBlockType.OTHER_TEXT
                 heading_level = _heading_level(text)
                 label: str | None = None
+                caption = _pdf_caption(text)
                 if re.match(r"^(?:[-*•])\s+", text):
                     block_type = DocumentBlockType.LIST_ITEM
                     heading_level = None
-                elif re.match(r"(?i)^table\s*[A-Za-z0-9.-]+", text):
-                    block_type = DocumentBlockType.TABLE_CAPTION
+                elif caption is not None:
+                    block_type, label = caption
                     heading_level = None
-                    label = _label(text, "table", len(tables) + 1)
-                elif re.match(r"(?i)^(?:figure|fig\.)\s*[A-Za-z0-9.-]+", text):
-                    block_type = DocumentBlockType.FIGURE_CAPTION
-                    heading_level = None
-                    label = _label(text, "fig", len(figures) + 1)
                 elif heading_level is not None:
                     block_type = DocumentBlockType.HEADING
                 if block_type == DocumentBlockType.HEADING:
@@ -344,6 +370,7 @@ class PDFDocumentStructureExtractor:
                             page_number=page.page_number,
                             section_path=section_path,
                             caption_block_ref=block.block_id,
+                            status=StructureExtractionStatus.PARTIAL,
                         )
                     )
         return ExtractedDocumentStructure(
@@ -353,7 +380,7 @@ class PDFDocumentStructureExtractor:
             figures=tuple(figures),
             page_count=source.canonical.page_count,
             status=StructureExtractionStatus.PARTIAL,
-            warnings=tuple(warnings),
+            warnings=tuple(dict.fromkeys(warnings)),
         )
 
 

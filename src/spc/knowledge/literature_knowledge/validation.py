@@ -37,7 +37,9 @@ CURATION_TRANSITIONS = {
     CurationStatus.HUMAN_REVIEWED: frozenset(
         {CurationStatus.ACCEPTED, CurationStatus.REJECTED}
     ),
-    CurationStatus.ACCEPTED: frozenset(),
+    # A later eligibility correction must append a decision, not rewrite the
+    # accepted record or leave an ineligible source in trusted retrieval.
+    CurationStatus.ACCEPTED: frozenset({CurationStatus.REJECTED}),
     CurationStatus.REJECTED: frozenset(),
 }
 
@@ -49,6 +51,7 @@ def curate_knowledge_record(
     status: CurationStatus,
     curator_id: str,
     rationale: str,
+    evidence_refs: tuple[str, ...] = (),
 ) -> KnowledgeCurationRecord:
     from ..trust import TrustedKnowledgeValidator
 
@@ -57,11 +60,23 @@ def curate_knowledge_record(
     if target is None:
         raise ValueError(f"unknown knowledge curation target: {target_type}:{target_id}")
     target_hash = getattr(target, "content_hash", None) or content_hash(target)
+    if len(set(evidence_refs)) != len(evidence_refs):
+        raise ValueError("curation evidence refs must be unique")
+    for evidence_id in evidence_refs:
+        evidence = repositories.evidence_store.get_evidence(evidence_id)
+        repositories.evidence_store.verify_evidence_integrity(evidence)
+        if target_type == "literature_supplementary_source" and (
+            evidence.source_id,
+            evidence.source_version,
+        ) != (target.source_id, target.source_version):
+            raise ValueError("supplement curation evidence comes from another source")
     current = TrustedKnowledgeValidator(repositories, repositories.evidence_store).resolve_current_curations().get(
         (target_type, target_id)
     )
     if current is not None:
         if current.status == status:
+            if evidence_refs and current.evidence_refs != evidence_refs:
+                raise ValueError("existing curation has different evidence refs")
             return current
         if status not in CURATION_TRANSITIONS[current.status]:
             raise ValueError(f"invalid curation transition: {current.status.value} -> {status.value}")
@@ -72,7 +87,7 @@ def curate_knowledge_record(
         "status": status,
         "curator_id": curator_id,
         "rationale": rationale,
-        "evidence_refs": (),
+        "evidence_refs": evidence_refs,
         "supersedes_curation_id": current.curation_id if current is not None else None,
     }
     identity = {key: value for key, value in identity.items() if value is not None}

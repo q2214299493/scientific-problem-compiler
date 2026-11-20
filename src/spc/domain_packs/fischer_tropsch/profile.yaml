@@ -1,17 +1,20 @@
 domain_id: fischer_tropsch
-version: 1.0.0
+version: 1.0.2
 name: Fischer-Tropsch Synthesis
 terminology:
   FT: Fischer-Tropsch synthesis
   chain_growth: Carbon-chain propagation after formation of surface intermediates
 ontology:
   concerns: [CO_activation, chain_growth, selectivity]
+  systems: [Fe(110), Fe(100)]
   observables: [activation_barrier, reaction_free_energy, selectivity_metric]
 aliases:
-  CO dissociation: [CO activation, CO cleavage]
+  Fe(110): [Fe110, Fe 110]
+  Fe(100): [Fe100, Fe 100]
+  CO dissociation: [CO activation, CO cleavage, CO解离, 一氧化碳解离]
   chain growth: [C-C coupling, carbon chain propagation]
 synonyms:
-  activation barrier: [energy barrier, reaction barrier]
+  activation barrier: [energy barrier, reaction barrier, 能垒, 活化能垒]
   reaction free energy: [free-energy change]
 ontology_relationships:
   CO dissociation: [CO activation, surface carbon formation]

@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from spc.domains import DomainPackLoader
 from spc.models import (
     AcceptanceCriterion,
     AssumptionRecord,
@@ -85,7 +86,7 @@ def make_plan():
             plan_id=plan_id,
             version="1.0.0",
             domain=domain,
-            domain_pack_version="1.0.0",
+            domain_pack_version=DomainPackLoader().load(domain).profile.version,
             original_question="Determine which mechanistic concern is supported.",
             original_comment_id="reviewer-2-comment-4",
             latent_concern=latent_concern,

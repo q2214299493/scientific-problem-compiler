@@ -47,6 +47,7 @@ from .approval import (
 )
 from .compiler import ScientificProblemCompiler
 from .domains import DomainPackLoader
+from .downstream import DownstreamImportError, DownstreamImportValidator, ExecutionProposalBuilder
 from .export import ExportError, GenericExportService
 from .interpretation import (
     EvidencePacketIntegrityError,
@@ -1022,6 +1023,10 @@ def curate_knowledge(
     curator_id: Annotated[str, typer.Option("--curator-id")],
     rationale: Annotated[str, typer.Option("--rationale")],
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
+    evidence_ref: Annotated[
+        list[str] | None,
+        typer.Option("--evidence-ref", help="Repeat to bind exact evidence to the curation."),
+    ] = None,
 ) -> None:
     """Append one immutable transition to the existing knowledge curation chain."""
     record = curate_knowledge_record(
@@ -1031,6 +1036,7 @@ def curate_knowledge(
         status=status,
         curator_id=curator_id,
         rationale=rationale,
+        evidence_refs=tuple(evidence_ref or ()),
     )
     typer.echo(record.model_dump_json(indent=2))
 
@@ -1146,7 +1152,12 @@ def retrieve_knowledge(
     repositories.load_capabilities(pack.capabilities)
     store = KnowledgeEvidenceStore(knowledge_dir)
     query = build_retrieval_query(query_text, domain, pack.profile)
-    snapshot = repositories.create_snapshot(store, pack.profile)
+    from .knowledge.trust import _ValidatedTrustedRead
+
+    trusted_read = _ValidatedTrustedRead.prepare(repositories, store)
+    snapshot = repositories.create_snapshot(
+        store, pack.profile, _validated_read=trusted_read
+    )
     context = PersistentKnowledgeRetriever().retrieve(
         query,
         repositories,
@@ -1159,6 +1170,7 @@ def retrieve_knowledge(
         max_expert_cases=max_expert_cases,
         graph_hops=graph_hops,
         max_graph_hits=max_graph_hits,
+        _validated_read=trusted_read,
     )
     report = context.model_dump(mode="json")
     report["retrieval_manifest_id"] = context.retrieval_context_id
@@ -1948,6 +1960,40 @@ def export_scientific_run(
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from error
     typer.echo(str(path))
+
+
+@app.command("prepare-execution")
+def prepare_execution(
+    export_dir: Annotated[Path, typer.Option("--export-dir", exists=True, file_okay=False)],
+    task_id: Annotated[str, typer.Option("--task-id")],
+    output: Annotated[Path, typer.Option("--output")],
+    target_environment: Annotated[
+        str, typer.Option("--target-environment")
+    ] = "ft-agent-staging",
+) -> None:
+    """Create an unauthorized, non-runnable handoff proposal from a verified export."""
+    if output.exists():
+        raise typer.BadParameter(f"refusing to overwrite execution proposal: {output}")
+    if output.resolve().is_relative_to(export_dir.resolve()):
+        raise typer.BadParameter("execution proposal must be outside the immutable export")
+    adapter = FTAgentAdapter()
+    try:
+        package = DownstreamImportValidator().import_package(
+            export_dir, expected_target_agent=adapter.target_agent
+        )
+        proposal = ExecutionProposalBuilder().build(
+            package,
+            task_id=task_id,
+            catalog=adapter.catalog,
+            adapter=adapter,
+            target_environment=target_environment,
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        dump_yaml(output, proposal)
+    except (FileNotFoundError, OSError, ValueError, DownstreamImportError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(str(output))
 
 
 @app.command("intake-result-evidence")

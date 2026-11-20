@@ -16,7 +16,7 @@ class FTAgentAdapter:
     target_agent = "ft-agent"
     supported_domains = ("fischer_tropsch",)
     adapter_id = "spc.ft-agent-execution-adapter"
-    adapter_version = "1.0.0"
+    adapter_version = "1.1.0"
     supported_environments = ("ft-agent-staging",)
 
     def __init__(self, catalog: AgentCapabilityCatalog | None = None) -> None:
@@ -117,12 +117,14 @@ class FTAgentAdapter:
         target_by_capability = {
             "ft.review_evidence": "mechanistic_evidence_assessment",
             "ft.plan_pathway_comparison": "pathway_comparison_specification",
+            "ft.prepare_barrier_study": "barrier_study_specification",
         }
         target = target_by_capability.get(executable_capability_id)
         if target is None or target not in declared_outputs:
             return {}
         compatible_outputs = {
             "evidence-grounded discrimination record",
+            "non_runnable_barrier_plan",
             target,
         }
         if not set(expected_outputs).issubset(compatible_outputs):

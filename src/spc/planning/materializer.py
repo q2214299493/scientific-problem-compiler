@@ -32,7 +32,7 @@ from ..models import (
 from ..serialization import content_hash
 from .identity import derive_candidate_task_id
 
-MATERIALIZER_VERSION = "plan-materializer-1.2.0"
+MATERIALIZER_VERSION = "plan-materializer-1.2.3"
 
 
 def _entity_id(prefix: str, value: Any) -> str:
@@ -102,6 +102,7 @@ class PlanMaterializer:
         allowed_evidence = set(planning_input.allowed_evidence_ids)
         if not set(candidate.evidence_refs).issubset(allowed_evidence):
             raise ValueError("candidate evidence references are not allowlisted")
+        candidate_evidence = set(candidate.evidence_refs)
         bindings = dict(planning_input.provenance_manifest).get("evidence_bindings", {})
         evidence_references: list[EvidenceReference] = []
         for evidence_id in candidate.evidence_refs:
@@ -257,10 +258,15 @@ class PlanMaterializer:
             for item in candidate.proposed_deviations
         )
         deviation_fields = {item.field for item in candidate.proposed_deviations}
+        relevant_constraints = tuple(
+            constraint
+            for constraint in planning_input.comparison_constraints
+            if set(constraint.evidence_refs).issubset(candidate_evidence)
+        )
         constraint_fields = tuple(
             dict.fromkeys(
                 field
-                for constraint in planning_input.comparison_constraints
+                for constraint in relevant_constraints
                 for field in constraint.must_match_fields
             )
         )
@@ -276,10 +282,17 @@ class PlanMaterializer:
 
         system_values: dict[str, list[Any]] = defaultdict(list)
         method_values: dict[str, list[Any]] = defaultdict(list)
-        for result in (
-            *planning_input.reported_results,
-            *planning_input.reported_observations,
-        ):
+        relevant_reported_results = tuple(
+            result
+            for result in planning_input.reported_results
+            if set(result.evidence_refs).issubset(candidate_evidence)
+        )
+        relevant_observations = tuple(
+            observation
+            for observation in planning_input.reported_observations
+            if set(observation.evidence_refs).issubset(candidate_evidence)
+        )
+        for result in (*relevant_reported_results, *relevant_observations):
             for key, value in result.system_context.items():
                 if value not in system_values[key]:
                     system_values[key].append(value)
@@ -293,6 +306,11 @@ class PlanMaterializer:
                 for key, values in sorted(system_values.items())
             },
         }
+        request_focus = dict(planning_input.provenance_manifest).get("request_focus", {})
+        if request_focus:
+            requested_systems = tuple(dict(request_focus).get("system_terms", ()))
+            if requested_systems:
+                system_attributes["requested_systems"] = requested_systems
         method_attributes: dict[str, Any] = {
             "strategy_class": candidate.strategy_class.value,
             **{
@@ -304,7 +322,7 @@ class PlanMaterializer:
                     "method_fact_refs": result.result_context.method_fact_refs,
                     "model_fact_refs": result.result_context.model_fact_refs,
                 }
-                for result in planning_input.reported_results
+                for result in relevant_reported_results
                 if result.result_context is not None
             },
         }
@@ -349,6 +367,19 @@ class PlanMaterializer:
             f"Match or explicitly disclose comparison field: {field}"
             for field in constraint_fields
         )
+        adaptable_fields = tuple(
+            dict.fromkeys(
+                field
+                for constraint in relevant_constraints
+                for field in constraint.may_vary_fields
+            )
+        )
+        adaptation_success = tuple(
+            f"If adapting {field}, validate the target-specific result under the "
+            "declared target conditions before numerical comparison; do not use "
+            "a source value as a target threshold"
+            for field in adaptable_fields
+        )
         tasks = tuple(
             DAGTask(
                 task_id=task_ids[item.task_key],
@@ -358,7 +389,9 @@ class PlanMaterializer:
                 outputs=item.outputs,
                 depends_on=tuple(task_ids[key] for key in item.depends_on),
                 success_criteria=tuple(
-                    dict.fromkeys((*item.success_criteria, *constraint_success))
+                    dict.fromkeys(
+                        (*item.success_criteria, *constraint_success, *adaptation_success)
+                    )
                 ),
                 falsification_relevance=item.falsification_relevance,
                 evidence_refs=item.evidence_refs,

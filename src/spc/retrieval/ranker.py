@@ -6,7 +6,7 @@ from typing import Iterable
 
 from ..models import DomainProfile, RetrievalHit, RetrievalQuery, RetrievalSourceType
 
-RETRIEVER_VERSION = "lexical-graph-2.0.0"
+RETRIEVER_VERSION = "lexical-graph-2.1.0"
 
 _STOP_WORDS = {
     "a",
@@ -70,6 +70,23 @@ def _contains_phrase(text: str, phrase: str) -> bool:
     return bool(phrase) and f" {phrase} " in f" {text} "
 
 
+def contains_ontology_variant(text: str, variant: str) -> bool:
+    """Match configured Han terms inside a word without weakening Latin boundaries."""
+    if _contains_phrase(text, variant):
+        return True
+    if not re.search(r"[\u3400-\u9fff]", variant):
+        return False
+    words = text.split()
+    terms = variant.split()
+    for start in range(len(words) - len(terms) + 1):
+        if all(
+            term in word if re.search(r"[\u3400-\u9fff]", term) else term == word
+            for word, term in zip(words[start : start + len(terms)], terms)
+        ):
+            return True
+    return False
+
+
 def source_type_allowed(query: RetrievalQuery, source_type: RetrievalSourceType) -> bool:
     return not query.evidence_types or source_type in query.evidence_types
 
@@ -89,8 +106,12 @@ def score_text(
     if _contains_phrase(candidate_text, query_text):
         exact_phrases.add(query_text)
     for canonical, variants in ontology_groups(profile):
-        query_variants = {item for item in variants if _contains_phrase(query_text, item)}
-        candidate_variants = {item for item in variants if _contains_phrase(candidate_text, item)}
+        query_variants = {
+            item for item in variants if contains_ontology_variant(query_text, item)
+        }
+        candidate_variants = {
+            item for item in variants if contains_ontology_variant(candidate_text, item)
+        }
         if not query_variants or not candidate_variants:
             continue
         shared = query_variants & candidate_variants

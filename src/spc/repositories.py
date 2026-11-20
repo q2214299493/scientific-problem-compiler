@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 import os
 import shutil
 import tempfile
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Generic, Iterable, Protocol, TypeVar, cast
+from zipfile import BadZipFile, ZipFile
 
 from pydantic import BaseModel
 
@@ -49,6 +51,7 @@ from .models import (
     LiteratureIngestionRecord,
     LiteratureRepresentationSelection,
     LiteratureRepresentationReference,
+    LiteratureSupplementarySource,
     LiteratureWorkflowPattern,
     MethodFact,
     MetadataMergeManifest,
@@ -62,6 +65,7 @@ from .models import (
     SourceClaim,
     SourceDocument,
     SourceQuote,
+    SourceType,
     StructuredEvidenceLocator,
     TableCellStructure,
     TableStructure,
@@ -379,7 +383,6 @@ class FilesystemEvidenceStore:
     def verify_source_integrity(self, source: SourceDocument) -> SourceDocument:
         self._verified_source_bytes(source)
         return source
-
 
     def _verified_source_bytes(self, source: SourceDocument) -> bytes:
         """Return the exact bytes whose complete source binding was verified."""
@@ -839,13 +842,19 @@ class RawLiteratureArtifactRepository:
         self.knowledge_root = knowledge_root
         self.root = knowledge_root / "literature_artifacts"
 
-    def put(self, source_path: Path, literature_id: str) -> RawLiteratureArtifact:
+    def put(
+        self, source_path: Path, literature_id: str, *, allow_docx: bool = False
+    ) -> RawLiteratureArtifact:
         require_safe_path_component(literature_id, field="literature_id")
         if source_path.is_symlink() or not source_path.is_file():
             raise ValueError("raw literature source must be a regular non-symlink file")
+        if allow_docx and source_path.stat().st_size > 250_000_000:
+            raise ValueError("supplementary DOCX exceeds the artifact size limit")
         content = source_path.read_bytes()
-        if not content.startswith(b"%PDF-"):
+        media_type = self._detect_media_type(content)
+        if media_type != "application/pdf" and not (allow_docx and media_type):
             raise ValueError("raw literature artifact is not a PDF")
+        extension = "pdf" if media_type == "application/pdf" else "docx"
         digest = hashlib.sha256(content).hexdigest()
         identity = {"literature_id": literature_id, "sha256": digest}
         artifact_id = f"literature-artifact-{content_hash(identity)[:24]}"
@@ -865,25 +874,28 @@ class RawLiteratureArtifactRepository:
             "artifact_id": artifact_id,
             "literature_id": literature_id,
             "original_filename": source_path.name,
-            "media_type": "application/pdf",
+            "media_type": media_type,
             "byte_size": len(content),
             "sha256": digest,
-            "stored_path": f"literature_artifacts/{artifact_id}/artifact.pdf",
+            "stored_path": f"literature_artifacts/{artifact_id}/artifact.{extension}",
         }
         record = RawLiteratureArtifact(
             **payload,
             content_hash=content_hash(payload),
         )
-        self._write_directory(destination, "artifact.pdf", content, record)
+        self._write_directory(destination, f"artifact.{extension}", content, record)
         return self.get(artifact_id)
 
     def get(self, artifact_id: str) -> RawLiteratureArtifact:
         require_safe_path_component(artifact_id, field="artifact_id")
         directory = self.root / artifact_id
-        content_path = directory / "artifact.pdf"
         metadata_path = directory / "metadata.json"
-        self._validate_paths(directory, content_path, metadata_path)
+        self._validate_paths(directory, metadata_path, metadata_path)
         record = load_model(metadata_path, RawLiteratureArtifact)
+        content_path = self.knowledge_root.joinpath(
+            *PurePosixPath(record.stored_path).parts
+        )
+        self._validate_paths(directory, content_path, metadata_path)
         if record.artifact_id != artifact_id:
             raise ValueError("raw artifact metadata ID does not match its directory")
         content = content_path.read_bytes()
@@ -891,8 +903,8 @@ class RawLiteratureArtifactRepository:
             raise ValueError("raw literature artifact byte size changed")
         if hashlib.sha256(content).hexdigest() != record.sha256:
             raise ValueError("raw literature artifact hash changed")
-        if not content.startswith(b"%PDF-"):
-            raise ValueError("stored raw literature artifact is not a PDF")
+        if self._detect_media_type(content) != record.media_type:
+            raise ValueError("stored raw literature artifact media type changed")
         return record
 
     def list(self) -> tuple[RawLiteratureArtifact, ...]:
@@ -911,14 +923,35 @@ class RawLiteratureArtifactRepository:
         for directory in sorted(self.root.iterdir()):
             if not (directory.is_dir() or directory.is_symlink()):
                 continue
-            content_path = directory / "artifact.pdf"
             metadata_path = directory / "metadata.json"
-            self._validate_paths(directory, content_path, metadata_path)
+            self._validate_paths(directory, metadata_path, metadata_path)
             record = load_model(metadata_path, RawLiteratureArtifact)
+            content_path = self.knowledge_root.joinpath(
+                *PurePosixPath(record.stored_path).parts
+            )
+            self._validate_paths(directory, content_path, metadata_path)
             if record.artifact_id != directory.name:
                 raise ValueError("raw artifact metadata ID does not match its directory")
             records.append(record)
         return tuple(records)
+
+    @staticmethod
+    def _detect_media_type(content: bytes) -> str | None:
+        if content.startswith(b"%PDF-"):
+            return "application/pdf"
+        if not content.startswith(b"PK\x03\x04"):
+            return None
+        try:
+            with ZipFile(BytesIO(content)) as archive:
+                names = set(archive.namelist())
+                if not {"[Content_Types].xml", "word/document.xml"} <= names:
+                    return None
+                document = archive.getinfo("word/document.xml")
+                if document.file_size > 20_000_000 or document.flag_bits & 1:
+                    return None
+        except BadZipFile:
+            return None
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     def _write_directory(
         self,
@@ -1849,6 +1882,11 @@ class KnowledgeRepositories:
         self.literature_representation_selections = (
             LiteratureRepresentationSelectionRepository(root)
         )
+        self.literature_supplementary_sources = IdentityBoundRepository(
+            root / "literature_supplementary_sources",
+            LiteratureSupplementarySource,
+            "supplement_id",
+        )
         self.historical_evidence_authorizations = (
             HistoricalLiteratureEvidenceAuthorizationRepository(root)
         )
@@ -2035,6 +2073,13 @@ class KnowledgeRepositories:
         literature_source_keys.update(
             (item.source_id, item.source_version)
             for item in self.html_literature_ingestions.list()
+        )
+        # Uncurated supplementary evidence must not enter a trusted snapshot
+        # merely because it lives in the shared EvidenceStore.
+        literature_source_keys.update(
+            (item.source_id, item.version)
+            for item in self.evidence_store.list_sources()
+            if item.source_type == SourceType.SUPPORTING_INFORMATION
         )
         trusted_evidence_ids = {
             record_id

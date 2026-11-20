@@ -7,11 +7,13 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from spc.cli import app
+from spc.knowledge.trust import TrustedKnowledgeValidator
 from spc.models import (
     CurationStatus,
     EvidenceSpan,
     ScientificProblemRun,
     ScientificProblemRunStatus,
+    ScientificPlanningInput,
     ScientificQuestionPlan,
 )
 from spc.repositories import ProjectEvidenceStore
@@ -41,6 +43,81 @@ def test_trusted_prepared_knowledge_dry_run_is_offline_and_bounded(tmp_path: Pat
     assert result.dry_run_report["trusted_literature_count"] == 1
     assert result.dry_run_report["trusted_expert_case_count"] == 1
     assert result.dry_run_report["retrieval_hit_counts"]["literature"] > 0
+
+
+def test_dry_run_reuses_its_verified_snapshot_for_status_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    )
+    original_validate = TrustedKnowledgeValidator.validate
+    calls = 0
+
+    def counted_validate(self: TrustedKnowledgeValidator):
+        nonlocal calls
+        calls += 1
+        return original_validate(self)
+
+    monkeypatch.setattr(TrustedKnowledgeValidator, "validate", counted_validate)
+    result = workflow.start(REQUEST, "base", dry_run=True)
+    assert result.run.status == ScientificProblemRunStatus.CONTEXT_BUILT
+    assert result.dry_run_report is not None
+    assert result.dry_run_report["trusted_literature_count"] == 1
+    assert calls == 1
+
+
+def test_chinese_fe110_barrier_request_reaches_grounded_nonrunnable_candidate(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".spc"
+    store = ProjectEvidenceStore(state_dir)
+    statement = (
+        "A study defines CO adsorbed on Fe(110) and separated C and O on the "
+        "same surface as endpoints for a dissociation barrier analysis."
+    )
+    source_path = tmp_path / "synthetic-method-note.txt"
+    source_path.write_text(statement, encoding="utf-8")
+    source = store.ingest(
+        source_path,
+        "synthetic-fe110-method-note",
+        "v1",
+        source_role="internal_researcher",
+        source_type="internal_note",
+    )
+    store.add_evidence(
+        EvidenceSpan(
+            evidence_id="synthetic-fe110-evidence",
+            source_id=source.source_id,
+            source_version=source.version,
+            content_sha256=source.content_sha256,
+            start_offset=0,
+            end_offset=len(statement),
+            text=statement,
+        )
+    )
+    workflow = ScientificProblemWorkflow(
+        state_dir=state_dir, knowledge_dir=tmp_path / "knowledge"
+    )
+    run = workflow.start(
+        "我要算一个Fe110表面CO解离的能垒 怎么做", "fischer_tropsch"
+    ).run
+    assert run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    assert run.candidate_plans
+    planning_input = workflow.runs.load_artifact(
+        run.run_id, "planning-input.yaml", ScientificPlanningInput
+    )
+    assert planning_input.evidence_gaps
+    for candidate in run.candidate_plans:
+        plan = workflow.runs.load_artifact(
+            run.run_id, candidate.relative_path, ScientificQuestionPlan
+        )
+        assert "Fe(110)" in plan.model.description.text
+        assert "activation barrier" in plan.observables[0].description.text
+        assert plan.tasks[0].capability_id == "ft_elementary_step_barrier_plan"
+        assert plan.tasks[0].outputs == ("non_runnable_barrier_plan",)
+        assert all(not task.runnable for task in plan.tasks)
 
 
 def test_missing_curation_is_actionable_and_does_not_enter_context(tmp_path: Path) -> None:
@@ -178,6 +255,17 @@ def test_offline_approval_and_deterministic_report_preserve_provenance(tmp_path:
     assert "MethodFingerprint" in report
     assert "Decision: `approve`" in report
     assert "Runnable tasks: False" in report
+    plan = workflow.runs.load_artifact(
+        run.run_id, run.candidate_plans[0].relative_path, ScientificQuestionPlan
+    )
+    assert f"- Scientific model: {plan.model.description.text}" in report
+    assert "#### Model and observables" in report
+    assert "#### Task handoff and acceptance checks" in report
+    assert f"##### Step 1: `{plan.tasks[0].task_id}`" in report
+    assert f"- Deliverables: {'; '.join(plan.tasks[0].outputs)}" in report
+    assert f"- Success checks: {'; '.join(plan.tasks[0].success_criteria)}" in report
+    assert f"- Failure action: {plan.tasks[0].failure_policy}" in report
+    assert "- Runnable: False" in report
 
     resumed = workflow.resume(run.run_id).run
     assert resumed.status == ScientificProblemRunStatus.APPROVED

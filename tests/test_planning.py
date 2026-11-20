@@ -133,6 +133,83 @@ def rebind_proposal(
     )
 
 
+def test_focused_request_cannot_be_rewritten_as_generic_mechanism_plan(tmp_path) -> None:
+    *_, planning_input, proposal, result = build_grounded_inputs(
+        tmp_path,
+        "我要算一个Fe110表面CO解离的能垒 怎么做",
+        evidence_records=(
+            {
+                "evidence_id": "ev-fe110-focus",
+                "text": "CO dissociation on Fe(110) requires specified endpoints and a barrier check.",
+            },
+        ),
+    )
+    assert result.candidates
+    assert validate_planning_proposal_set(proposal, planning_input).valid
+    candidate = proposal.candidates[0]
+    generic = candidate.model_copy(
+        update={
+            "model_definition": "Compare general pathway hypotheses.",
+            "observables": tuple(
+                item.model_copy(update={"description": "Measure pressure."})
+                for item in candidate.observables
+            ),
+            "task_drafts": tuple(
+                item.model_copy(update={"scientific_objective": "Compare chain growth."})
+                for item in candidate.task_drafts
+            ),
+        }
+    )
+    changed = rebind_proposal(planning_input, proposal, candidates=(generic,))
+    report = validate_planning_proposal_set(changed, planning_input)
+    assert "REQUEST_FOCUS_DROPPED" in {issue.code for issue in report.issues}
+
+
+def test_focused_plan_does_not_import_unrelated_reported_result_context(tmp_path) -> None:
+    *_, planning_input, proposal, result = build_grounded_inputs(
+        tmp_path,
+        "我要算一个Fe110表面CO解离的能垒 怎么做",
+        evidence_records=(
+            {
+                "evidence_id": "ev-fe110-method",
+                "text": "CO dissociation on Fe(110) needs a defined surface model.",
+            },
+            {
+                "evidence_id": "ev-other-pressure",
+                "text": "The pressure for a CO dissociation experiment on Fe(100) was 3 bar.",
+            },
+        ),
+    )
+    assert planning_input.reported_results
+    plan = result.candidates[0]
+    assert "ev-other-pressure" not in proposal.candidates[0].evidence_refs
+    assert plan.system_fingerprint.attributes["requested_systems"] == ("fe 110",)
+    assert "pressure" not in plan.system_fingerprint.attributes
+    assert plan.observables[0].unit is None
+
+
+def test_focused_plan_does_not_import_other_facet_comparison_constraint(tmp_path) -> None:
+    *_, planning_input, proposal, result = build_grounded_inputs(
+        tmp_path,
+        "我要算一个Fe110表面CO解离的能垒 怎么做",
+        evidence_records=(
+            {
+                "evidence_id": "ev-fe110-barrier",
+                "text": "The DFT activation barrier for CO dissociation on Fe(110) is 1.00 eV.",
+            },
+            {
+                "evidence_id": "ev-fe100-barrier",
+                "text": "The DFT activation barrier for CO dissociation on Fe(100) is 1.10 eV.",
+            },
+        ),
+    )
+    assert planning_input.comparison_constraints
+    assert proposal.candidates[0].evidence_refs == ("ev-fe110-barrier",)
+    plan = result.candidates[0]
+    assert dict(plan.system_fingerprint.attributes).get("facet") == "Fe(110)"
+    assert "constraint:system_context.facet" not in plan.system_fingerprint.attributes
+
+
 class StaticPlanningProvider:
     provider_id = "static-test"
     provider_version = "1.0.0"
@@ -579,6 +656,104 @@ def test_comparison_constraints_flow_into_fingerprints_and_task_criteria(tmp_pat
     assert plan.method_fingerprint.attributes["result_context_refs"]
     assert any(
         "system_context.facet" in criterion
+        for task in plan.tasks
+        for criterion in task.success_criteria
+    )
+    assert any(
+        "target-specific result" in criterion
+        and "system_context.facet" in criterion
+        for task in plan.tasks
+        for criterion in task.success_criteria
+    )
+    assert all(
+        "1.00 eV" not in criterion and "1.10 eV" not in criterion
+        for task in plan.tasks
+        for criterion in task.success_criteria
+    )
+
+
+def test_two_study_method_transfer_keeps_barrier_values_flexible(tmp_path) -> None:
+    # Offline replay of the distinct Ren DFT and Li pretreatment study roles.
+    # These local fixture sentences are not a replacement for the curated PDFs.
+    *_, planning_input, proposal, _ = build_grounded_inputs(
+        tmp_path,
+        "Can a CO activation pathway comparison be adapted across Fe carbide "
+        "pretreatment branches without copying a literature barrier value?",
+        evidence_records=(
+            {
+                "evidence_id": "ev-ren-pathway",
+                "text": (
+                    "Ren reports a computed DFT activation barrier of 137 kJ/mol "
+                    "for direct CO cleavage on K2O-promoted chi-Fe5C2(010) "
+                    "from the local step initial state."
+                ),
+            },
+            {
+                "evidence_id": "ev-li-treatment",
+                "text": (
+                    "Li reports direct reduction, passivation, and passivation "
+                    "then reduction branches for chi-Fe5C2."
+                ),
+            },
+        ),
+    )
+    assert any(result.value == 137 for result in planning_input.reported_results)
+    candidate = proposal.candidates[0]
+    assert set(candidate.evidence_refs) == {"ev-ren-pathway", "ev-li-treatment"}
+    baseline_key = candidate.comparison_baselines[0].baseline_key
+    changed = candidate.model_copy(
+        update={
+            "model_definition": (
+                "Keep Li treatment branches separate; select target surface and "
+                "adsorbate states after phase characterization."
+            ),
+            "proposed_deviations": (
+                ProposedDeviationDraft(
+                    field="system_context.surface_model",
+                    statement="Adapt the Ren (010) slab to a verified target surface.",
+                    baseline_ref=baseline_key,
+                    rationale="The treatment branches may expose different sites.",
+                    evidence_refs=candidate.evidence_refs,
+                ),
+                ProposedDeviationDraft(
+                    field="method_context.pretreatment",
+                    statement="Compare the distinct Li R/P/PR treatment branches.",
+                    baseline_ref=baseline_key,
+                    rationale="Preparation is a variable, not a fixed Ren condition.",
+                    evidence_refs=candidate.evidence_refs,
+                ),
+            ),
+            "task_drafts": tuple(
+                task.model_copy(
+                    update={
+                        "success_criteria": (
+                            "Characterize the target phase and preserve R/P/PR controls.",
+                            "For each pathway, validate target-specific initial and "
+                            "transition states on a declared energy basis.",
+                            "Do not require the target barrier to equal a Ren value.",
+                        )
+                    }
+                )
+                for task in candidate.task_drafts
+            ),
+        }
+    )
+    rebound = rebind_proposal(planning_input, proposal, candidates=(changed,))
+    assert validate_planning_proposal_set(rebound, planning_input).valid
+    plan = PlanMaterializer().materialize(rebound, planning_input)[0]
+    assert len(plan.proposed_deviations) == 2
+    assert all(not task.runnable for task in plan.tasks)
+    assert all(
+        f"claim:{claim_id}" in plan.source_query_manifest
+        for claim_id in changed.claim_refs
+    )
+    assert any(
+        "target-specific initial and transition states" in criterion
+        for task in plan.tasks
+        for criterion in task.success_criteria
+    )
+    assert all(
+        "137" not in criterion
         for task in plan.tasks
         for criterion in task.success_criteria
     )

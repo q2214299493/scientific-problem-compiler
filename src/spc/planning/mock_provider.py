@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..domains import DomainPackLoader
 from ..models import (
     AmbiguityAssessment,
     ApprovalReviewRecord,
@@ -29,6 +30,7 @@ from ..models import (
     SourceRole,
 )
 from ..serialization import content_hash
+from ..retrieval.ranker import contains_ontology_variant, normalize_text, ontology_groups
 from .evidence_resolution import (
     classify_evidence_gap,
     proposal_for_direction_need,
@@ -36,7 +38,7 @@ from .evidence_resolution import (
     proposal_for_review,
 )
 
-MOCK_PLANNING_PROVIDER_VERSION = "mock-planning-1.1.0"
+MOCK_PLANNING_PROVIDER_VERSION = "mock-planning-1.2.0"
 
 
 def build_proposal_set(
@@ -216,6 +218,52 @@ class MockPlanningProvider:
         return DirectionExpansionLLMResponse(intent=intent, candidates=expanded)
 
     def propose(self, planning_input: ScientificPlanningInput) -> PlanningProposalSet:
+        focus = dict(dict(planning_input.provenance_manifest).get("request_focus", {}))
+        focus_systems = tuple(focus.get("system_terms", ()))
+        focus_observables = tuple(focus.get("desired_observables", ()))
+        focused = bool(focus_systems and focus_observables)
+        display_systems = focus_systems
+        topic = planning_input.original_request
+        if focused:
+            profile = DomainPackLoader().load(planning_input.domain).profile
+            display_systems = tuple(
+                next(
+                    (
+                        item
+                        for values in profile.ontology.values()
+                        for item in values
+                        if normalize_text(item) == system
+                    ),
+                    system,
+                )
+                for system in focus_systems
+            )
+            variants_by_term = dict(ontology_groups(profile))
+            topic_terms = tuple(
+                term
+                for term in focus.get("concepts", ())
+                if term in variants_by_term
+                and term not in (*focus_systems, *focus_observables)
+            )
+            if topic_terms:
+                topic = topic_terms[0]
+
+            def matches_topic(text: str) -> bool:
+                normalized = normalize_text(text)
+                return any(
+                    contains_ontology_variant(normalized, variant)
+                    for term in topic_terms
+                    for variant in variants_by_term[term]
+                )
+
+            def matches_system(text: str) -> bool:
+                normalized = normalize_text(text)
+                return any(
+                    contains_ontology_variant(normalized, variant)
+                    for system in focus_systems
+                    for variant in variants_by_term.get(system, (system,))
+                )
+
         claims_by_id = {claim.claim_id: claim for claim in planning_input.source_claims}
         non_reviewer_claims = tuple(
             claim
@@ -227,7 +275,7 @@ class MockPlanningProvider:
             for claim in planning_input.source_claims
             if claim.source_role == SourceRole.REVIEWER
         )
-        target_claim = (
+        target_claim = planning_input.original_request if focused else (
             non_reviewer_claims[0].text
             if non_reviewer_claims
             else planning_input.original_request
@@ -249,6 +297,8 @@ class MockPlanningProvider:
             if planning_input.original_request.rstrip().endswith("?")
             else f"{planning_input.original_request.rstrip('.')}?",
         )
+        if focused:
+            questions = (planning_input.original_request.rstrip("?？ ") + "?",)
         observable_names = tuple(
             dict.fromkeys(
                 result.quantity
@@ -258,6 +308,8 @@ class MockPlanningProvider:
                 )
             )
         ) or ("decision-relevant observable",)
+        if focused:
+            observable_names = focus_observables
         evidence_basis = (
             planning_input.allowed_claim_ids or planning_input.allowed_evidence_ids
         )
@@ -293,6 +345,24 @@ class MockPlanningProvider:
             )
         else:
             candidate_claim_groups = (planning_input.allowed_claim_ids,)
+        if focused and not unresolved_conflicts:
+            system_claims = tuple(
+                claim.claim_id
+                for claim in non_reviewer_claims
+                if matches_system(claim.text)
+            )
+            relevant_claims = (system_claims or tuple(
+                claim.claim_id
+                for claim in non_reviewer_claims
+                if matches_topic(claim.text)
+            ))[:8]
+            if not relevant_claims:
+                raise ValueError(
+                    "focused request has no source claim for its target system or topic"
+                )
+            candidate_claim_groups = (
+                relevant_claims,
+            )
 
         workflow_capabilities = tuple(
             capability_id
@@ -306,6 +376,11 @@ class MockPlanningProvider:
         )
         if selected_capability is None:
             raise ValueError("planning requires at least one retrieved scientific capability")
+        selected_capability_record = next(
+            item
+            for item in planning_input.scientific_capabilities
+            if item.capability_id == selected_capability
+        )
 
         candidates: list[CandidatePlanDraft] = []
         for index, claim_group in enumerate(candidate_claim_groups, start=1):
@@ -349,20 +424,51 @@ class MockPlanningProvider:
                 value = "single evidence-grounded decisive test"
             observable = ObservableDraft(
                 observable_key="observable-1",
-                description=f"Measure or assess {observable_names[0]} for hypothesis discrimination.",
-                unit=(planning_input.reported_results[0].unit if planning_input.reported_results else None),
+                description=(
+                    f"Assess {observable_names[0]} for {topic} on {', '.join(display_systems)}."
+                    if focused
+                    else f"Measure or assess {observable_names[0]} for hypothesis discrimination."
+                ),
+                unit=(
+                    None if focused
+                    else planning_input.reported_results[0].unit
+                    if planning_input.reported_results else None
+                ),
                 evidence_refs=evidence_refs,
             )
             task = CandidateTaskDraft(
                 task_key="task-1",
                 scientific_objective=(
-                    f"Discriminate the proposed hypothesis using {observable.description}"
+                    f"Define a {observable_names[0]} study for {topic} on "
+                    f"{', '.join(display_systems)} with explicit model and reference choices."
+                    if focused
+                    else f"Discriminate the proposed hypothesis using {observable.description}"
                 ),
                 capability_id=selected_capability,
-                inputs={"evidence_gap_ids": unresolved_gap_ids},
-                outputs=("evidence-grounded discrimination record",),
+                inputs={
+                    "evidence_gap_ids": unresolved_gap_ids,
+                    **(
+                        {
+                            "requested_systems": display_systems,
+                            "requested_observables": focus_observables,
+                            "topic": topic,
+                        }
+                        if focused else {}
+                    ),
+                },
+                outputs=(
+                    selected_capability_record.outputs[:1]
+                    if focused else ("evidence-grounded discrimination record",)
+                ),
                 success_criteria=(
                     "Apply all declared comparison constraints or disclose deviations.",
+                    *(
+                        tuple(
+                            f"Specify and review {field} before reporting a numerical result."
+                            for field in selected_capability_record.required_inputs
+                        )
+                        if focused else ()
+                    ),
                 ),
                 falsification_relevance="The task must be capable of retaining the null hypothesis.",
                 evidence_refs=evidence_refs,
@@ -372,6 +478,13 @@ class MockPlanningProvider:
                 dict.fromkeys(
                     (
                         "Planning only; no scientific software is executed.",
+                        *(
+                            (
+                                "Other source systems provide methodological context, not "
+                                f"a measured result for {', '.join(display_systems)}.",
+                            )
+                            if focused else ()
+                        ),
                         *(
                             f"Blocking evidence gap retained: {gap_id}"
                             for gap_id in unresolved_gap_ids
@@ -387,24 +500,44 @@ class MockPlanningProvider:
                     distinguishing_axis=axis,
                     distinguishing_value=value,
                     primary_hypothesis=(
+                        f"A defensible {observable_names[0]} for {topic} on "
+                        f"{', '.join(display_systems)} can be established under a specified model."
+                        if focused else
                         primary_claim.text
                         if primary_claim is not None
                         and primary_claim.source_role != SourceRole.REVIEWER
                         else target_claim
                     ),
                     null_hypothesis="The proposed primary hypothesis is not supported by the decisive test.",
-                    model_definition="Use the evidence-bounded comparison defined by the planning input.",
+                    model_definition=(
+                        f"Target {', '.join(display_systems)} for {topic}; explicitly specify "
+                        f"the model, initial and final states, reference, and validation "
+                        f"needed for {observable_names[0]}."
+                        if focused else
+                        "Use the evidence-bounded comparison defined by the planning input."
+                    ),
                     observables=(observable,),
                     comparison_baselines=(
                         ComparisonBaselineDraft(
                             baseline_key="baseline-1",
-                            description="The evidence-grounded source comparison retained in the planning input.",
+                            description=(
+                                f"The target initial state on {', '.join(display_systems)} "
+                                "under the same model, method, and energy reference."
+                                if focused else
+                                "The evidence-grounded source comparison retained in the planning input."
+                            ),
                             evidence_refs=evidence_refs,
                         ),
                     ),
                     acceptance_criteria=(
                         CriterionDraft(
-                            statement="The declared observable discriminates the primary and null hypotheses.",
+                            statement=(
+                                f"Only report {observable_names[0]} for "
+                                f"{', '.join(display_systems)} after a traceable "
+                                "initial-state and transition-state validation."
+                                if focused else
+                                "The declared observable discriminates the primary and null hypotheses."
+                            ),
                             observable_key=observable.observable_key,
                         ),
                     ),

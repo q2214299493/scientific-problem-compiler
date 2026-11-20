@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ..models import DomainProfile, RetrievalQuery, RetrievalSourceType
 from ..serialization import content_hash
-from .ranker import normalize_text, ontology_groups, tokenize
+from .ranker import contains_ontology_variant, normalize_text, ontology_groups, tokenize
 
 
 def _matching_ontology_terms(
@@ -19,7 +19,7 @@ def _matching_ontology_terms(
         for value in values:
             canonical = normalize_text(value)
             variants = groups.get(canonical, (canonical,))
-            if any(f" {variant} " in f" {request_text} " for variant in variants):
+            if any(contains_ontology_variant(request_text, variant) for variant in variants):
                 matches.add(canonical)
     return tuple(sorted(matches))
 
@@ -38,7 +38,7 @@ def build_retrieval_query(
     recognized = {
         canonical
         for canonical, variants in ontology_groups(profile)
-        if any(f" {variant} " in f" {request_text} " for variant in variants)
+        if any(contains_ontology_variant(request_text, variant) for variant in variants)
     }
     concepts = tuple(sorted(recognized | set(tokenize(raw_request))))
     fields = {

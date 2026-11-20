@@ -1,1 +1,5 @@
 *.pdf binary
+
+# These fixture files are bound to exact bytes by EvidenceSpan hashes.
+src/spc/knowledge/fixtures/expert-note.txt -text
+src/spc/knowledge/fixtures/generic-paper.txt -text

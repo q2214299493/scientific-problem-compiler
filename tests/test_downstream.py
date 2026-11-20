@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
 from spc.adapters.ft_agent import FTAgentAdapter
+from spc.cli import app
 from spc.approval import (
     ApprovalContextResolver,
     IndependentApprovalService,
@@ -38,7 +40,7 @@ from spc.models import (
 from spc.planning import MockPlanningProvider, PlanningContextResolver
 from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
 from spc.retrieval import ScientificContextBuilder
-from spc.serialization import content_hash
+from spc.serialization import content_hash, load_model
 from spc.validators import build_plan_validation_record, validate_question_plan
 
 from test_independent_approval import (
@@ -79,6 +81,71 @@ def export_review_case(tmp_path: Path):
         receipt=independent.receipt,
     )
     return case, output
+
+
+def test_fe110_barrier_plan_has_descriptive_ft_agent_handoff_contract() -> None:
+    adapter = FTAgentAdapter()
+    catalog = adapter.catalog
+    mapped = adapter.map_capability("ft_elementary_step_barrier_plan", catalog)
+    assert mapped == "ft.prepare_barrier_study"
+    capability = next(item for item in catalog.capabilities if item.capability_id == mapped)
+    assert "hypothesis" in capability.input_contract["requires"]
+    assert "model" in capability.input_contract["requires"]
+    assert "observables" in capability.input_contract["requires"]
+    assert adapter.reconcile_outputs(
+        mapped,
+        ("non_runnable_barrier_plan",),
+        tuple(capability.output_contract["produces"]),
+    ) == {"non_runnable_barrier_plan": "barrier_study_specification"}
+
+
+def test_prepare_execution_cli_requires_verified_export_and_remains_nonrunnable(tmp_path) -> None:
+    case, export_dir = export_review_case(tmp_path)
+    output = tmp_path / "execution-proposal.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "prepare-execution", "--export-dir", str(export_dir),
+            "--task-id", case.plan.tasks[0].task_id,
+            "--output", str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    proposal = load_model(output, ExecutionProposal)
+    assert proposal.authorized is False
+    assert proposal.runnable is False
+    assert proposal.source_plan_id == case.plan.plan_id
+
+
+def test_prepare_execution_cli_rejects_tampered_export(tmp_path) -> None:
+    case, export_dir = export_review_case(tmp_path)
+    (export_dir / "selected-plan.yaml").write_text("tampered", encoding="utf-8")
+    output = tmp_path / "forbidden-proposal.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "prepare-execution", "--export-dir", str(export_dir),
+            "--task-id", case.plan.tasks[0].task_id,
+            "--output", str(output),
+        ],
+    )
+    assert result.exit_code != 0
+    assert not output.exists()
+
+
+def test_prepare_execution_cli_does_not_write_inside_immutable_export(tmp_path) -> None:
+    case, export_dir = export_review_case(tmp_path)
+    output = export_dir / "execution-proposal.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "prepare-execution", "--export-dir", str(export_dir),
+            "--task-id", case.plan.tasks[0].task_id,
+            "--output", str(output),
+        ],
+    )
+    assert result.exit_code != 0
+    assert not output.exists()
 
 
 def test_tampered_export_is_rejected(tmp_path) -> None:

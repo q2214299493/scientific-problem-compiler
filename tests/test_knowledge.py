@@ -14,6 +14,7 @@ from spc.knowledge import (
     knowledge_graph_to_mermaid,
 )
 from spc.knowledge.fixtures import load_knowledge_fixture
+from spc.knowledge.literature_knowledge.validation import curate_knowledge_record
 from spc.models import (
     CurationStatus,
     EpistemicStatus,
@@ -37,6 +38,8 @@ from spc.models import (
     SourceType,
 )
 from spc.repositories import KnowledgeRepositories, SourceEvidenceStore
+from spc.retrieval.knowledge_retriever import PersistentKnowledgeRetriever
+from spc.retrieval.query_builder import build_retrieval_query
 from spc.serialization import content_hash, dump_json
 
 
@@ -507,6 +510,44 @@ def test_curation_transition_preserves_target_and_history(tmp_path) -> None:
     assert repositories.curations.get(machine.curation_id) == machine
     with pytest.raises(ValidationError, match="curation_id is not content-bound"):
         machine.model_copy(update={"status": CurationStatus.REJECTED})
+
+
+def test_accepted_literature_can_be_corrected_to_rejected_without_losing_audit(
+    tmp_path,
+) -> None:
+    repositories = KnowledgeRepositories(tmp_path / "knowledge")
+    store = prepare_evidence_store(tmp_path)
+    literature = make_literature()
+    repositories.literature_documents.put(literature.literature_id, literature)
+    accepted = curate_knowledge_record(
+        repositories,
+        target_type="literature_document",
+        target_id=literature.literature_id,
+        status=CurationStatus.ACCEPTED,
+        curator_id="reviewer",
+        rationale="Source identity verified.",
+    )
+    profile = DomainPackLoader().load("base").profile
+    before = repositories.create_snapshot(store, profile)
+    corrected = curate_knowledge_record(
+        repositories,
+        target_type="literature_document",
+        target_id=literature.literature_id,
+        status=CurationStatus.REJECTED,
+        curator_id="reviewer",
+        rationale="Excluded from this retrieval cohort after journal screening.",
+    )
+    assert corrected.supersedes_curation_id == accepted.curation_id
+    assert repositories.curations.get(accepted.curation_id) == accepted
+    assert repositories.curations.get(corrected.curation_id) == corrected
+    current = TrustedKnowledgeValidator(repositories, store).resolve_current_curations()
+    assert current[("literature_document", literature.literature_id)] == corrected
+    after = repositories.create_snapshot(store, profile)
+    assert literature.literature_id not in after.literature_document_hashes
+    assert before.snapshot_id != after.snapshot_id
+    query = build_retrieval_query("mechanistic connectivity workflow validation", "base", profile)
+    hits = PersistentKnowledgeRetriever().retrieve(query, repositories, store, profile, after)
+    assert all(hit.record_id != literature.literature_id for hit in hits.initial_literature_hits)
 
 
 def test_opinion_and_relation_identity_ignore_curation_transitions() -> None:

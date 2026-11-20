@@ -417,6 +417,45 @@ def test_two_exact_quotes_support_one_hypothesis_without_epistemic_promotion(tmp
     assert compiled.materialized.record.rejected_proposals == ()
 
 
+def test_duplicate_proposal_keys_for_identical_content_reuse_materialized_ids(
+    tmp_path: Path,
+) -> None:
+    repositories, store, outcome, _structure = setup_html_literature(tmp_path)
+
+    def response(chunks):
+        chunk = chunk_with(chunks, "Sentence A.")
+        quotes = tuple(
+            LiteratureQuoteProposal(
+                quote_key=key,
+                chunk_id=chunk.chunk_id,
+                block_id=chunk.block_refs[0],
+                exact_text="Sentence A.",
+            )
+            for key in ("first", "second")
+        )
+        claims = tuple(
+            LiteratureClaimProposal(
+                claim_key=key,
+                text="Sentence A.",
+                claim_type="source_statement",
+                quote_keys=(quote_key,),
+                claim_strength="reported",
+                epistemic_status=EpistemicStatus.SOURCE_REPORTED,
+            )
+            for key, quote_key in (("first", "first"), ("second", "second"))
+        )
+        return LiteratureKnowledgeLLMResponse(
+            quote_proposals=quotes,
+            claim_proposals=claims,
+        )
+
+    compiled = LiteratureKnowledgeCompiler().compile(
+        outcome.literature_id or "", StaticProvider(response), repositories, store
+    )
+    record = compiled.materialized.record
+    assert len(record.source_quote_ids) == len(compiled.materialized.source_quotes) == 1
+    assert len(record.source_claim_ids) == len(compiled.materialized.source_claims) == 1
+    assert record.rejected_proposals == ()
 
 
 def test_absent_and_ambiguous_quotes_are_rejected_without_free_floating_claim(tmp_path: Path) -> None:
@@ -1332,6 +1371,10 @@ def test_numeric_tokens_preserve_sign_exponent_and_table_relationships(tmp_path:
         ("At 300 K, the activation barrier was 1.25 eV.", 1.25, "eV", True),
         ("The pressure was 1 MPa.", 1.0, "mPa", False),
         ("The pressure was 1 MPa.", 1.0, "MPa", True),
+        ("CO conversion was 80% at 350 C.", 80.0, "%", True),
+        ("CO conversion was 80 % at 350 C.", 80.0, "%", True),
+        ("CO conversion was 80% at 350 C.", 8.0, "%", False),
+        ("CO conversion was 80% at 350 C.", 80.0, "C", False),
     ),
 )
 def test_inline_numeric_unit_pairs_are_exact(

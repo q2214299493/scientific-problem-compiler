@@ -138,6 +138,34 @@ def test_conflicting_mechanism_claims_create_conflict_set(tmp_path) -> None:
     assert len(packet.conflict_sets[0].claim_refs) == 2
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    (
+        (
+            "No-catalyst control was measured at 300 C and 2 MPa.",
+            "Reaction conditions were 300 C and 2 MPa.",
+        ),
+        (
+            "The transition states have no imaginary frequencies.",
+            "The transition states were located using CI-NEB.",
+        ),
+        (
+            "We do not include zero-point energy correction for Fe3C(010).",
+            "Zero-point energy correction was included for Fe5C2(010).",
+        ),
+    ),
+)
+def test_shared_terms_and_negation_do_not_invent_cross_context_conflict(
+    tmp_path, first: str, second: str
+) -> None:
+    add_evidence(tmp_path, "ev-first", first)
+    add_evidence(tmp_path, "ev-second", second)
+    _, packet, _ = build_packet(
+        tmp_path, "catalyst transition states energy correction reaction conditions 300 MPa"
+    )
+    assert packet.conflict_sets == ()
+
+
 def test_different_facet_results_are_guarded_from_direct_comparison(tmp_path) -> None:
     add_evidence(tmp_path, "ev-110", "The DFT activation barrier on Fe(110) is 1.00 eV.")
     add_evidence(tmp_path, "ev-100", "The DFT activation barrier on Fe(100) is 1.10 eV.")
@@ -145,6 +173,20 @@ def test_different_facet_results_are_guarded_from_direct_comparison(tmp_path) ->
     constraint = packet.comparison_constraints[0]
     assert "system_context.facet" in constraint.must_match_fields
     assert "system_context.facet" in constraint.disclosure_required_fields
+    assert "system_context.facet" in constraint.may_vary_fields
+    assert "unit" not in constraint.may_vary_fields
+
+
+def test_comparison_adaptation_cannot_invent_a_condition(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-adapt-110", "The DFT activation barrier on Fe(110) is 1.00 eV.")
+    add_evidence(tmp_path, "ev-adapt-100", "The DFT activation barrier on Fe(100) is 1.10 eV.")
+    context, packet, store = build_packet(tmp_path, "Compare DFT activation barriers")
+    invalid = packet.comparison_constraints[0].model_copy(
+        update={"may_vary_fields": ("system_context.facet", "unit", "invented")}
+    )
+    changed = rebind_packet(packet, comparison_constraints=(invalid,))
+    report = validate_evidence_packet_integrity(changed, context, store)
+    assert "INVALID_COMPARISON_ADAPTATION" in {issue.code for issue in report.issues}
 
 
 def test_method_mismatch_creates_comparison_constraint(tmp_path) -> None:
@@ -160,6 +202,36 @@ def test_missing_ts_barrier_creates_evidence_gap(tmp_path) -> None:
     assert len(packet.evidence_gaps) == 1
     assert packet.evidence_gaps[0].blocking is True
     assert "barrier" in packet.evidence_gaps[0].missing_evidence.casefold()
+
+
+def test_chinese_fe110_request_does_not_use_fe100_barrier_as_target_result(tmp_path) -> None:
+    add_evidence(tmp_path, "ev-fe100", "The DFT activation barrier on Fe(100) is 1.00 eV.")
+    _, packet, _ = build_packet(tmp_path, "我要算一个Fe110表面CO解离的能垒 怎么做")
+    assert packet.reported_results
+    assert len(packet.evidence_gaps) == 1
+    assert packet.evidence_gaps[0].blocking
+
+
+def test_chinese_fe110_request_recognizes_matching_barrier_result(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-fe110",
+        "The DFT activation barrier for CO dissociation on Fe(110) is 1.00 eV.",
+    )
+    _, packet, _ = build_packet(tmp_path, "我要算一个Fe110表面CO解离的能垒 怎么做")
+    assert any(result.quantity == "activation_barrier" for result in packet.reported_results)
+    assert packet.evidence_gaps == ()
+
+
+def test_chinese_fe110_co_request_does_not_use_other_reaction_barrier(tmp_path) -> None:
+    add_evidence(
+        tmp_path,
+        "ev-fe110-other",
+        "Under CO atmosphere, the DFT activation barrier for hydrogen diffusion on Fe(110) is 1.00 eV.",
+    )
+    _, packet, _ = build_packet(tmp_path, "我要算一个Fe110表面CO解离的能垒 怎么做")
+    assert packet.reported_results
+    assert len(packet.evidence_gaps) == 1
 
 
 def test_fabricated_evidence_ref_is_rejected(tmp_path) -> None:

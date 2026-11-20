@@ -16,3 +16,12 @@
   validators: [validate_question_plan, validate_dag]
   limitations: [Does not execute electronic-structure or kinetic calculations]
   failure_branches: [incompatible_methods, missing_baseline]
+- capability_id: ft_elementary_step_barrier_plan
+  domain: fischer_tropsch
+  scientific_goal: Plan an evidence-grounded CO dissociation activation barrier study on a specified iron surface such as Fe(110)
+  required_inputs: [reaction_scope, surface_model, initial_state, final_state, energy_reference]
+  outputs: [non_runnable_barrier_plan]
+  dag_expansion: [define_endpoints, compare_path_candidates, specify_transition_state_validation, check_energy_comparability]
+  validators: [validate_question_plan, validate_dag]
+  limitations: [Does not calculate energies or establish a barrier without validated results]
+  failure_branches: [missing_surface_evidence, incompatible_endpoints, unverified_transition_state]

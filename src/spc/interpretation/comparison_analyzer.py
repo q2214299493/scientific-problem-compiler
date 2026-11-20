@@ -35,6 +35,10 @@ def analyze_comparisons(results: tuple[ReportedResult, ...]) -> tuple[Comparison
         mismatches = tuple(sorted(mismatched_fields))
         if not mismatches:
             continue
+        # A method or system condition may be adapted in a new study. Its
+        # source values still cannot be compared numerically without a
+        # disclosed, target-specific compatibility check.
+        adaptable_fields = tuple(field for field in mismatches if field != "unit")
         target = f"{left.result_id} vs {right.result_id}"
         identity = {"target": target, "mismatches": mismatches}
         constraints.append(
@@ -42,8 +46,14 @@ def analyze_comparisons(results: tuple[ReportedResult, ...]) -> tuple[Comparison
                 constraint_id=f"constraint-{content_hash(identity)[:24]}",
                 comparison_target=target,
                 must_match_fields=mismatches,
+                may_vary_fields=adaptable_fields,
                 disclosure_required_fields=mismatches,
-                rationale="Direct comparison is blocked until mismatched system or method fields match or are explicitly disclosed.",
+                rationale=(
+                    "Source numbers require matching system, method and unit context "
+                    "for direct comparison. System or method conditions may be adapted "
+                    "only with explicit disclosure and target-specific validation; "
+                    "source values are not target thresholds."
+                ),
                 evidence_refs=tuple(dict.fromkeys((*left.evidence_refs, *right.evidence_refs))),
             )
         )

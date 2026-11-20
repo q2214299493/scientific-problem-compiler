@@ -513,6 +513,58 @@ class PersistentKnowledgeRetriever:
                 *compilation.reported_result_ids,
             ):
                 values[record_id].add((document.literature_id, document.title, document.domain))
+
+        # Independently curated records may cite both the main representation
+        # and its SI. Bind each verified source identity to the same literature;
+        # an unbound record would otherwise match every domain.
+        literature_sources: dict[tuple[str, str], tuple[str, str, str]] = {}
+        for representation in repositories.literature_representation_refs.list():
+            document = repositories.literature_documents.get(representation.literature_id)
+            source_key = (representation.source_id, representation.source_version)
+            metadata = (document.literature_id, document.title, document.domain)
+            previous = literature_sources.setdefault(source_key, metadata)
+            if previous != metadata:
+                raise KnowledgeRetrievalError("literature source has ambiguous identity")
+        for supplement in repositories.literature_supplementary_sources.list():
+            document = repositories.literature_documents.get(supplement.literature_id)
+            if document.content_hash != supplement.literature_hash:
+                raise KnowledgeRetrievalError("supplementary literature identity is stale")
+            source_key = (supplement.source_id, supplement.source_version)
+            metadata = (document.literature_id, document.title, document.domain)
+            previous = literature_sources.setdefault(source_key, metadata)
+            if previous != metadata:
+                raise KnowledgeRetrievalError("literature source has ambiguous identity")
+        for repository, id_field in (
+            (repositories.source_claims, "claim_id"),
+            (repositories.method_facts, "fact_id"),
+            (repositories.model_facts, "fact_id"),
+            (repositories.reported_results, "result_id"),
+        ):
+            for record in repository.list():
+                record_id = getattr(record, id_field)
+                if record_id in values:
+                    continue
+                matched: set[tuple[str, str, str]] = set()
+                unmatched = False
+                for evidence_id in record.evidence_refs:
+                    try:
+                        evidence = repositories.evidence_store.get_evidence(evidence_id)
+                    except FileNotFoundError:
+                        unmatched = True
+                        continue
+                    metadata = literature_sources.get(
+                        (evidence.source_id, evidence.source_version)
+                    )
+                    if metadata is None:
+                        unmatched = True
+                    else:
+                        matched.add(metadata)
+                if matched:
+                    if unmatched or len(matched) != 1:
+                        raise KnowledgeRetrievalError(
+                            f"scientific record has ambiguous literature identity: {record_id}"
+                        )
+                    values[record_id].update(matched)
         return {key: tuple(sorted(items)) for key, items in values.items()}
 
     @staticmethod

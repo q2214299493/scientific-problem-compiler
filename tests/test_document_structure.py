@@ -22,8 +22,10 @@ from spc.knowledge.ingestion import (
     PypdfLiteratureTextExtractor,
 )
 from spc.knowledge.structure import (
+    DocumentStructureInput,
     DocumentStructureService,
     HTMLDocumentStructureExtractor,
+    PDFDocumentStructureExtractor,
     _heading_level,
     create_evidence_from_block,
     create_evidence_from_figure_caption,
@@ -38,6 +40,8 @@ from spc.knowledge.structure_selection import (
     resolve_current_structure_selection,
 )
 from spc.models import (
+    CanonicalTextArtifact,
+    CanonicalTextBlock,
     CurationStatus,
     DocumentBlockType,
     DocumentContentRegion,
@@ -227,6 +231,140 @@ def test_pdf_structure_binds_pages_and_exact_offsets(tmp_path: Path) -> None:
         recovered = text[block.start_offset : block.end_offset]
         assert block.text_hash == hashlib.sha256(recovered.encode("utf-8")).hexdigest()
     assert validate_document_structure(result.artifact, repositories, store)
+
+
+def test_pdf_structure_ignores_prose_references_to_tables_and_figures(tmp_path: Path) -> None:
+    repositories, _, _, representation, _ = pdf_structure(tmp_path)
+    canonical = repositories.canonical_text_artifacts.get(representation.canonical_text_id)
+    text = (
+        "Table 1 shows the kinetic data.\n"
+        "Table 1\n"
+        "Rate parameters for the kinetic model.\n"
+        "Fig. 10) indicates the preferred route.\n"
+        "Fig. 10. Schematic of the reaction mechanism.\n"
+        "Table 1 shows a comparison.\n"
+    )
+    page_identity = canonical.blocks[0].model_dump(mode="python", exclude={"block_id"})
+    page_identity.update(
+        start_offset=0,
+        end_offset=len(text),
+        text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    )
+    page = CanonicalTextBlock(
+        block_id=f"canonical-block-{content_hash(page_identity)[:24]}",
+        **page_identity,
+    )
+    canonical_identity = canonical.model_dump(
+        mode="python", exclude={"canonical_text_id", "stored_path", "content_hash"}
+    )
+    canonical_identity.update(
+        text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        character_count=len(text),
+        page_count=1,
+        blocks=(page,),
+    )
+    canonical_id = f"canonical-text-{content_hash(canonical_identity)[:24]}"
+    canonical_payload = {
+        "canonical_text_id": canonical_id,
+        "stored_path": f"canonical_text/{canonical_id}/content.txt",
+        **canonical_identity,
+    }
+    test_canonical = CanonicalTextArtifact(
+        **canonical_payload, content_hash=content_hash(canonical_payload)
+    )
+
+    extracted = PDFDocumentStructureExtractor().extract(
+        "document-structure-test",
+        DocumentStructureInput(representation=representation, canonical=test_canonical, canonical_text=text),
+    )
+
+    assert len(extracted.tables) == 1
+    assert len(extracted.figures) == 1
+    assert len(extracted.warnings) == len(set(extracted.warnings))
+
+
+def test_pdf_nature_captions_bind_actual_pages_not_later_references(tmp_path: Path) -> None:
+    repositories, _, _, representation, _ = pdf_structure(tmp_path)
+    canonical = repositories.canonical_text_artifacts.get(representation.canonical_text_id)
+    pages = (
+        "Fig. 2 | In situ characterization of active-phase formation.\n"
+        "Table 1 | Catalytic performance comparison.\n"
+        "Extended Data Fig. 1 | Microkinetics simulations.\n",
+        "Fig. 2.\n"
+        "Fig. 7h. Note that the data were acquired elsewhere.\n"
+        "Table 1 shows the kinetic data.\n"
+        "Fig. 3 | Phase evolution under water exposure.\n",
+    )
+    text = "".join(pages)
+    page_blocks = []
+    offset = 0
+    for page_number, page_text in enumerate(pages, start=1):
+        identity = canonical.blocks[0].model_dump(mode="python", exclude={"block_id"})
+        identity.update(
+            page_number=page_number,
+            start_offset=offset,
+            end_offset=offset + len(page_text),
+            text_hash=hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        )
+        page_blocks.append(
+            CanonicalTextBlock(
+                block_id=f"canonical-block-{content_hash(identity)[:24]}",
+                **identity,
+            )
+        )
+        offset += len(page_text)
+    canonical_identity = canonical.model_dump(
+        mode="python", exclude={"canonical_text_id", "stored_path", "content_hash"}
+    )
+    canonical_identity.update(
+        text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        character_count=len(text),
+        page_count=len(pages),
+        blocks=tuple(page_blocks),
+    )
+    canonical_id = f"canonical-text-{content_hash(canonical_identity)[:24]}"
+    canonical_payload = {
+        "canonical_text_id": canonical_id,
+        "stored_path": f"canonical_text/{canonical_id}/content.txt",
+        **canonical_identity,
+    }
+    test_canonical = CanonicalTextArtifact(
+        **canonical_payload, content_hash=content_hash(canonical_payload)
+    )
+
+    extracted = PDFDocumentStructureExtractor().extract(
+        "document-structure-test",
+        DocumentStructureInput(
+            representation=representation,
+            canonical=test_canonical,
+            canonical_text=text,
+        ),
+    )
+
+    assert [(table.label, table.page_number) for table in extracted.tables] == [
+        ("Table 1", 1)
+    ]
+    assert [(figure.label, figure.page_number) for figure in extracted.figures] == [
+        ("Fig. 2", 1),
+        ("Extended Data Fig. 1", 1),
+        ("Fig. 3", 2),
+    ]
+    blocks_by_id = {block.block_id: block for block in extracted.blocks}
+    assert [
+        text[
+            blocks_by_id[figure.caption_block_ref].start_offset :
+            blocks_by_id[figure.caption_block_ref].end_offset
+        ]
+        for figure in extracted.figures
+    ] == [
+        "Fig. 2 | In situ characterization of active-phase formation.",
+        "Extended Data Fig. 1 | Microkinetics simulations.",
+        "Fig. 3 | Phase evolution under water exposure.",
+    ]
+    assert all(
+        figure.extraction_status == StructureExtractionStatus.PARTIAL
+        for figure in extracted.figures
+    )
 
 
 def test_pdf_canonical_tamper_breaks_structure_validation(tmp_path: Path) -> None:
@@ -527,6 +665,42 @@ def test_trusted_snapshot_binds_current_structure_and_locator(tmp_path: Path) ->
         result.selection.selection_id: result.selection.content_hash
     }
     assert snapshot.structured_evidence_locator_hashes == {locator.locator_id: locator.content_hash}
+
+
+def test_trusted_snapshot_validates_selected_structure_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories, store, outcome, result = html_structure(tmp_path)
+    document = repositories.literature_documents.get(outcome.literature_id or "")
+    selection = repositories.literature_representation_selections.resolve_current(
+        document.literature_id
+    )
+    accept_record(
+        repositories, "literature_document", document.literature_id, document.content_hash
+    )
+    accept_record(
+        repositories,
+        "literature_representation_selection",
+        selection.selection_id,
+        selection.content_hash,
+    )
+    from spc.knowledge import structure as structure_module
+
+    original_validate = structure_module.validate_document_structure
+    calls = 0
+
+    def counted_validate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(structure_module, "validate_document_structure", counted_validate)
+    snapshot = repositories.create_snapshot(store, DomainPackLoader().load("base").profile)
+
+    assert calls == 1
+    assert snapshot.document_structure_hashes == {
+        result.artifact.structure_id: result.artifact.content_hash
+    }
 
 
 def test_structure_cli_and_shared_repository_are_project_independent(

@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING, Any, Mapping
 from pydantic import BaseModel
 
 from ..interpretation.validators import (
+    _source_quote_binding_issues,
     result_context_record_issues,
     source_claim_binding_issues,
-    _source_quote_binding_issues,
 )
 from ..models import (
     CanonicalHTMLTextArtifact,
@@ -35,6 +35,7 @@ from ..models import (
     LiteratureRepresentationKind,
     LiteratureRepresentationReference,
     LiteratureRepresentationSelection,
+    LiteratureSupplementarySource,
     LiteratureWorkflowPattern,
     MethodFact,
     ModelFact,
@@ -91,6 +92,11 @@ REPOSITORY_NODE_SPECS = (
         "selection_id",
     ),
     (
+        "literature_supplementary_source",
+        "literature_supplementary_sources",
+        "supplement_id",
+    ),
+    (
         "historical_evidence_authorization",
         "historical_evidence_authorizations",
         "authorization_id",
@@ -114,6 +120,7 @@ CURATION_REQUIRED_TYPES = frozenset(
         "expert_source",
         "literature_document",
         "literature_representation_selection",
+        "literature_supplementary_source",
         "expert_opinion",
         "source_claim",
         "method_fact",
@@ -484,7 +491,6 @@ class TrustedKnowledgeValidator:
             trusted_records=MappingProxyType(dict(sorted(self._reachable.items()))),
         )
 
-
     def _revalidate_cached_evidence(self) -> None:
         if self.evidence_store is None:
             raise TrustedKnowledgeError(
@@ -552,6 +558,8 @@ class TrustedKnowledgeValidator:
                 self._validate_representation(record, current, visiting)
             elif isinstance(record, LiteratureRepresentationSelection):
                 self._validate_representation_selection(record, current, visiting)
+            elif isinstance(record, LiteratureSupplementarySource):
+                self._validate_supplementary_source(record, current, visiting)
             elif isinstance(record, HistoricalLiteratureEvidenceAuthorization):
                 self._validate_historical_authorization(record)
             elif isinstance(record, ExpertProfile):
@@ -733,6 +741,58 @@ class TrustedKnowledgeValidator:
             )
             return
         source = self._verify_source(document.source_id, document.source_version)
+        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
+
+    def _validate_supplementary_source(
+        self,
+        supplement: LiteratureSupplementarySource,
+        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
+        visiting: set[tuple[str, str]],
+    ) -> None:
+        if self.evidence_store is None:
+            raise TrustedKnowledgeError(
+                "EVIDENCE_STORE_REQUIRED",
+                "supplementary source validation requires an EvidenceStore",
+            )
+        document = self._validate_record(
+            ("literature_document", supplement.literature_id), current, visiting
+        )
+        try:
+            from .ingestion import validate_literature_supplementary_source
+
+            raw, canonical, source = validate_literature_supplementary_source(
+                supplement, self.repositories, self.evidence_store
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise TrustedKnowledgeError(
+                "INVALID_SUPPLEMENTARY_SOURCE",
+                f"supplementary source chain is unavailable: {supplement.supplement_id}",
+            ) from error
+        if (
+            not isinstance(document, LiteratureDocument)
+            or document.content_hash != supplement.literature_hash
+        ):
+            raise TrustedKnowledgeError(
+                "INVALID_SUPPLEMENTARY_SOURCE",
+                f"supplementary source chain does not match: {supplement.supplement_id}",
+            )
+        curation = current.get(
+            ("literature_supplementary_source", supplement.supplement_id)
+        )
+        if curation is not None:
+            for evidence_id in curation.evidence_refs:
+                evidence = self.evidence_store.get_evidence(evidence_id)
+                self.evidence_store.verify_evidence_integrity(evidence)
+                if (evidence.source_id, evidence.source_version) != (
+                    supplement.source_id,
+                    supplement.source_version,
+                ):
+                    raise TrustedKnowledgeError(
+                        "SUPPLEMENTARY_EVIDENCE_SOURCE_MISMATCH",
+                        f"curation evidence belongs to another source: {evidence_id}",
+                    )
+        self._reachable[("raw_literature_artifact", raw.artifact_id)] = raw
+        self._reachable[("canonical_text_artifact", canonical.canonical_text_id)] = canonical
         self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
 
     def _validate_representation_selection(
@@ -1185,6 +1245,36 @@ class TrustedKnowledgeValidator:
                 f"evidence is unavailable or invalid: {evidence_id}",
             ) from error
         source_key = (source.source_id, source.version)
+        shared_supplement = False
+        if source.source_type == SourceType.SUPPORTING_INFORMATION:
+            try:
+                self.repositories.evidence_store.get_source(*source_key)
+                shared_supplement = True
+            except FileNotFoundError:
+                pass
+        if shared_supplement:
+            matches = tuple(
+                item
+                for item in self.repositories.literature_supplementary_sources.list()
+                if (item.source_id, item.source_version) == source_key
+                and (
+                    curation := self._current_curations.get(
+                        ("literature_supplementary_source", item.supplement_id)
+                    )
+                ) is not None
+                and curation.status == CurationStatus.ACCEPTED
+            )
+            if not matches:
+                raise TrustedKnowledgeError(
+                    "UNBOUND_SUPPLEMENTARY_EVIDENCE",
+                    f"supporting-information evidence lacks an accepted source binding: {evidence_id}",
+                )
+            for supplement in matches:
+                self._validate_record(
+                    ("literature_supplementary_source", supplement.supplement_id),
+                    self._current_curations,
+                    set(),
+                )
         if (
             source_key in self._all_literature_ingestion_sources
             and source_key not in self._trusted_current_literature_sources

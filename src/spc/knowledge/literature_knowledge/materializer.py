@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
+from typing import Callable, Iterable, TypeVar
 
 from pydantic import BaseModel
 
@@ -70,6 +71,7 @@ NUMERIC_TOKEN = re.compile(
 )
 # Equivalent unit spellings are opt-in and exact. This intentionally starts empty.
 EXPLICIT_UNIT_EQUIVALENTS: dict[str, tuple[str, ...]] = {}
+_RecordT = TypeVar("_RecordT")
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,54 @@ def _put_reuse(repository: ModelRepository, key: str, record: BaseModel) -> None
         return
     if existing != record:
         raise FileExistsError(f"conflicting materialized record: {key}")
+
+
+def _rebind_or_create_quote_evidence(
+    compilation_input: LiteratureKnowledgeCompilationInput,
+    start: int,
+    end: int,
+    exact_text: str,
+    block_id: str,
+    repositories: KnowledgeRepositories,
+    store: EvidenceStore,
+):
+    """Reuse an immutable exact span when only its structure locator changed."""
+    identity = {
+        "canonical_text_id": compilation_input.canonical_text_id,
+        "start_offset": start,
+        "end_offset": end,
+        "text_hash": content_hash({"text": exact_text}),
+    }
+    evidence_id = f"evidence-{content_hash(identity)[:24]}"
+    try:
+        existing = store.get_evidence(evidence_id)
+    except FileNotFoundError:
+        return create_evidence_span_from_canonical_text(
+            compilation_input.canonical_text_id,
+            start,
+            end,
+            repositories,
+            store,
+            locator=f"K1F exact quote in {block_id}",
+        )
+    source = store.verify_evidence_integrity(existing)
+    if (
+        existing.source_id != compilation_input.source_id
+        or existing.source_version != compilation_input.source_version
+        or existing.content_sha256 != source.content_sha256
+        or existing.start_offset != start
+        or existing.end_offset != end
+        or existing.text != exact_text
+    ):
+        raise ValueError("existing exact quote evidence conflicts with current canonical source")
+    return existing
+
+
+def _unique_sorted_records(
+    records: Iterable[_RecordT], identity: Callable[[_RecordT], str]
+) -> tuple[_RecordT, ...]:
+    by_id = {identity(record): record for record in records}
+    return tuple(by_id[key] for key in sorted(by_id))
 
 
 def _reject(target: list, reference: str, kind: str, code: str) -> None:
@@ -168,7 +218,9 @@ def _has_adjacent_numeric_unit_pair(text: str, value: float, unit: str) -> bool:
         re.escape(spelling)
         for spelling in sorted(_unit_spellings(unit), key=len, reverse=True)
     )
-    adjacent_unit = re.compile(rf"\s+(?:{alternatives})(?![\w/\u00b7\u22c5^])")
+    # Percent is conventionally attached to its numeric token (e.g. 80%).
+    separator = r"\s*" if unit == "%" else r"\s+"
+    adjacent_unit = re.compile(rf"{separator}(?:{alternatives})(?![\w/\u00b7\u22c5^])")
     return any(
         token.value == expected and adjacent_unit.match(text, token.end) is not None
         for token in _numeric_tokens(text)
@@ -375,13 +427,14 @@ class LiteratureKnowledgeMaterializer:
             if start < block.start_offset or end > block.end_offset:
                 _reject(rejected, proposal.quote_key, "quote", "QUOTE_OUTSIDE_BLOCK")
                 continue
-            evidence = create_evidence_span_from_canonical_text(
-                compilation_input.canonical_text_id,
+            evidence = _rebind_or_create_quote_evidence(
+                compilation_input,
                 start,
                 end,
+                chunk.text[relative_start:relative_end],
+                block.block_id,
                 repositories,
                 store,
-                locator=f"K1F exact quote in {block.block_id}",
             )
             table_ownership = resolve_table_ownership(block, structure, repositories)
             table, cell = table_ownership if table_ownership is not None else (None, None)
@@ -640,12 +693,12 @@ class LiteratureKnowledgeMaterializer:
             "representation_selection_hash": compilation_input.representation_selection_hash,
             "structure_selection_id": compilation_input.structure_selection_id,
             "structure_selection_hash": compilation_input.structure_selection_hash,
-            "source_quote_ids": tuple(sorted(quote.quote_id for quote in quotes_by_key.values())),
-            "source_claim_ids": tuple(sorted(claim.claim_id for claim in claims_by_key.values())),
-            "method_fact_ids": tuple(sorted(fact.fact_id for fact in method_by_key.values())),
-            "model_fact_ids": tuple(sorted(fact.fact_id for fact in model_by_key.values())),
-            "reported_result_ids": tuple(sorted(result.result_id for result in result_by_key.values())),
-            "knowledge_relation_ids": tuple(sorted(relation.relation_id for relation in relations)),
+            "source_quote_ids": tuple(sorted({quote.quote_id for quote in quotes_by_key.values()})),
+            "source_claim_ids": tuple(sorted({claim.claim_id for claim in claims_by_key.values()})),
+            "method_fact_ids": tuple(sorted({fact.fact_id for fact in method_by_key.values()})),
+            "model_fact_ids": tuple(sorted({fact.fact_id for fact in model_by_key.values()})),
+            "reported_result_ids": tuple(sorted({result.result_id for result in result_by_key.values()})),
+            "knowledge_relation_ids": tuple(sorted({relation.relation_id for relation in relations})),
             "grounding_hashes": {item.grounding_id: item.content_hash for item in groundings},
             "rejected_proposals": tuple(rejected),
             "compiler_id": COMPILER_ID,
@@ -661,11 +714,13 @@ class LiteratureKnowledgeMaterializer:
         )
         return LiteratureKnowledgeCompilationOutcome(
             record=record,
-            source_quotes=tuple(sorted(quotes_by_key.values(), key=lambda item: item.quote_id)),
-            source_claims=tuple(sorted(claims_by_key.values(), key=lambda item: item.claim_id)),
-            method_facts=tuple(sorted(method_by_key.values(), key=lambda item: item.fact_id)),
-            model_facts=tuple(sorted(model_by_key.values(), key=lambda item: item.fact_id)),
-            reported_results=tuple(sorted(result_by_key.values(), key=lambda item: item.result_id)),
-            relations=tuple(sorted(relations, key=lambda item: item.relation_id)),
+            source_quotes=_unique_sorted_records(quotes_by_key.values(), lambda item: item.quote_id),
+            source_claims=_unique_sorted_records(claims_by_key.values(), lambda item: item.claim_id),
+            method_facts=_unique_sorted_records(method_by_key.values(), lambda item: item.fact_id),
+            model_facts=_unique_sorted_records(model_by_key.values(), lambda item: item.fact_id),
+            reported_results=_unique_sorted_records(
+                result_by_key.values(), lambda item: item.result_id
+            ),
+            relations=_unique_sorted_records(relations, lambda item: item.relation_id),
             groundings=groundings,
         )

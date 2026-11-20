@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -3498,7 +3499,19 @@ class ScientificProblemWorkflow:
         return WorkflowResult(failed)
 
     def _dry_run_report(self, run, repositories, context):
-        knowledge_status = build_knowledge_status(self.knowledge_dir, self.state_dir, run.domain)
+        if context is None:
+            knowledge_status = build_knowledge_status(
+                self.knowledge_dir, self.state_dir, run.domain
+            )
+            trusted_literature_count = knowledge_status["literature"]["trusted_documents"]
+            trusted_expert_opinion_count = knowledge_status["experts"]["trusted_opinions"]
+            trusted_expert_case_count = knowledge_status["experts"]["trusted_cases"]
+        else:
+            # Context construction already verified these exact snapshot inventories.
+            snapshot = context.knowledge_snapshot
+            trusted_literature_count = len(snapshot.literature_document_hashes)
+            trusted_expert_opinion_count = len(snapshot.expert_opinion_hashes)
+            trusted_expert_case_count = len(snapshot.expert_case_hashes)
         hits = {
             "literature": len(context.literature_knowledge_hits) if context else 0,
             "expert_opinions": len(context.expert_opinion_hits) if context else 0,
@@ -3509,9 +3522,9 @@ class ScientificProblemWorkflow:
             "run_id": run.run_id,
             "status": run.status.value,
             "source_trust_ready": not run.blocking_items and run.failure is None,
-            "trusted_literature_count": knowledge_status["literature"]["trusted_documents"],
-            "trusted_expert_opinion_count": knowledge_status["experts"]["trusted_opinions"],
-            "trusted_expert_case_count": knowledge_status["experts"]["trusted_cases"],
+            "trusted_literature_count": trusted_literature_count,
+            "trusted_expert_opinion_count": trusted_expert_opinion_count,
+            "trusted_expert_case_count": trusted_expert_case_count,
             "retrieval_hit_counts": hits,
             "blocking_curation_items": [item.model_dump(mode="json") for item in run.blocking_items],
             "available_providers": {
@@ -4136,6 +4149,7 @@ def render_scientific_run_markdown(run: ScientificProblemRun, repository: Scient
                     f"- Scientific question: {'; '.join(item.text for item in plan.atomic_questions)}",
                     f"- Primary hypothesis: {plan.hypothesis.primary.text}",
                     f"- Null hypothesis: {plan.hypothesis.null.text}",
+                    f"- Scientific model: {plan.model.description.text}",
                     f"- Baselines: {'; '.join(item.description.text for item in plan.comparison_baselines)}",
                     f"- Capabilities: {', '.join(plan.scientific_capability_ids)}",
                     f"- Evidence: {', '.join(item.evidence_id for item in plan.evidence_refs)}",
@@ -4146,8 +4160,82 @@ def render_scientific_run_markdown(run: ScientificProblemRun, repository: Scient
                     f"- Falsification criteria: {'; '.join(item.statement for item in plan.falsification_criteria)}",
                     f"- Runnable tasks: {any(task.runnable for task in plan.tasks)}",
                     "",
+                    "#### Model and observables",
+                    "",
                 ]
             )
+            if plan.model.parameters:
+                for parameter in plan.model.parameters:
+                    lines.append(
+                        f"- Model parameter [{parameter.classification.value}]: "
+                        f"{parameter.text}"
+                    )
+            else:
+                lines.append("- Model parameters: not specified; resolve before execution handoff.")
+            for observable in plan.observables:
+                lines.append(
+                    f"- Observable `{observable.observable_id}`: "
+                    f"{observable.description.text}; unit: {observable.unit or 'not specified'}"
+                )
+            lines.extend(["", "#### Assumptions, unknowns, and decisions", ""])
+            for assumption in plan.assumptions:
+                lines.append(f"- Assumption: {assumption.statement}; impact: {assumption.impact}")
+            for unknown in plan.unknowns:
+                lines.append(f"- Unknown: {unknown.statement}; resolution: {unknown.resolution}")
+            for deviation in plan.proposed_deviations:
+                lines.append(
+                    f"- Proposed deviation `{deviation.deviation_id}`: "
+                    f"{deviation.statement}; reason: {deviation.rationale}"
+                )
+            for decision in plan.required_human_decisions:
+                lines.append(
+                    f"- Human decision `{decision.decision_id}`: {decision.question}; "
+                    f"options: {', '.join(decision.options)}; before: {decision.required_before}"
+                )
+            for limitation in plan.limitations:
+                lines.append(f"- Limitation: {limitation}")
+            if not (
+                plan.assumptions
+                or plan.unknowns
+                or plan.proposed_deviations
+                or plan.required_human_decisions
+                or plan.limitations
+            ):
+                lines.append("- None recorded.")
+            lines.extend(["", "#### Task handoff and acceptance checks", ""])
+            for index, task in enumerate(plan.tasks, start=1):
+                lines.extend(
+                    [
+                        f"##### Step {index}: `{task.task_id}`",
+                        "",
+                        f"- Objective: {task.scientific_objective}",
+                        f"- Capability: `{task.capability_id}`",
+                        f"- Depends on: {', '.join(task.depends_on) or 'none'}",
+                        "- Inputs:",
+                    ]
+                )
+                inputs = task.model_dump(mode="json")["inputs"]
+                if inputs:
+                    for key, value in sorted(inputs.items()):
+                        lines.append(
+                            f"  - `{key}`: {json.dumps(value, ensure_ascii=False, sort_keys=True)}"
+                        )
+                else:
+                    lines.append("  - Not specified; define before execution handoff.")
+                lines.extend(
+                    [
+                        f"- Deliverables: {'; '.join(task.outputs)}",
+                        f"- Success checks: {'; '.join(task.success_criteria)}",
+                        f"- Falsification relevance: {task.falsification_relevance}",
+                        f"- Failure action: {task.failure_policy}",
+                        f"- Release gates: {', '.join(task.release_gates) or 'none recorded'}",
+                        f"- Evidence: {', '.join(task.evidence_refs) or 'none recorded'}",
+                        f"- Provenance to retain: {'; '.join(task.provenance_requirements) or 'none recorded'}",
+                        f"- Cost estimate: {task.cost_estimate}",
+                        f"- Runnable: {task.runnable}",
+                        "",
+                    ]
+                )
     lines.extend(["## E. Independent approval", ""])
     if run.approval_verdict_id is None:
         lines.append("Awaiting independent approval.")

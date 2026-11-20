@@ -20,7 +20,7 @@ from ..repositories import KnowledgeRepositories, ModelRepository
 from ..serialization import content_hash
 from ..validators import EvidenceSpanRepository
 
-RESOLVER_VERSION = "planning-context-resolver-1.2.0"
+RESOLVER_VERSION = "planning-context-resolver-1.2.1"
 RecordT = TypeVar("RecordT", ExpertCase, LiteratureWorkflowPattern, ScientificCapability)
 
 
@@ -213,6 +213,11 @@ class PlanningContextResolver:
                 item.capability_id: content_hash(item) for item in capabilities
             },
             "evidence_bindings": evidence_bindings,
+            "request_focus": {
+                "system_terms": context.retrieval_query.system_terms,
+                "desired_observables": context.retrieval_query.desired_observables,
+                "concepts": context.retrieval_query.concepts,
+            },
         }
         identity = {
             "original_request": context.original_request,

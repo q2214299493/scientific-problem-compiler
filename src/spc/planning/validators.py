@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from ..domains import DomainPackLoader
 from ..models import PlanningProposalSet, PlanningStrategyClass, ScientificPlanningInput
+from ..retrieval.ranker import contains_ontology_variant, normalize_text, ontology_groups
 from ..serialization import content_hash
 from ..validators import ValidationIssue, ValidationReport
 
@@ -34,6 +36,28 @@ def validate_planning_proposal_set(
         decision.decision_id for decision in planning_input.required_human_decisions
     }
     claims_by_id = {claim.claim_id: claim for claim in planning_input.source_claims}
+    focus = dict(planning_input.provenance_manifest).get("request_focus", {})
+    focus = dict(focus) if isinstance(focus, dict) or hasattr(focus, "items") else {}
+    systems = tuple(focus.get("system_terms", ()))
+    observables = tuple(focus.get("desired_observables", ()))
+    if systems and observables:
+        profile = DomainPackLoader().load(planning_input.domain).profile
+        variants_by_term = dict(ontology_groups(profile))
+
+        def mentions(text: str, term: str) -> bool:
+            variants = variants_by_term.get(normalize_text(term), (normalize_text(term),))
+            normalized = normalize_text(text)
+            return any(contains_ontology_variant(normalized, item) for item in variants)
+
+        questions_text = " ".join(proposal.intent.atomic_questions)
+        if any(not mentions(questions_text, term) for term in (*systems, *observables)):
+            issues.append(
+                ValidationIssue(
+                    code="REQUEST_FOCUS_DROPPED",
+                    message="atomic questions omit a requested system or observable",
+                    path="intent.atomic_questions",
+                )
+            )
     intent_basis = set(proposal.intent.evidence_basis)
     if not intent_basis.issubset(allowed_evidence | allowed_claims):
         issues.append(
@@ -45,6 +69,21 @@ def validate_planning_proposal_set(
         )
     for index, candidate in enumerate(proposal.candidates):
         prefix = f"candidates[{index}]"
+        if systems and observables:
+            model_and_tasks = " ".join(
+                (candidate.model_definition, *(task.scientific_objective for task in candidate.task_drafts))
+            )
+            observable_text = " ".join(item.description for item in candidate.observables)
+            if any(not mentions(model_and_tasks, term) for term in systems) or any(
+                not mentions(observable_text, term) for term in observables
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="REQUEST_FOCUS_DROPPED",
+                        message="candidate omits a requested system or observable",
+                        path=prefix,
+                    )
+                )
         candidate_evidence = set(candidate.evidence_refs)
         if not candidate_evidence.issubset(allowed_evidence):
             issues.append(

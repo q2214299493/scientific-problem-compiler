@@ -6,7 +6,7 @@ from itertools import combinations
 from ..models import ConflictSet, ScientificContextPacket, SourceClaim
 from ..serialization import content_hash
 
-_NEGATION = re.compile(r"\b(?:not|no|never|unlikely|cannot|contradict(?:s|ed)?)\b", re.I)
+_NEGATION = re.compile(r"\b(?:not|never|unlikely|cannot|no(?!-))\b", re.I)
 _TOKENS = re.compile(r"[a-z0-9]+")
 _STOP = {"a", "an", "and", "are", "by", "for", "in", "is", "of", "on", "the", "to", "was", "with"}
 _MECHANISM_MARKERS = (
@@ -24,6 +24,21 @@ def _scientific_tokens(text: str) -> set[str]:
     return {token for token in _TOKENS.findall(text.casefold()) if len(token) > 2 and token not in _STOP}
 
 
+def _direct_negation_conflict(left: str, right: str) -> bool:
+    """Require the same stated proposition with opposite explicit polarity.
+
+    Shared terms plus a negation in an unrelated method or table label do not
+    establish a scientific disagreement.
+    """
+    left_negative = bool(_NEGATION.search(left))
+    right_negative = bool(_NEGATION.search(right))
+    if left_negative == right_negative:
+        return False
+    left_tokens = tuple(_TOKENS.findall(_NEGATION.sub("", left.casefold())))
+    right_tokens = tuple(_TOKENS.findall(_NEGATION.sub("", right.casefold())))
+    return left_tokens == right_tokens
+
+
 def detect_conflicts(
     claims: tuple[SourceClaim, ...], context: ScientificContextPacket
 ) -> tuple[ConflictSet, ...]:
@@ -31,7 +46,7 @@ def detect_conflicts(
     seen_pairs: set[tuple[str, str]] = set()
     for left, right in combinations(claims, 2):
         shared = _scientific_tokens(left.text) & _scientific_tokens(right.text)
-        negation_differs = bool(_NEGATION.search(left.text)) != bool(_NEGATION.search(right.text))
+        negation_conflict = _direct_negation_conflict(left.text, right.text)
         explicit_conflict = "contradict" in left.text.casefold() or "contradict" in right.text.casefold()
         left_markers = {marker for marker in _MECHANISM_MARKERS if marker in left.text.casefold()}
         right_markers = {marker for marker in _MECHANISM_MARKERS if marker in right.text.casefold()}
@@ -42,7 +57,7 @@ def detect_conflicts(
             and left_markers.isdisjoint(right_markers)
         )
         if not (
-            (len(shared) >= 2 and negation_differs)
+            (len(shared) >= 2 and negation_conflict)
             or explicit_conflict
             or mechanism_disagreement
         ):

@@ -1995,13 +1995,19 @@ class RawLiteratureArtifact(StrictModel):
             or PureWindowsPath(self.original_filename).name != self.original_filename
         ):
             raise ValueError("RawLiteratureArtifact original_filename must be a basename")
-        if self.media_type != "application/pdf":
-            raise ValueError("RawLiteratureArtifact must use application/pdf")
+        extensions = {
+            "application/pdf": "pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+        }
+        if self.media_type not in extensions:
+            raise ValueError("RawLiteratureArtifact media type is unsupported")
         identity = {"literature_id": self.literature_id, "sha256": self.sha256}
         expected_id = f"literature-artifact-{content_hash(identity)[:24]}"
         if self.artifact_id != expected_id:
             raise ValueError("RawLiteratureArtifact artifact_id is not content-bound")
-        expected_path = f"literature_artifacts/{expected_id}/artifact.pdf"
+        expected_path = (
+            f"literature_artifacts/{expected_id}/artifact.{extensions[self.media_type]}"
+        )
         if self.stored_path != expected_path:
             raise ValueError("RawLiteratureArtifact stored_path is not canonical")
         payload = self.model_dump(mode="json", exclude={"content_hash"})
@@ -2084,6 +2090,37 @@ class CanonicalTextArtifact(StrictModel):
         payload = self.model_dump(mode="json", exclude={"content_hash"})
         if self.content_hash != content_hash(payload):
             raise ValueError("CanonicalTextArtifact content_hash is invalid")
+        return self
+
+
+class LiteratureSupplementarySource(StrictModel):
+    supplement_id: NonBlankStr
+    literature_id: NonBlankStr
+    literature_hash: Sha256Str
+    main_selection_id: NonBlankStr
+    main_selection_hash: Sha256Str
+    raw_artifact_id: NonBlankStr
+    raw_artifact_hash: Sha256Str
+    canonical_text_id: NonBlankStr
+    canonical_text_hash: Sha256Str
+    source_id: NonBlankStr
+    source_version: NonBlankStr
+    source_sha256: Sha256Str
+    content_hash: Sha256Str
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> LiteratureSupplementarySource:
+        from .serialization import content_hash
+
+        identity = self.model_dump(
+            mode="json", exclude={"supplement_id", "content_hash"}
+        )
+        expected_id = f"literature-supplement-{content_hash(identity)[:24]}"
+        if self.supplement_id != expected_id:
+            raise ValueError("LiteratureSupplementarySource ID is not content-bound")
+        payload = {"supplement_id": expected_id, **identity}
+        if self.content_hash != content_hash(payload):
+            raise ValueError("LiteratureSupplementarySource content_hash is invalid")
         return self
 
 

@@ -586,6 +586,16 @@ def validate_comparison_constraints(
                     path=path,
                 )
             )
+        if not set(constraint.may_vary_fields).issubset(
+            set(constraint.must_match_fields) - {"unit"}
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="INVALID_COMPARISON_ADAPTATION",
+                    message="adaptable fields must name compared system or method conditions",
+                    path=path,
+                )
+            )
         issues.extend(
             _check_refs(
                 constraint.evidence_refs,
