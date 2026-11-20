@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from spc.approval import MockApprovalProvider
 from spc.models import (
@@ -840,3 +842,35 @@ def test_generic_base_domain_result_feedback_does_not_add_ft_logic(tmp_path: Pat
 
     assert assessment.status == ResultEvidenceIntakeStatus.RESULT_REQUIRES_CURATION
     assert plan.domain == "base"
+
+
+def test_rejected_curation_blocks_successor_despite_prior_receipt(tmp_path: Path) -> None:
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _, receipt = _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    options = dict(state_dir=tmp_path / ".spc", knowledge_dir=repositories.root)
+
+    rejected, new_receipt = ResultEvidenceIntakeService(**options).curate(
+        parent_run_id=run.run_id,
+        submission_id=submission.submission_id,
+        status=CurationStatus.REJECTED,
+        curator_id="human-curator",
+        rationale="Withdraw acceptance after review.",
+    )
+    assert rejected.status == CurationStatus.REJECTED
+    assert rejected.supersedes_curation_id == receipt.curation_id
+    assert new_receipt is None
+    with pytest.raises(ResultFeedbackError) as exc:
+        SuccessorPlanningService(**options).compile(
+            parent_run_id=run.run_id, submission_ids=(submission.submission_id,)
+        )
+    assert exc.value.code == "RESULT_REQUIRES_CURATION"
+
+    from spc.cli import app
+
+    response = CliRunner().invoke(
+        app, ["successor-plan-status", "--parent-run-id", run.run_id,
+              "--state-dir", str(tmp_path / ".spc")]
+    )
+    assert response.exit_code == 0, response.output
+    assert json.loads(response.output) == result_feedback_status(run.run_id, workflow.runs)
