@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-import spc.workflow.service as workflow_service
+from spc.workflow import providers as workflow_providers
 from spc.approval import MockApprovalProvider, validate_approval_response
 from spc.cli import app
 from spc.models import (
@@ -383,8 +383,8 @@ def _workflow(
     approver=MockApprovalProvider,
 ) -> ScientificProblemWorkflow:
     repositories, *_ = _prepare(tmp_path)
-    monkeypatch.setattr(workflow_service, "MockPlanningProvider", planner)
-    monkeypatch.setattr(workflow_service, "MockApprovalProvider", approver)
+    monkeypatch.setattr(workflow_providers, "MockPlanningProvider", planner)
+    monkeypatch.setattr(workflow_providers, "MockApprovalProvider", approver)
     return ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc",
         knowledge_dir=repositories.root,
@@ -493,7 +493,7 @@ def test_revision_approval_context_rejects_tampered_parent_and_response(
         max_plan_revisions=1,
     ).run
     second = _chain(workflow, run.run_id).rounds[1]
-    review_input = workflow._load_approval_input_binding(
+    review_input = workflow.runs.load_approval_input_binding(
         run.run_id,
         second.approval_review_input,
     )
@@ -746,14 +746,14 @@ def test_revision_round_waiting_for_approval_resumes_without_replanning(
             return super().revise(revision_input)
 
     workflow = _workflow(tmp_path, monkeypatch, planner=CountingBaselinePlanner)
-    original_approve = workflow._approve
+    original_approve = workflow.approval.approve
 
     def interrupt_before_revision_approval(run, *args, **kwargs):
         if kwargs.get("revision_approval") is not None:
             return run
         return original_approve(run, *args, **kwargs)
 
-    monkeypatch.setattr(workflow, "_approve", interrupt_before_revision_approval)
+    monkeypatch.setattr(workflow.approval, "approve", interrupt_before_revision_approval)
     awaiting = workflow.start(
         REQUEST,
         "base",
@@ -766,7 +766,7 @@ def test_revision_round_waiting_for_approval_resumes_without_replanning(
     assert chain_before.revisions_used == 1
     assert chain_before.rounds[-1].approval_receipt is None
 
-    monkeypatch.setattr(workflow, "_approve", original_approve)
+    monkeypatch.setattr(workflow.approval, "approve", original_approve)
     resumed = workflow.resume(awaiting.run_id, approval_provider="mock").run
     chain_after = _chain(workflow, awaiting.run_id)
 
@@ -858,7 +858,7 @@ def test_independent_reviewer_can_mark_prior_criticism_not_applicable(
 
     assert run.status == ScientificProblemRunStatus.APPROVED
     second = _chain(workflow, run.run_id).rounds[-1]
-    review_input = workflow._load_approval_input_binding(
+    review_input = workflow.runs.load_approval_input_binding(
         run.run_id,
         second.approval_review_input,
     )
@@ -888,7 +888,7 @@ def test_revision_approval_must_assess_every_tracked_blocking_issue(
         max_plan_revisions=1,
     ).run
     second = _chain(workflow, run.run_id).rounds[-1]
-    review_input = workflow._load_approval_input_binding(
+    review_input = workflow.runs.load_approval_input_binding(
         run.run_id,
         second.approval_review_input,
     )
@@ -1415,7 +1415,7 @@ def test_revised_export_requires_exact_candidate_and_remains_non_runnable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", BaselineRepairPlanner
+        workflow_providers, "MockPlanningProvider", BaselineRepairPlanner
     )
     state_dir = tmp_path / ".spc"
     project_store = ProjectEvidenceStore(state_dir)
@@ -1511,7 +1511,7 @@ def test_cli_explicit_revision_budget_uses_production_workflow_entry(
 ) -> None:
     repositories, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         BaselineRepairPlanner,
     )

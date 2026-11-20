@@ -389,3 +389,90 @@ def test_unified_cli_dry_run_and_markdown_export(tmp_path: Path) -> None:
     )
     assert export_result.exit_code == 0, export_result.output
     assert REQUEST in report_path.read_text(encoding="utf-8")
+
+
+def test_legacy_entry_reuses_complete_outputs_with_explicit_approver(tmp_path, monkeypatch):
+    from spc.approval import MockApprovalProvider
+    from spc.planning import MockPlanningProvider
+    from spc.retrieval import ScientificContextBuilder
+    from spc.workflow import service
+
+    knowledge, *_ = _prepare(tmp_path)
+    assert service.ScientificProblemWorkflow is ScientificProblemWorkflow
+    workflow = service.ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    run = workflow.start(REQUEST, "base", approval_provider="mock").run
+    root = workflow.runs.run_dir(run.run_id)
+    artifacts = {path: path.read_bytes() for path in root.rglob("*.yaml")}
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a completed stage was invoked during resume")
+
+    monkeypatch.setattr(ScientificContextBuilder, "build", unexpected)
+    monkeypatch.setattr(MockPlanningProvider, "propose", unexpected)
+    monkeypatch.setattr(MockApprovalProvider, "review", unexpected)
+    resumed = workflow.resume(run.run_id, approval_provider="mock").run
+
+    assert resumed == run
+    assert artifacts == {path: path.read_bytes() for path in root.rglob("*.yaml")}
+    assert service.scientific_run_status(resumed, workflow.runs)["current_stage"] == "APPROVED"
+    assert service.render_scientific_run_markdown(resumed, workflow.runs) == render_scientific_run_markdown(run, workflow.runs)
+
+
+@pytest.mark.parametrize("stage", ["planning", "approval"])
+def test_resume_after_interrupted_direct_provider_keeps_claim(tmp_path, monkeypatch, stage):
+    from spc.approval import MockApprovalProvider
+    from spc.planning import MockPlanningProvider
+
+    knowledge, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    calls = 0
+
+    def interrupt(*args):
+        nonlocal calls
+        calls += 1
+        raise KeyboardInterrupt
+
+    provider, method = (MockPlanningProvider, "propose") if stage == "planning" else (MockApprovalProvider, "review")
+    monkeypatch.setattr(provider, method, interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        workflow.start(REQUEST, "base", approval_provider="mock")
+    interrupted, = workflow.runs.list()
+    resumed = workflow.resume(interrupted.run_id, approval_provider="mock").run
+
+    assert resumed.status == ScientificProblemRunStatus.FAILED
+    assert resumed.failure.stage == stage
+    assert resumed.failure.category == "ProviderOutcomeUncertain"
+    assert not resumed.failure.retryable
+    assert calls == 1
+
+
+def test_resume_validates_complete_approval_after_projection_write_interruption(tmp_path, monkeypatch):
+    from spc.approval import MockApprovalProvider
+
+    knowledge, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    original_save = workflow.runs.save
+
+    def interrupted(run):
+        if run.status == ScientificProblemRunStatus.APPROVED:
+            raise KeyboardInterrupt
+        return original_save(run)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workflow.runs, "save", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            workflow.start(REQUEST, "base", approval_provider="mock")
+    pending, = workflow.runs.list()
+    assert pending.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    monkeypatch.setattr(MockApprovalProvider, "review", lambda *args: pytest.fail("review repeated"))
+    resumed = workflow.resume(pending.run_id).run
+    assert resumed.status == ScientificProblemRunStatus.APPROVED
+    assert resumed.approval_receipt_id and resumed.gate_id
+
+
+def test_knowledge_status_is_read_only_before_initialization(tmp_path):
+    from spc.workflow.service import build_knowledge_status
+
+    status = build_knowledge_status(tmp_path / "knowledge", tmp_path / ".spc")
+    assert status["literature"]["trusted_documents"] == 0
+    assert not tuple(tmp_path.iterdir())

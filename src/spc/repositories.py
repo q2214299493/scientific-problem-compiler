@@ -234,11 +234,13 @@ class FilesystemEvidenceStore:
 
     project_state_root: Path | None = None
 
-    def __init__(self, root: Path) -> None:
-        root.mkdir(parents=True, exist_ok=True)
+    def __init__(self, root: Path, *, initialize: bool = True) -> None:
+        if initialize:
+            root.mkdir(parents=True, exist_ok=True)
         resolved_root = root.resolve()
         for directory in (root / "sources", root / "evidence"):
-            directory.mkdir(exist_ok=True)
+            if initialize:
+                directory.mkdir(exist_ok=True)
             if directory.is_symlink() or not directory.resolve().is_relative_to(
                 resolved_root
             ):
@@ -567,9 +569,10 @@ _STANDARD_SOURCE_INTEGRITY_CHECK = FilesystemEvidenceStore.verify_source_integri
 
 
 class ProjectEvidenceStore(FilesystemEvidenceStore):
-    def __init__(self, state_root: Path) -> None:
-        initialize_state(state_root)
-        super().__init__(state_root)
+    def __init__(self, state_root: Path, *, initialize: bool = True) -> None:
+        if initialize:
+            initialize_state(state_root)
+        super().__init__(state_root, initialize=initialize)
         self.project_state_root = state_root
 
 
@@ -578,9 +581,9 @@ class SourceEvidenceStore(ProjectEvidenceStore):
 
 
 class KnowledgeEvidenceStore(FilesystemEvidenceStore):
-    def __init__(self, knowledge_root: Path) -> None:
+    def __init__(self, knowledge_root: Path, *, initialize: bool = True) -> None:
         self.knowledge_root = knowledge_root
-        super().__init__(knowledge_root / "evidence_store")
+        super().__init__(knowledge_root / "evidence_store", initialize=initialize)
 
 
 class CompositeEvidenceStore:
@@ -1844,7 +1847,7 @@ class CollectionDiffRepository(IdentityBoundRepository[CollectionDiff]):
 
 
 class KnowledgeRepositories:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, initialize: bool = True) -> None:
         from .knowledge.expert_knowledge.repositories import (
             ExpertKnowledgeChunkRepository,
             ExpertKnowledgeCompilationInputRepository,
@@ -1862,7 +1865,7 @@ class KnowledgeRepositories:
         )
 
         self.root = root
-        self.evidence_store = KnowledgeEvidenceStore(root)
+        self.evidence_store = KnowledgeEvidenceStore(root, initialize=initialize)
         self.expert_sources = ExpertSourceRepository(root)
         self.expert_cases = ExpertCaseRepository(root)
         self.workflow_patterns = LiteratureWorkflowRepository(root)

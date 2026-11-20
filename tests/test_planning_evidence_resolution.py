@@ -4,9 +4,18 @@ from pathlib import Path
 
 import pytest
 
+from spc.approval import MockApprovalProvider
 from spc.domains import DomainPackLoader
 from spc.interpretation import MockInterpretationProvider, ScientificEvidencePacketBuilder
 from spc.models import (
+    ApprovalReviewRecord,
+    DirectionTriageRecord,
+    EvidenceResolutionSet,
+    PlanningEvidenceRequestSet,
+    ProjectTrustPolicy,
+    ResearchDirectionSet,
+    ScientificQuestionPlan,
+    parse_approval_review_input,
     ApprovalDecision,
     CurationStatus,
     DirectionEvidenceNeed,
@@ -37,7 +46,7 @@ from spc.planning import (
 from spc.retrieval import PersistentKnowledgeRetriever, ScientificContextBuilder
 from spc.serialization import content_hash, dump_yaml, load_data
 from spc.workflow import ScientificProblemWorkflow, scientific_run_status
-import spc.workflow.service as workflow_service
+from spc.workflow import providers as workflow_providers
 from test_knowledge_retrieval import _prepare
 
 
@@ -241,7 +250,7 @@ class DirectionCalculationNeedProvider(CountingHierarchicalEvidenceProvider):
         )
 
 
-class InsufficientThenApproveProvider(workflow_service.MockApprovalProvider):
+class InsufficientThenApproveProvider(MockApprovalProvider):
     review_calls = 0
 
     def review(self, review_input):
@@ -270,7 +279,7 @@ class InsufficientThenApproveProvider(workflow_service.MockApprovalProvider):
         )
 
 
-class RequestRevisionApprovalProvider(workflow_service.MockApprovalProvider):
+class RequestRevisionApprovalProvider(MockApprovalProvider):
     def review(self, review_input):
         return super().review(review_input).model_copy(
             update={"decision_recommendation": ApprovalDecision.REQUEST_REVISION}
@@ -456,7 +465,7 @@ def test_topical_trusted_match_cannot_remove_blocking_planning_gap(
 
     repositories, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockInterpretationProvider",
         MissingReferenceStateProvider,
     )
@@ -473,12 +482,12 @@ def test_topical_trusted_match_cannot_remove_blocking_planning_gap(
     assert run.status == ScientificProblemRunStatus.EVIDENCE_RESOLUTION_BLOCKED
     assert run.failure is not None
     assert run.failure.category == "TRUSTED_MATCH_DID_NOT_RESOLVE_GAP"
-    cycle = workflow._load_evidence_cycles(run.run_id)[0]
+    cycle = workflow.runs.load_evidence_cycles(run.run_id)[0]
     assert cycle.child_context_id is None
     resolutions = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/resolutions.yaml",
-        workflow_service.EvidenceResolutionSet,
+        EvidenceResolutionSet,
     )
     assert resolutions.records[0].status == EvidenceResolutionStatus.NO_MATCH
     assert resolutions.records[0].retrieval_status in {
@@ -743,12 +752,12 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
 
     monkeypatch.setattr(PersistentKnowledgeRetriever, "retrieve", counted_retrieve)
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockInterpretationProvider",
         GapUntilMethodRetrievedProvider,
     )
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         CountingHierarchicalEvidenceProvider,
     )
@@ -769,7 +778,7 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
     assert CountingHierarchicalEvidenceProvider.triage_calls == 1
     assert CountingHierarchicalEvidenceProvider.expansion_calls == 1
     assert evidence_query_calls == 1
-    cycles = workflow._load_evidence_cycles(result.run.run_id)
+    cycles = workflow.runs.load_evidence_cycles(result.run.run_id)
     assert len(cycles) == 1
     cycle = cycles[0]
     assert cycle.child_context_id == result.run.context_id
@@ -796,7 +805,7 @@ def test_offline_hierarchical_evidence_cycle_replans_and_awaits_approval(
     plan = workflow.runs.load_artifact(
         result.run.run_id,
         result.run.candidate_plans[0].relative_path,
-        workflow_service.ScientificQuestionPlan,
+        ScientificQuestionPlan,
     )
     assert all(not task.runnable for task in plan.tasks)
 
@@ -827,7 +836,7 @@ def test_direction_derived_evidence_need_runs_bounded_cycle_and_fresh_hierarchy(
     DirectionDerivedEvidenceProvider.expansion_calls = 0
     DirectionDerivedEvidenceProvider.evidence_request_calls = 0
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         DirectionDerivedEvidenceProvider,
     )
@@ -850,27 +859,27 @@ def test_direction_derived_evidence_need_runs_bounded_cycle_and_fresh_hierarchy(
     old_directions = workflow.runs.load_artifact(
         run.run_id,
         "hierarchical-planning/directions.yaml",
-        workflow_service.ResearchDirectionSet,
+        ResearchDirectionSet,
     )
     old_triage = workflow.runs.load_artifact(
         run.run_id,
         "hierarchical-planning/triage.yaml",
-        workflow_service.DirectionTriageRecord,
+        DirectionTriageRecord,
     )
     request_set = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/request-set.yaml",
-        workflow_service.PlanningEvidenceRequestSet,
+        PlanningEvidenceRequestSet,
     )
     new_directions = workflow.runs.load_artifact(
         run.run_id,
         "evidence-hierarchy-1/directions.yaml",
-        workflow_service.ResearchDirectionSet,
+        ResearchDirectionSet,
     )
     new_triage = workflow.runs.load_artifact(
         run.run_id,
         "evidence-hierarchy-1/triage.yaml",
-        workflow_service.DirectionTriageRecord,
+        DirectionTriageRecord,
     )
     assert request_set.direction_set_id == old_directions.direction_set_id
     assert request_set.direction_set_hash == old_directions.content_hash
@@ -906,7 +915,7 @@ def test_direction_new_dft_need_does_not_enter_literature_retrieval(
     repositories, *_ = _prepare(tmp_path)
     DirectionCalculationNeedProvider.evidence_request_calls = 0
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         DirectionCalculationNeedProvider,
     )
@@ -923,7 +932,7 @@ def test_direction_new_dft_need_does_not_enter_literature_retrieval(
 
     assert run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
     assert DirectionCalculationNeedProvider.evidence_request_calls == 0
-    assert workflow._evidence_attempt_count(run.run_id) == 0
+    assert workflow.runs.evidence_attempt_count(run.run_id) == 0
 
 
 def test_nonretrieval_gap_stops_without_retrieval_and_resume_stays_terminal(
@@ -950,10 +959,10 @@ def test_nonretrieval_gap_stops_without_retrieval_and_resume_stays_terminal(
     repositories, *_ = _prepare(tmp_path)
     CountingHierarchicalEvidenceProvider.evidence_request_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockInterpretationProvider", CalculationGapProvider
+        workflow_providers, "MockInterpretationProvider", CalculationGapProvider
     )
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         CountingHierarchicalEvidenceProvider,
     )
@@ -975,7 +984,7 @@ def test_nonretrieval_gap_stops_without_retrieval_and_resume_stays_terminal(
         resumed = workflow.resume(first.run_id).run
         assert resumed.status == ScientificProblemRunStatus.EVIDENCE_RESOLUTION_BLOCKED
     assert CountingHierarchicalEvidenceProvider.evidence_request_calls == 0
-    assert workflow._evidence_attempt_count(first.run_id) == 1
+    assert workflow.runs.evidence_attempt_count(first.run_id) == 1
 
 
 def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
@@ -985,7 +994,7 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
     repositories, *_ = _prepare(tmp_path)
     InsufficientThenApproveProvider.review_calls = 0
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockApprovalProvider",
         InsufficientThenApproveProvider,
     )
@@ -1003,12 +1012,12 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
 
     assert run.status == ScientificProblemRunStatus.APPROVED
     assert InsufficientThenApproveProvider.review_calls == 2
-    cycles = workflow._load_evidence_cycles(run.run_id)
+    cycles = workflow.runs.load_evidence_cycles(run.run_id)
     assert len(cycles) == 1
     request_set = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/request-set.yaml",
-        workflow_service.PlanningEvidenceRequestSet,
+        PlanningEvidenceRequestSet,
     )
     assert request_set.triggering_review_id is not None
     assert request_set.triggering_review_hash is not None
@@ -1038,13 +1047,13 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
     triggering_review = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/trigger/approval-review.yaml",
-        workflow_service.ApprovalReviewRecord,
+        ApprovalReviewRecord,
     )
     assert triggering_review.review_id == request_set.triggering_review_id
     assert triggering_review.content_hash == request_set.triggering_review_hash
-    workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
+    workflow.evidence.validate_trigger_archive(run.run_id, 1, request_set)
     assert run.approval_review_id != triggering_review.review_id
-    chain = workflow._load_revision_chain(run.run_id)
+    chain = workflow.runs.load_revision_chain(run.run_id)
     assert chain is not None
     assert chain.context_id == cycles[0].child_context_id
 
@@ -1053,8 +1062,8 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
         "planning-evidence/cycle-1/trigger/planning-input.yaml",
         ScientificPlanningInput,
     )
-    archived_review_input = workflow_service.parse_approval_review_input(
-        workflow_service.load_data(
+    archived_review_input = parse_approval_review_input(
+        load_data(
             workflow.runs.resolve_artifact_path(
                 run.run_id,
                 "planning-evidence/cycle-1/trigger/approval-review-input.yaml",
@@ -1064,7 +1073,7 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
     trigger_candidate = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/trigger/candidate-plan.yaml",
-        workflow_service.ScientificQuestionPlan,
+        ScientificQuestionPlan,
     )
     proposal_payload = request_set.requests[0].model_dump(
         mode="python", exclude={"request_id", "content_hash"}
@@ -1121,7 +1130,7 @@ def test_insufficient_evidence_review_starts_new_bound_planning_cycle(
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
-        workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
+        workflow.evidence.validate_trigger_archive(run.run_id, 1, request_set)
 
 
 def test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrade(
@@ -1131,7 +1140,7 @@ def test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrad
     repositories, *_ = _prepare(tmp_path)
     InsufficientThenApproveProvider.review_calls = 0
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockApprovalProvider",
         InsufficientThenApproveProvider,
     )
@@ -1148,7 +1157,7 @@ def test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrad
     request_set = workflow.runs.load_artifact(
         run.run_id,
         "planning-evidence/cycle-1/request-set.yaml",
-        workflow_service.PlanningEvidenceRequestSet,
+        PlanningEvidenceRequestSet,
     )
     policy_path = workflow.runs.resolve_artifact_path(
         run.run_id,
@@ -1157,7 +1166,7 @@ def test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrad
     policy_payload = load_data(policy_path)
     policy_payload["approval_mode"] = "legacy_manual_allowed"
     dump_yaml(policy_path, policy_payload)
-    downgraded_policy = workflow_service.ProjectTrustPolicy.model_validate(
+    downgraded_policy = ProjectTrustPolicy.model_validate(
         policy_payload
     )
     gate_path = workflow.runs.resolve_artifact_path(
@@ -1168,7 +1177,7 @@ def test_evidence_trigger_archive_rejects_self_consistent_manual_policy_downgrad
     dump_yaml(gate_path, gate_payload)
 
     with pytest.raises(ValueError, match="INDEPENDENT_APPROVAL_POLICY_REQUIRED"):
-        workflow._validate_evidence_trigger_archive(run.run_id, 1, request_set)
+        workflow.evidence.validate_trigger_archive(run.run_id, 1, request_set)
 
 
 def test_uncertain_evidence_request_attempt_is_not_repeated_on_resume(
@@ -1185,12 +1194,12 @@ def test_uncertain_evidence_request_attempt_is_not_repeated_on_resume(
 
     repositories, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockInterpretationProvider",
         GapUntilMethodRetrievedProvider,
     )
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", ExplodingEvidenceProvider
+        workflow_providers, "MockPlanningProvider", ExplodingEvidenceProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
@@ -1204,7 +1213,7 @@ def test_uncertain_evidence_request_attempt_is_not_repeated_on_resume(
         )
     run = workflow.runs.list()[0]
     assert ExplodingEvidenceProvider.request_calls == 1
-    assert workflow._evidence_attempt_count(run.run_id) == 1
+    assert workflow.runs.evidence_attempt_count(run.run_id) == 1
 
     for _ in range(3):
         resumed = workflow.resume(run.run_id).run
@@ -1255,10 +1264,10 @@ def test_evidence_cycle_budget_stops_persistent_gap(tmp_path: Path, monkeypatch)
     repositories, *_ = _prepare(tmp_path)
     PartialThenPersistentPlanningProvider.evidence_request_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockInterpretationProvider", PersistentGapProvider
+        workflow_providers, "MockInterpretationProvider", PersistentGapProvider
     )
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         PartialThenPersistentPlanningProvider,
     )
@@ -1275,7 +1284,7 @@ def test_evidence_cycle_budget_stops_persistent_gap(tmp_path: Path, monkeypatch)
     assert run.status == ScientificProblemRunStatus.EVIDENCE_RESOLUTION_BLOCKED
     assert run.failure is not None
     assert run.failure.category == "EVIDENCE_RESOLUTION_BUDGET_EXHAUSTED"
-    assert workflow._evidence_attempt_count(run.run_id) == 1
+    assert workflow.runs.evidence_attempt_count(run.run_id) == 1
     assert PartialThenPersistentPlanningProvider.evidence_request_calls == 1
 
 
@@ -1285,7 +1294,7 @@ def test_request_revision_does_not_enter_evidence_resolution(
 ) -> None:
     repositories, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockApprovalProvider",
         RequestRevisionApprovalProvider,
     )
@@ -1301,4 +1310,40 @@ def test_request_revision_does_not_enter_evidence_resolution(
     ).run
 
     assert run.status == ScientificProblemRunStatus.REJECTED
-    assert workflow._evidence_attempt_count(run.run_id) == 0
+    assert workflow.runs.evidence_attempt_count(run.run_id) == 0
+
+
+@pytest.mark.parametrize("cycle_committed", [False, True])
+def test_resume_reuses_resolutions_across_cycle_commit(tmp_path, monkeypatch, cycle_committed):
+    import spc.workflow.stages.evidence_resolution as evidence_stage
+
+    repositories, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=repositories.root)
+    monkeypatch.setattr(workflow_providers, "MockInterpretationProvider", GapUntilMethodRetrievedProvider)
+    monkeypatch.setattr(workflow_providers, "MockPlanningProvider", CountingHierarchicalEvidenceProvider)
+    CountingHierarchicalEvidenceProvider.evidence_request_calls = 0
+    write = workflow.runs.write_immutable_artifact
+
+    def interrupt(run_id, path, kind, identifier, value):
+        if kind == "planning_evidence_cycle_record":
+            if cycle_committed:
+                write(run_id, path, kind, identifier, value)
+            raise KeyboardInterrupt
+        return write(run_id, path, kind, identifier, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workflow.runs, "write_immutable_artifact", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            workflow.start(
+                "The mechanism is not sufficiently convincing without a distinguishing observation.",
+                "base", planning_strategy="hierarchical", max_evidence_resolution_cycles=1,
+            )
+    partial, = workflow.runs.list()
+    monkeypatch.setattr(evidence_stage, "resolve_planning_evidence_requests", lambda *args: pytest.fail("retrieval repeated"))
+    resumed = workflow.resume(partial.run_id).run
+    assert resumed.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    assert workflow.runs.evidence_attempt_count(resumed.run_id) == 1
+    assert CountingHierarchicalEvidenceProvider.evidence_request_calls == 1
+    cycle, = workflow.runs.load_evidence_cycles(resumed.run_id)
+    assert cycle.child_context_hash == resumed.context_hash
+    assert scientific_run_status(resumed, workflow.runs)["hierarchical_planning"]["provenance_complete"]

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import spc.workflow.service as workflow_service
+from spc.workflow import providers as workflow_providers
 from spc.approval import MockApprovalProvider
 from spc.models import (
     ApprovalDecision,
@@ -756,7 +756,7 @@ def test_hierarchy_then_revision_uses_revision_loop_without_rerunning_hierarchy(
 
     knowledge, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", BaselineRepairHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", BaselineRepairHierarchicalProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
@@ -769,7 +769,7 @@ def test_hierarchy_then_revision_uses_revision_loop_without_rerunning_hierarchy(
         approval_provider="mock",
         max_plan_revisions=1,
     ).run
-    chain = workflow._load_revision_chain(run.run_id)
+    chain = workflow.runs.load_revision_chain(run.run_id)
 
     assert run.status == ScientificProblemRunStatus.APPROVED
     assert chain is not None and chain.revisions_used == 1
@@ -796,10 +796,10 @@ def test_insufficient_evidence_replans_hierarchy_and_requires_fresh_approval(
     CountingHierarchicalProvider.expansion_calls = 0
     InsufficientThenApproveProvider.review_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", CountingHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", CountingHierarchicalProvider
     )
     monkeypatch.setattr(
-        workflow_service, "MockApprovalProvider", InsufficientThenApproveProvider
+        workflow_providers, "MockApprovalProvider", InsufficientThenApproveProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
@@ -820,18 +820,19 @@ def test_insufficient_evidence_replans_hierarchy_and_requires_fresh_approval(
     assert CountingHierarchicalProvider.expansion_calls == 2
 
 
+@pytest.mark.parametrize("resume_before_approval", [False, True])
 def test_evidence_replan_does_not_reset_global_revision_attempt_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_before_approval: bool
 ) -> None:
     from test_knowledge_retrieval import _prepare
 
     knowledge, *_ = _prepare(tmp_path)
     RevisionThenEvidenceApproval.review_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", BaselineRepairHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", BaselineRepairHierarchicalProvider
     )
     monkeypatch.setattr(
-        workflow_service, "MockApprovalProvider", RevisionThenEvidenceApproval
+        workflow_providers, "MockApprovalProvider", RevisionThenEvidenceApproval
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
@@ -841,11 +842,14 @@ def test_evidence_replan_does_not_reset_global_revision_attempt_budget(
         HIERARCHICAL_REQUEST,
         "base",
         planning_strategy="hierarchical",
-        approval_provider="mock",
+        approval_provider="none" if resume_before_approval else "mock",
         max_plan_revisions=1,
         max_evidence_resolution_cycles=1,
     ).run
-    attempts = workflow._load_revision_attempts(run.run_id)
+    if resume_before_approval:
+        assert run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+        run = workflow.resume(run.run_id, approval_provider="mock").run
+    attempts = workflow.runs.load_revision_attempts(run.run_id)
 
     assert run.status == ScientificProblemRunStatus.REVISION_BLOCKED
     assert run.failure is not None
@@ -864,7 +868,7 @@ def test_human_choice_blocks_expansion_and_resume_does_not_cross_boundary(
     RetainAndHumanChoiceProvider.triage_calls = 0
     RetainAndHumanChoiceProvider.expansion_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", RetainAndHumanChoiceProvider
+        workflow_providers, "MockPlanningProvider", RetainAndHumanChoiceProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
