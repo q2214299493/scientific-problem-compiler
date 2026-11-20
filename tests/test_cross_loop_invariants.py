@@ -583,7 +583,7 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
         "successor-planning/cycle-1/parent-binding.yaml",
         SuccessorParentBinding,
     )
-    from spc.result_feedback.service import _build_content_bound
+    from spc.result_feedback.submission import build_content_bound
 
     def write_incomplete_binding(index: int, parent_plan_id: str) -> None:
         payload = base_binding.model_dump(
@@ -593,7 +593,7 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
             successor_cycle_index=index,
             parent_plan_id=parent_plan_id,
         )
-        binding = _build_content_bound(
+        binding = build_content_bound(
             SuccessorParentBinding, "successor-parent-binding", payload
         )
         cycle_dir = successor_root / f"cycle-{index}"
@@ -612,7 +612,7 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
         mode="python", exclude={"binding_id", "content_hash"}
     )
     binding3_payload["successor_cycle_index"] = 3
-    binding3 = _build_content_bound(
+    binding3 = build_content_bound(
         SuccessorParentBinding, "successor-parent-binding", binding3_payload
     )
     cycle3_payload = cycle1.model_dump(
@@ -622,7 +622,7 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
         parent_binding_id=binding3.binding_id,
         parent_binding_hash=binding3.content_hash,
     )
-    cycle3 = _build_content_bound(
+    cycle3 = build_content_bound(
         SuccessorPlanningCycle, "successor-cycle", cycle3_payload
     )
     cycle3_dir = successor_root / "cycle-3"

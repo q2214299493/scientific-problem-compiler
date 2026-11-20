@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import combinations
 import json
-import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import tempfile
 from typing import Any, Iterable
 
@@ -39,7 +37,6 @@ from ..models import (
     ModelFact,
     PlanCompilationReceipt,
     PlanValidationRecord,
-    PlanRevisionChain,
     PlanningProposalSet,
     ProjectTrustPolicy,
     ReportedResult,
@@ -83,7 +80,7 @@ from ..repositories import (
     KnowledgeRepositories,
     ProjectEvidenceStore,
 )
-from ..serialization import content_hash, file_sha256, load_data, to_primitive
+from ..serialization import content_hash, load_data, to_primitive
 from ..validators import (
     build_plan_validation_record,
     validate_approved_plan_authority,
@@ -92,90 +89,14 @@ from ..validators import (
     validate_question_plan,
 )
 from ..workflow.repository import ScientificProblemRunRepository
-
-
-RESULT_FEEDBACK_VERSION = "result-feedback-1.0.0"
-
-
-class ResultFeedbackError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(f"{code}: {message}")
-
-
-@dataclass(frozen=True)
-class _ParentAuthorityCandidate:
-    run: Any
-    plan: ScientificQuestionPlan
-    compilation_receipt: PlanCompilationReceipt
-    validation_record: PlanValidationRecord
-    review_input: Any
-    review: ApprovalReviewRecord
-    verdict: ApprovalVerdict
-    approval_receipt: IndependentApprovalReceipt
-    gate: GateVerdict
-    policy: ProjectTrustPolicy
-    origin: str
-    origin_ref: str
-    context_relative_path: str
-    evidence_packet_relative_path: str
-    planning_input_relative_path: str
-
-
-@dataclass(frozen=True)
-class _ApprovedParent(_ParentAuthorityCandidate):
-    task: Any
-
-
-def _build_content_bound(model_type, prefix: str, payload: dict[str, Any]):
-    draft = model_type.model_construct(
-        **payload,
-        **{
-            next(
-                name
-                for name in model_type.model_fields
-                if name.endswith("_id") and name not in payload
-            ): "pending",
-            "content_hash": "0" * 64,
-        },
-    )
-    normalized = draft.model_dump(
-        mode="json",
-        exclude={"content_hash", *(
-            name
-            for name in model_type.model_fields
-            if name.endswith("_id") and name not in payload
-        )},
-        exclude_none=True,
-    )
-    id_field = next(
-        name
-        for name in model_type.model_fields
-        if name.endswith("_id") and name not in payload
-    )
-    identifier = f"{prefix}-{content_hash(normalized)[:24]}"
-    value = {id_field: identifier, **normalized}
-    return model_type(**value, content_hash=content_hash(value))
-
-
-def build_result_evidence_submission(**values: Any) -> ResultEvidenceSubmission:
-    """Build the immutable external-declaration envelope without trusting it."""
-
-    payload = ResultEvidenceSubmission.model_construct(
-        submission_id="pending",
-        content_hash="0" * 64,
-        **values,
-    ).model_dump(
-        mode="json",
-        exclude={"submission_id", "content_hash"},
-        exclude_none=True,
-    )
-    submission_id = f"result-submission-{content_hash(payload)[:24]}"
-    return ResultEvidenceSubmission(
-        submission_id=submission_id,
-        **payload,
-        content_hash=content_hash({"submission_id": submission_id, **payload}),
-    )
+from .artifacts import ResultArtifacts
+from .parent_authority import ApprovedParent, ParentAuthority
+from .submission import (
+    RESULT_FEEDBACK_VERSION,
+    ResultFeedbackError,
+    build_content_bound,
+    build_result_evidence_submission,
+)
 
 
 def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
@@ -221,22 +142,6 @@ def _same_difference(
     )
 
 
-def _safe_artifact_path(root: Path, relative_path: str) -> Path:
-    relative = PurePosixPath(relative_path)
-    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-        raise ResultFeedbackError(
-            "UNSAFE_RESULT_ARTIFACT_PATH",
-            f"result artifact path is unsafe: {relative_path}",
-        )
-    path = root.joinpath(*relative.parts)
-    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
-        raise ResultFeedbackError(
-            "UNSAFE_RESULT_ARTIFACT_PATH",
-            f"result artifact escapes its declared root: {relative_path}",
-        )
-    return path
-
-
 class ResultEvidenceIntakeService:
     def __init__(self, *, state_dir: Path, knowledge_dir: Path) -> None:
         self.state_dir = state_dir.resolve()
@@ -247,557 +152,8 @@ class ResultEvidenceIntakeService:
             KnowledgeEvidenceStore(self.knowledge_dir),
             self.project_evidence,
         )
-
-    @staticmethod
-    def _submission_prefix(submission_id: str) -> str:
-        return f"result-evidence/submissions/{submission_id}"
-
-    @staticmethod
-    def _accepted_prefix(submission_id: str) -> str:
-        return f"result-evidence/accepted/s-{submission_id[-12:]}"
-
-    def _load_revision_chain(self, run_id: str) -> PlanRevisionChain | None:
-        try:
-            return self.runs.load_artifact(
-                run_id, "plan-revisions/revision-chain.yaml", PlanRevisionChain
-            )
-        except FileNotFoundError:
-            return None
-
-    def _verify_parent_candidate(
-        self,
-        candidate: _ParentAuthorityCandidate,
-        submission: ResultEvidenceSubmission,
-    ) -> _ApprovedParent:
-        plan = candidate.plan
-        planning_input = self.runs.load_artifact(
-            candidate.run.run_id,
-            candidate.planning_input_relative_path,
-            ScientificPlanningInput,
-        )
-        current_report = validate_question_plan(
-            plan,
-            planning_input.scientific_capabilities,
-            self.composite_evidence,
-        )
-        authority = validate_approved_plan_authority(
-            plan,
-            candidate.validation_record,
-            candidate.review_input,
-            candidate.review,
-            candidate.verdict,
-            candidate.approval_receipt,
-            candidate.gate,
-            candidate.policy,
-            candidate.compilation_receipt,
-            current_report=current_report,
-        )
-        if not authority.valid:
-            issue_codes = {item.code for item in authority.issues}
-            if issue_codes & {
-                "TAMPERED_PLAN_COMPILATION_RECEIPT",
-                "PLAN_COMPILATION_RECEIPT_MISMATCH",
-                "INVALID_PLAN_COMPILATION_ORIGIN",
-            }:
-                category = "PARENT_COMPILATION_RECEIPT_INVALID"
-            elif issue_codes & {
-                "STALE_PLAN_VALIDATION",
-                "PLAN_VALIDATION_RECORD_MISMATCH",
-                "PLAN_VALIDATION_FAILED",
-            }:
-                category = "PARENT_VALIDATION_RECORD_INVALID"
-            elif issue_codes & {
-                "STALE_APPROVAL_REVIEW_INPUT",
-                "STALE_APPROVAL_REVIEW_RECORD",
-                "STALE_INDEPENDENT_APPROVAL_RECEIPT",
-                "INDEPENDENT_REVIEW_INPUT_HASH_MISMATCH",
-                "INDEPENDENT_REVIEW_HASH_MISMATCH",
-                "INDEPENDENT_VERDICT_HASH_MISMATCH",
-                "INDEPENDENT_RECEIPT_CANDIDATE_MISMATCH",
-                "INDEPENDENT_PROVIDER_BINDING_MISMATCH",
-                "INDEPENDENT_APPROVER_BINDING_MISMATCH",
-                "INDEPENDENT_VERDICT_REVIEW_MISMATCH",
-            }:
-                category = "PARENT_APPROVAL_CHAIN_INVALID"
-            else:
-                category = "PARENT_GATE_INVALID"
-            raise ResultFeedbackError(
-                category,
-                "parent plan approval authority failed validation: "
-                + ", ".join(item.code for item in authority.issues),
-            )
-        task = next(
-            (item for item in plan.tasks if item.task_id == submission.task_id), None
-        )
-        if task is None:
-            raise ResultFeedbackError(
-                "FABRICATED_TASK_ID",
-                "result task does not belong to the exact parent plan",
-            )
-        if task.capability_id != submission.capability_id:
-            raise ResultFeedbackError(
-                "WRONG_CAPABILITY",
-                "result capability does not match the approved parent task",
-            )
-        return _ApprovedParent(**candidate.__dict__, task=task)
-
-    def _successor_parent_candidates(
-        self,
-        run: Any,
-        expected: tuple[str, str, str],
-    ) -> list[_ParentAuthorityCandidate]:
-        candidates: list[_ParentAuthorityCandidate] = []
-        root = self.runs.resolve_artifact_path(run.run_id, "successor-planning")
-        if not root.exists():
-            return candidates
-        for cycle_path in sorted(root.glob("cycle-*/cycle.yaml")):
-            prefix = cycle_path.parent.relative_to(self.runs.run_dir(run.run_id)).as_posix()
-            cycle = self.runs.load_artifact(
-                run.run_id, f"{prefix}/cycle.yaml", SuccessorPlanningCycle
-            )
-            if cycle.selected_plan_id != expected[0]:
-                continue
-            plan = self.runs.load_artifact(
-                run.run_id,
-                f"{prefix}/candidates/{cycle.selected_plan_id}.yaml",
-                ScientificQuestionPlan,
-            )
-            if (plan.plan_id, plan.version, content_hash(plan)) != expected:
-                continue
-            if cycle.status != SuccessorPlanningStatus.APPROVED:
-                raise ResultFeedbackError(
-                    "PARENT_SUCCESSOR_NOT_APPROVED",
-                    "the exact successor cycle did not pass independent approval",
-                )
-            binding = self.runs.load_artifact(
-                run.run_id,
-                f"{prefix}/parent-binding.yaml",
-                SuccessorParentBinding,
-            )
-            update = self.runs.load_artifact(
-                run.run_id,
-                f"{prefix}/research-update.yaml",
-                ResearchUpdate,
-            )
-            try:
-                cycle_index = int(prefix.rsplit("cycle-", 1)[1])
-            except ValueError as error:
-                raise ResultFeedbackError(
-                    "SUCCESSOR_PARENT_AUTHORITY_INVALID",
-                    "successor cycle directory has an invalid index",
-                ) from error
-            context = self.runs.load_artifact(
-                run.run_id, f"{prefix}/context.yaml", ScientificContextPacket
-            )
-            packet = self.runs.load_artifact(
-                run.run_id,
-                f"{prefix}/evidence-packet.yaml",
-                ScientificEvidencePacket,
-            )
-            planning_input = self.runs.load_artifact(
-                run.run_id,
-                f"{prefix}/planning-input.yaml",
-                ScientificPlanningInput,
-            )
-            proposal = self.runs.load_artifact(
-                run.run_id,
-                f"{prefix}/planning-proposal.yaml",
-                PlanningProposalSet,
-            )
-            receipt_paths = tuple(
-                cycle_path.parent.joinpath("compilation-receipts").glob("*.yaml")
-            )
-            receipts = tuple(
-                self.runs.load_artifact(
-                    run.run_id,
-                    path.relative_to(self.runs.run_dir(run.run_id)).as_posix(),
-                    PlanCompilationReceipt,
-                )
-                for path in receipt_paths
-            )
-            matching_receipts = tuple(
-                item
-                for item in receipts
-                if (item.plan_id, item.plan_hash) == (expected[0], expected[2])
-            )
-            validation_paths = tuple(
-                cycle_path.parent.joinpath("validation").glob("*.yaml")
-            )
-            validations = tuple(
-                self.runs.load_artifact(
-                    run.run_id,
-                    path.relative_to(self.runs.run_dir(run.run_id)).as_posix(),
-                    PlanValidationRecord,
-                )
-                for path in validation_paths
-            )
-            matching_validations = tuple(
-                item
-                for item in validations
-                if (item.plan_id, item.plan_version, item.plan_content_hash) == expected
-            )
-            if len(matching_receipts) != 1 or len(matching_validations) != 1:
-                raise ResultFeedbackError(
-                    "SUCCESSOR_PARENT_AUTHORITY_INVALID",
-                    "successor plan must bind one compilation receipt and validation record",
-                )
-            if (
-                binding.parent_run_id != run.run_id
-                or binding.successor_cycle_index != cycle_index
-                or (cycle.parent_binding_id, cycle.parent_binding_hash)
-                != (binding.binding_id, binding.content_hash)
-                or (cycle.research_update_id, cycle.research_update_hash)
-                != (update.update_id, update.content_hash)
-                or (update.parent_binding_id, update.parent_binding_hash)
-                != (binding.binding_id, binding.content_hash)
-                or plan.follow_up_of != binding.parent_plan_id
-                or (cycle.context_id, cycle.context_hash)
-                != (context.context_id, context.content_hash)
-                or (cycle.evidence_packet_id, cycle.evidence_packet_hash)
-                != (packet.packet_id, packet.content_hash)
-                or (cycle.planning_input_id, cycle.planning_input_hash)
-                != (planning_input.planning_input_id, planning_input.content_hash)
-                or (cycle.planning_proposal_id, cycle.planning_proposal_hash)
-                != (proposal.proposal_id, content_hash(proposal))
-                or (cycle.selected_plan_id, cycle.selected_plan_hash)
-                != (plan.plan_id, content_hash(plan))
-                or plan.plan_id not in cycle.candidate_plan_ids
-                or cycle.candidate_plan_hashes[
-                    cycle.candidate_plan_ids.index(plan.plan_id)
-                ]
-                != content_hash(plan)
-            ):
-                raise ResultFeedbackError(
-                    "SUCCESSOR_PARENT_AUTHORITY_INVALID",
-                    "successor cycle lineage or artifact binding is invalid",
-                )
-            for submission_id, submission_hash, receipt_id, receipt_hash in zip(
-                binding.result_submission_ids,
-                binding.result_submission_hashes,
-                binding.materialization_receipt_ids,
-                binding.materialization_receipt_hashes,
-                strict=True,
-            ):
-                source_submission = self.runs.load_artifact(
-                    run.run_id,
-                    f"{self._submission_prefix(submission_id)}/submission.yaml",
-                    ResultEvidenceSubmission,
-                )
-                source_receipt = self.runs.load_artifact(
-                    run.run_id,
-                    f"{self._accepted_prefix(submission_id)}/receipt.yaml",
-                    ResultEvidenceMaterializationReceipt,
-                )
-                source_parent = self._load_parent(source_submission)
-                if (
-                    source_submission.content_hash != submission_hash
-                    or source_receipt.receipt_id != receipt_id
-                    or source_receipt.content_hash != receipt_hash
-                    or source_receipt.submission_id != source_submission.submission_id
-                    or source_receipt.submission_hash != source_submission.content_hash
-                    or (
-                        source_submission.parent_plan_id,
-                        source_submission.parent_plan_version,
-                        source_submission.parent_plan_hash,
-                    )
-                    != (
-                        binding.parent_plan_id,
-                        binding.parent_plan_version,
-                        binding.parent_plan_hash,
-                    )
-                    or (
-                        source_parent.plan.plan_id,
-                        source_parent.plan.version,
-                        content_hash(source_parent.plan),
-                    )
-                    != (
-                        binding.parent_plan_id,
-                        binding.parent_plan_version,
-                        binding.parent_plan_hash,
-                    )
-                ):
-                    raise ResultFeedbackError(
-                        "SUCCESSOR_PARENT_AUTHORITY_INVALID",
-                        "successor parent binding does not match its source results",
-                    )
-            approval_prefix = f"{prefix}/approval"
-            review_input = parse_approval_review_input(
-                load_data(
-                    self.runs.resolve_artifact_path(
-                        run.run_id, f"{approval_prefix}/approval-review-input.yaml"
-                    )
-                )
-            )
-            review = self.runs.load_artifact(
-                run.run_id,
-                f"{approval_prefix}/approval-review.yaml",
-                ApprovalReviewRecord,
-            )
-            verdict = self.runs.load_artifact(
-                run.run_id,
-                f"{approval_prefix}/approval-verdict.yaml",
-                ApprovalVerdict,
-            )
-            approval_receipt = self.runs.load_artifact(
-                run.run_id,
-                f"{approval_prefix}/independent-approval-receipt.yaml",
-                IndependentApprovalReceipt,
-            )
-            gate = self.runs.load_artifact(
-                run.run_id, f"{approval_prefix}/plan-gate.yaml", GateVerdict
-            )
-            policy = self.runs.load_artifact(
-                run.run_id,
-                f"{approval_prefix}/project-trust-policy.yaml",
-                ProjectTrustPolicy,
-            )
-            if (
-                (cycle.approval_review_id, cycle.approval_review_hash)
-                != (review.review_id, review.content_hash)
-                or (cycle.approval_verdict_id, cycle.approval_verdict_hash)
-                != (verdict.verdict_id, content_hash(verdict))
-                or (cycle.approval_receipt_id, cycle.approval_receipt_hash)
-                != (approval_receipt.receipt_id, approval_receipt.content_hash)
-                or (cycle.gate_id, cycle.gate_hash)
-                != (gate.gate_id, content_hash(gate))
-            ):
-                raise ResultFeedbackError(
-                    "SUCCESSOR_PARENT_AUTHORITY_INVALID",
-                    "successor cycle does not bind its independent approval artifacts",
-                )
-            candidates.append(
-                _ParentAuthorityCandidate(
-                    run=run,
-                    plan=plan,
-                    compilation_receipt=matching_receipts[0],
-                    validation_record=matching_validations[0],
-                    review_input=review_input,
-                    review=review,
-                    verdict=verdict,
-                    approval_receipt=approval_receipt,
-                    gate=gate,
-                    policy=policy,
-                    origin="successor_cycle",
-                    origin_ref=cycle.cycle_id,
-                    context_relative_path=f"{prefix}/context.yaml",
-                    evidence_packet_relative_path=f"{prefix}/evidence-packet.yaml",
-                    planning_input_relative_path=f"{prefix}/planning-input.yaml",
-                )
-            )
-        return candidates
-
-    def _load_parent(self, submission: ResultEvidenceSubmission) -> _ApprovedParent:
-        try:
-            run = self.runs.get(submission.parent_run_id)
-        except FileNotFoundError as error:
-            raise ResultFeedbackError(
-                "PARENT_RUN_NOT_FOUND", submission.parent_run_id
-            ) from error
-        expected = (
-            submission.parent_plan_id,
-            submission.parent_plan_version,
-            submission.parent_plan_hash,
-        )
-        candidates: list[_ParentAuthorityCandidate] = []
-        chain = self._load_revision_chain(run.run_id)
-        if chain is not None:
-            for round_record in chain.rounds:
-                if any(
-                    value is None
-                    for value in (
-                        round_record.approval_review_input,
-                        round_record.approval_review_record,
-                        round_record.approval_verdict,
-                        round_record.approval_receipt,
-                        round_record.gate,
-                        round_record.trust_policy,
-                    )
-                ):
-                    continue
-                plan = self.runs.load_artifact(
-                    run.run_id,
-                    round_record.candidate_plan.relative_path,
-                    ScientificQuestionPlan,
-                )
-                if (plan.plan_id, plan.version, content_hash(plan)) != expected:
-                    continue
-                candidates.append(
-                    _ParentAuthorityCandidate(
-                        run=run,
-                        plan=plan,
-                        compilation_receipt=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.compilation_receipt.relative_path,
-                            PlanCompilationReceipt,
-                        ),
-                        validation_record=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.validation_record.relative_path,
-                            PlanValidationRecord,
-                        ),
-                        review_input=parse_approval_review_input(
-                            load_data(
-                                self.runs.resolve_artifact_path(
-                                    run.run_id,
-                                    round_record.approval_review_input.relative_path,
-                                )
-                            )
-                        ),
-                        review=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.approval_review_record.relative_path,
-                            ApprovalReviewRecord,
-                        ),
-                        verdict=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.approval_verdict.relative_path,
-                            ApprovalVerdict,
-                        ),
-                        approval_receipt=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.approval_receipt.relative_path,
-                            IndependentApprovalReceipt,
-                        ),
-                        gate=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.gate.relative_path,
-                            GateVerdict,
-                        ),
-                        policy=self.runs.load_artifact(
-                            run.run_id,
-                            round_record.trust_policy.relative_path,
-                            ProjectTrustPolicy,
-                        ),
-                        origin=(
-                            "base_run_plan"
-                            if round_record.round_index == 0
-                            else "revision_round"
-                        ),
-                        origin_ref=f"revision-round-{round_record.round_index}",
-                        context_relative_path="context.yaml",
-                        evidence_packet_relative_path="evidence-packet.yaml",
-                        planning_input_relative_path="planning-input.yaml",
-                    )
-                )
-        else:
-            for index, binding in enumerate(run.candidate_plans):
-                plan = self.runs.load_artifact(
-                    run.run_id, binding.relative_path, ScientificQuestionPlan
-                )
-                if (plan.plan_id, plan.version, content_hash(plan)) != expected:
-                    continue
-                try:
-                    candidates.append(
-                        _ParentAuthorityCandidate(
-                            run=run,
-                            plan=plan,
-                            compilation_receipt=self.runs.load_artifact(
-                                run.run_id,
-                                run.candidate_compilation_receipts[index].relative_path,
-                                PlanCompilationReceipt,
-                            ),
-                            validation_record=self.runs.load_artifact(
-                                run.run_id,
-                                run.plan_validation_records[index].relative_path,
-                                PlanValidationRecord,
-                            ),
-                            review_input=parse_approval_review_input(
-                                load_data(
-                                    self.runs.resolve_artifact_path(
-                                        run.run_id,
-                                        "approval/approval-review-input.yaml",
-                                    )
-                                )
-                            ),
-                            review=self.runs.load_artifact(
-                                run.run_id,
-                                "approval/approval-review.yaml",
-                                ApprovalReviewRecord,
-                            ),
-                            verdict=self.runs.load_artifact(
-                                run.run_id,
-                                "approval/approval-verdict.yaml",
-                                ApprovalVerdict,
-                            ),
-                            approval_receipt=self.runs.load_artifact(
-                                run.run_id,
-                                "approval/independent-approval-receipt.yaml",
-                                IndependentApprovalReceipt,
-                            ),
-                            gate=self.runs.load_artifact(
-                                run.run_id,
-                                "approval/plan-gate.yaml",
-                                GateVerdict,
-                            ),
-                            policy=self.runs.load_artifact(
-                                run.run_id,
-                                "approval/project-trust-policy.yaml",
-                                ProjectTrustPolicy,
-                            ),
-                            origin="base_run_plan",
-                            origin_ref=binding.artifact_id,
-                            context_relative_path="context.yaml",
-                            evidence_packet_relative_path="evidence-packet.yaml",
-                            planning_input_relative_path="planning-input.yaml",
-                        )
-                    )
-                except FileNotFoundError:
-                    continue
-        candidates.extend(self._successor_parent_candidates(run, expected))
-        if len(candidates) != 1:
-            raise ResultFeedbackError(
-                "PARENT_PLAN_BINDING_INVALID",
-                "result must bind exactly one approved plan version in the parent run",
-            )
-        return self._verify_parent_candidate(candidates[0], submission)
-
-    def _verify_and_archive_artifacts(
-        self,
-        submission: ResultEvidenceSubmission,
-        artifact_root: Path,
-    ) -> tuple[ResultIntakeIssue, ...]:
-        issues: list[ResultIntakeIssue] = []
-        root = artifact_root.resolve()
-        for artifact in submission.source_artifact_manifest:
-            try:
-                path = _safe_artifact_path(root, artifact.relative_path)
-                if not path.is_file():
-                    raise FileNotFoundError(path)
-                if path.stat().st_size != artifact.size_bytes:
-                    raise ValueError("artifact byte size does not match manifest")
-                if file_sha256(path) != artifact.sha256:
-                    raise ValueError("artifact checksum does not match manifest")
-                destination = self.runs.resolve_artifact_path(
-                    submission.parent_run_id,
-                    f"{self._submission_prefix(submission.submission_id)}/raw/"
-                    f"{artifact.relative_path}",
-                )
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                content = path.read_bytes()
-                if destination.exists():
-                    if destination.is_symlink() or destination.read_bytes() != content:
-                        raise ValueError("archived result artifact conflicts with existing bytes")
-                else:
-                    with tempfile.NamedTemporaryFile(
-                        mode="wb",
-                        prefix=".result-artifact-",
-                        dir=destination.parent,
-                        delete=False,
-                    ) as handle:
-                        handle.write(content)
-                        temporary = Path(handle.name)
-                    os.replace(temporary, destination)
-                    os.chmod(destination, 0o444)
-                if file_sha256(destination) != artifact.sha256:
-                    raise ValueError("archived result artifact failed checksum verification")
-            except (FileNotFoundError, OSError, ValueError, ResultFeedbackError) as error:
-                issues.append(
-                    ResultIntakeIssue(
-                        code="RESULT_ARTIFACT_INTEGRITY_FAILURE",
-                        message=f"{artifact.relative_path}: {error}",
-                    )
-                )
-        return tuple(issues)
+        self.artifacts = ResultArtifacts(self.runs)
+        self.parent_authority = ParentAuthority(self.runs, self.composite_evidence, self.artifacts)
 
     @staticmethod
     def _comparison(
@@ -874,7 +230,7 @@ class ResultEvidenceIntakeService:
                 for item in approved
             ),
         }
-        return _build_content_bound(
+        return build_content_bound(
             ResultContextComparison,
             "result-context-comparison",
             payload,
@@ -883,7 +239,7 @@ class ResultEvidenceIntakeService:
     @staticmethod
     def _admissibility_issues(
         submission: ResultEvidenceSubmission,
-        parent: _ApprovedParent,
+        parent: ApprovedParent,
     ) -> tuple[ResultIntakeIssue, ...]:
         issues: list[ResultIntakeIssue] = []
         observed = {
@@ -946,7 +302,7 @@ class ResultEvidenceIntakeService:
             raise ResultFeedbackError(
                 "PARENT_RUN_NOT_FOUND", submission.parent_run_id
             ) from error
-        prefix = self._submission_prefix(submission.submission_id)
+        prefix = self.artifacts.submission_prefix(submission.submission_id)
         with self.runs.acquire_run_lock(submission.parent_run_id):
             self.runs.write_immutable_artifact(
                 submission.parent_run_id,
@@ -956,13 +312,13 @@ class ResultEvidenceIntakeService:
                 submission,
             )
             content_issues = list(
-                self._verify_and_archive_artifacts(submission, artifact_root)
+                self.artifacts.verify_and_archive_artifacts(submission, artifact_root)
             )
-            parent: _ApprovedParent | None = None
+            parent: ApprovedParent | None = None
             plan_issues: list[ResultIntakeIssue] = []
             if not content_issues:
                 try:
-                    parent = self._load_parent(submission)
+                    parent = self.parent_authority.load_parent(submission)
                     if submission.execution_proposal_id is not None:
                         if execution_proposal is None:
                             raise ResultFeedbackError(
@@ -1081,7 +437,7 @@ class ResultEvidenceIntakeService:
                 "issues": issues,
                 "status": status,
             }
-            assessment = _build_content_bound(
+            assessment = build_content_bound(
                 ResultEvidenceAssessment, "result-assessment", payload
             )
             self.runs.write_immutable_artifact(
@@ -1100,69 +456,6 @@ class ResultEvidenceIntakeService:
                     comparison,
                 )
             return assessment
-
-    def _load_submission(self, run_id: str, submission_id: str) -> ResultEvidenceSubmission:
-        return self.runs.load_artifact(
-            run_id,
-            f"{self._submission_prefix(submission_id)}/submission.yaml",
-            ResultEvidenceSubmission,
-        )
-
-    def _load_assessment(self, run_id: str, submission_id: str) -> ResultEvidenceAssessment:
-        return self.runs.load_artifact(
-            run_id,
-            f"{self._submission_prefix(submission_id)}/assessment.yaml",
-            ResultEvidenceAssessment,
-        )
-
-    def _verify_archived_artifacts(
-        self, submission: ResultEvidenceSubmission
-    ) -> None:
-        for artifact in submission.source_artifact_manifest:
-            archived = self.runs.resolve_artifact_path(
-                submission.parent_run_id,
-                f"{self._submission_prefix(submission.submission_id)}/raw/"
-                f"{artifact.relative_path}",
-            )
-            if (
-                archived.is_symlink()
-                or not archived.is_file()
-                or archived.stat().st_size != artifact.size_bytes
-                or file_sha256(archived) != artifact.sha256
-            ):
-                raise ResultFeedbackError(
-                    "TAMPERED_ACCEPTED_RESULT_ARTIFACT",
-                    f"archived result changed: {artifact.relative_path}",
-                )
-
-    def _current_curation(
-        self, run_id: str, submission_id: str
-    ) -> KnowledgeCurationRecord | None:
-        root = self.runs.resolve_artifact_path(
-            run_id, f"result-evidence/curations/{submission_id}"
-        )
-        if not root.exists():
-            return None
-        records = tuple(
-            self.runs.load_artifact(
-                run_id,
-                f"result-evidence/curations/{submission_id}/{path.name}",
-                KnowledgeCurationRecord,
-            )
-            for path in sorted(root.glob("*.yaml"))
-        )
-        superseded = {
-            item.supersedes_curation_id
-            for item in records
-            if item.supersedes_curation_id is not None
-        }
-        current = tuple(item for item in records if item.curation_id not in superseded)
-        if len(current) != 1:
-            raise ResultFeedbackError(
-                "AMBIGUOUS_RESULT_CURATION",
-                "result curation history must have exactly one current record",
-            )
-        return current[0]
 
     @staticmethod
     def _curation_record(
@@ -1215,8 +508,8 @@ class ResultEvidenceIntakeService:
                 "result intake may only be explicitly accepted or rejected",
             )
         with self.runs.acquire_run_lock(parent_run_id):
-            submission = self._load_submission(parent_run_id, submission_id)
-            assessment = self._load_assessment(parent_run_id, submission_id)
+            submission = self.artifacts.load_submission(parent_run_id, submission_id)
+            assessment = self.artifacts.load_assessment(parent_run_id, submission_id)
             if (
                 assessment.submission_hash != submission.content_hash
                 or assessment.parent_run_id != parent_run_id
@@ -1235,15 +528,11 @@ class ResultEvidenceIntakeService:
                     "blocked result intake cannot be accepted",
                 )
             if status == CurationStatus.ACCEPTED:
-                self._verify_archived_artifacts(submission)
-            current = self._current_curation(parent_run_id, submission_id)
+                self.artifacts.verify_archived_artifacts(submission)
+            current = self.artifacts.current_curation(parent_run_id, submission_id)
             if current is not None and current.status == status:
                 receipt = (
-                    self.runs.load_artifact(
-                        parent_run_id,
-                        f"{self._accepted_prefix(submission_id)}/receipt.yaml",
-                        ResultEvidenceMaterializationReceipt,
-                    )
+                    self.artifacts.load_receipt(parent_run_id, submission_id)
                     if status == CurationStatus.ACCEPTED
                     else None
                 )
@@ -1275,7 +564,7 @@ class ResultEvidenceIntakeService:
         assessment: ResultEvidenceAssessment,
         curation: KnowledgeCurationRecord,
     ) -> ResultEvidenceMaterializationReceipt:
-        parent = self._load_parent(submission)
+        parent = self.parent_authority.load_parent(submission)
         method_text = "method_context = " + json.dumps(
             to_primitive(submission.method_fingerprint.attributes),
             sort_keys=True,
@@ -1444,7 +733,7 @@ class ResultEvidenceIntakeService:
                         )
                     )
 
-        prefix = self._accepted_prefix(submission.submission_id)
+        prefix = self.artifacts.accepted_prefix(submission.submission_id)
         self.runs.write_immutable_artifact(
             submission.parent_run_id,
             f"{prefix}/m/{method_fact.fact_id[-16:]}.yaml",
@@ -1507,7 +796,7 @@ class ResultEvidenceIntakeService:
             "model_fact_hashes": {model_fact.fact_id: content_hash(model_fact)},
             "missing_observables": missing,
         }
-        receipt = _build_content_bound(
+        receipt = build_content_bound(
             ResultEvidenceMaterializationReceipt,
             "result-materialization",
             payload,
@@ -1893,7 +1182,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 "candidate_plan_hashes": tuple(content_hash(item) for item in plans),
                 "status": SuccessorPlanningStatus.HUMAN_SCIENTIFIC_DECISION_REQUIRED,
             }
-            planning_outcome = _build_content_bound(
+            planning_outcome = build_content_bound(
                 SuccessorPlanningCycle, "successor-cycle", payload
             )
             self._validate_reusable_cycle(
@@ -2019,7 +1308,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 "gate_hash": content_hash(gate),
                 "status": status,
             }
-            cycle = _build_content_bound(
+            cycle = build_content_bound(
                 SuccessorPlanningCycle, "successor-cycle", payload
             )
             self._validate_reusable_cycle(
@@ -2036,15 +1325,6 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 "SUCCESSOR_APPROVAL_OUTPUT_INCOMPLETE", str(error)
             ) from error
 
-    def _load_receipt(
-        self, run_id: str, submission_id: str
-    ) -> ResultEvidenceMaterializationReceipt:
-        return self.runs.load_artifact(
-            run_id,
-            f"{self._accepted_prefix(submission_id)}/receipt.yaml",
-            ResultEvidenceMaterializationReceipt,
-        )
-
     def _load_materialized_records(
         self,
         run_id: str,
@@ -2056,7 +1336,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
         tuple[MethodFact, ...],
         tuple[ModelFact, ...],
     ]:
-        prefix = self._accepted_prefix(submission_id)
+        prefix = self.artifacts.accepted_prefix(submission_id)
         results = tuple(
             self.runs.load_artifact(
                 run_id,
@@ -2380,7 +1660,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
             "why_successor_plan_is_needed": why,
             "recommended_status": status,
         }
-        return _build_content_bound(ResearchUpdate, "research-update", payload)
+        return build_content_bound(ResearchUpdate, "research-update", payload)
 
     def _successor_packet(
         self,
@@ -2644,14 +1924,14 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
             )
         with self.runs.acquire_run_lock(parent_run_id):
             submissions = tuple(
-                self._load_submission(parent_run_id, item) for item in submission_ids
+                self.artifacts.load_submission(parent_run_id, item) for item in submission_ids
             )
             if any(item.parent_run_id != parent_run_id for item in submissions):
                 raise ResultFeedbackError(
                     "CROSS_RUN_RESULT",
                     "all successor results must belong to the requested parent run",
                 )
-            parent = self._load_parent(submissions[0])
+            parent = self.parent_authority.load_parent(submissions[0])
             if any(
                 (
                     item.parent_plan_id,
@@ -2670,10 +1950,10 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     "successor results must bind the same exact parent plan version",
                 )
             receipts = tuple(
-                self._load_receipt(parent_run_id, item) for item in submission_ids
+                self.artifacts.load_receipt(parent_run_id, item) for item in submission_ids
             )
             curations = tuple(
-                self._current_curation(parent_run_id, item) for item in submission_ids
+                self.artifacts.current_curation(parent_run_id, item) for item in submission_ids
             )
             if any(item is None or item.status != CurationStatus.ACCEPTED for item in curations):
                 raise ResultFeedbackError(
@@ -2695,7 +1975,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                         "RESULT_MATERIALIZATION_BINDING_INVALID",
                         "accepted result receipt does not bind its exact submission/curation/plan",
                     )
-                self._verify_archived_artifacts(submission)
+                self.artifacts.verify_archived_artifacts(submission)
 
             bound_results = tuple(
                 sorted(
@@ -2738,7 +2018,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     planning_provider_config(planner)
                 ),
             }
-            invocation = _build_content_bound(
+            invocation = build_content_bound(
                 SuccessorPlanningInvocation,
                 "successor-invocation",
                 invocation_payload,
@@ -2896,7 +2176,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                 ),
                 "successor_cycle_index": cycle_index,
             }
-            binding = _build_content_bound(
+            binding = build_content_bound(
                 SuccessorParentBinding,
                 "successor-parent-binding",
                 binding_payload,
@@ -3057,7 +2337,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     "planning_input_hash": planning_input.content_hash,
                     "status": update.recommended_status,
                 }
-                cycle = _build_content_bound(
+                cycle = build_content_bound(
                     SuccessorPlanningCycle, "successor-cycle", cycle_payload
                 )
                 self.runs.write_immutable_artifact(
@@ -3241,7 +2521,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                         "candidate_plan_hashes": tuple(content_hash(item) for item in compilation.candidates),
                         "status": status,
                     }
-                    cycle = _build_content_bound(
+                    cycle = build_content_bound(
                         SuccessorPlanningCycle, "successor-cycle", cycle_payload
                     )
                     self.runs.write_immutable_artifact(
@@ -3275,7 +2555,7 @@ class SuccessorPlanningService(ResultEvidenceIntakeService):
                     else "deterministic_single_candidate"
                 ),
             }
-            selection = _build_content_bound(
+            selection = build_content_bound(
                 SuccessorCandidateSelection,
                 "successor-selection",
                 selection_payload,
@@ -3624,3 +2904,13 @@ def result_feedback_status(
             "triggering_result_ids": triggering_result_ids,
         },
     }
+
+
+__all__ = [
+    "RESULT_FEEDBACK_VERSION",
+    "ResultEvidenceIntakeService",
+    "ResultFeedbackError",
+    "SuccessorPlanningService",
+    "build_result_evidence_submission",
+    "result_feedback_status",
+]
