@@ -138,3 +138,43 @@ def test_literature_module_dependencies_are_acyclic():
                 imports.update(alias.name for alias in node.names)
         dependencies[module] = imports.intersection(modules)
     assert set(TopologicalSorter(dependencies).static_order()) == set(modules)
+
+
+@pytest.mark.parametrize(("domain", "expected_files"), [("pdf", 17), ("html", 39), ("docx", 20)])
+def test_reads_persisted_baseline_without_rewriting_records(tmp_path, domain, expected_files):
+    from zipfile import ZipFile
+
+    from spc.knowledge.ingestion import validate_literature_supplementary_source
+    from spc.knowledge.representation import validate_literature_representation
+    from spc.knowledge.structure import validate_document_structure
+    from spc.serialization import file_sha256
+
+    archive = Path(__file__).parent / "fixtures" / "knowledge-01a-3f53101.zip"
+    with ZipFile(archive) as fixture:
+        for item in fixture.infolist():
+            if item.filename.startswith(domain + "/"):
+                fixture.extract(item, tmp_path)
+    root = tmp_path / domain
+
+    def file_hashes():
+        return {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
+
+    before = file_hashes()
+    assert len(before) == expected_files
+    repositories = KnowledgeRepositories(root)
+    store = repositories.evidence_store
+    (representation,) = repositories.literature_representation_refs.list()
+    assert validate_literature_representation(representation, repositories, store) == representation
+    if domain == "docx":
+        (supplement,) = repositories.literature_supplementary_sources.list()
+        _, canonical, source = validate_literature_supplementary_source(supplement, repositories, store)
+        assert source.content_sha256 == canonical.text_sha256
+    else:
+        (structure,) = repositories.document_structure_artifacts.list()
+        assert validate_document_structure(structure.structure_id, repositories, store) == structure
+    if domain == "html":
+        locators = repositories.structured_evidence_locators.list()
+        assert len(locators) == 2
+        for locator in locators:
+            assert verify_structured_evidence_locator(locator, repositories, store) == locator
+    assert file_hashes() == before
