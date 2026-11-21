@@ -84,25 +84,22 @@ from .submission import (
 )
 
 
-class SuccessorPlanningService:
-    def __init__(self, *, state_dir: Path, knowledge_dir: Path) -> None:
-        self.state_dir = state_dir.resolve()
-        self.knowledge_dir = knowledge_dir.resolve()
-        self.runs = ScientificProblemRunRepository(self.state_dir)
-        self.composite_evidence = CompositeEvidenceStore(
-            KnowledgeEvidenceStore(self.knowledge_dir),
-            ProjectEvidenceStore(self.state_dir),
-        )
-        self.artifacts = ResultArtifacts(self.runs)
-        self.parent_authority = ParentAuthority(self.runs, self.composite_evidence, self.artifacts)
+class SuccessorStageReader:
+    """Verify persisted successor stages without reserving calls or writing artifacts."""
 
-    def _validate_reusable_cycle(
+    def __init__(
+        self, runs: ScientificProblemRunRepository, evidence: CompositeEvidenceStore
+    ) -> None:
+        self.runs = runs
+        self.composite_evidence = evidence
+
+    def validate_reusable_cycle(
         self,
         *,
         parent_run_id: str,
         prefix: str,
         cycle: SuccessorPlanningCycle,
-        invocation: SuccessorPlanningInvocation,
+        invocation: SuccessorPlanningInvocation | None,
     ) -> None:
         try:
             binding = self.runs.load_artifact(
@@ -126,7 +123,13 @@ class SuccessorPlanningService:
                 f"{prefix}/planning-input.yaml",
                 ScientificPlanningInput,
             )
-            if (
+            if binding.parent_run_id != parent_run_id:
+                raise ValueError("successor binding belongs to another parent run")
+            if (cycle.invocation_id, cycle.invocation_hash) != (
+                (invocation.invocation_id, invocation.content_hash) if invocation else (None, None)
+            ):
+                raise ValueError("successor cycle does not bind its exact invocation")
+            if invocation is not None and (
                 binding.parent_run_id,
                 binding.parent_plan_id,
                 binding.parent_plan_version,
@@ -175,12 +178,23 @@ class SuccessorPlanningService:
                 update.parent_binding_hash,
             ) != (binding.binding_id, binding.content_hash):
                 raise ValueError("research update does not bind the successor parent")
+            if (planning_input.context_id, planning_input.context_hash) != (
+                context.context_id, context.content_hash
+            ) or (planning_input.evidence_packet_id, planning_input.evidence_packet_hash) != (
+                packet.packet_id, packet.content_hash
+            ):
+                raise ValueError("successor planning input does not bind its context and evidence")
             if not validate_evidence_packet_integrity(
                 packet, context, self.composite_evidence
             ).valid:
                 raise ValueError("successor evidence packet failed integrity validation")
 
             plans: tuple[ScientificQuestionPlan, ...] = ()
+            if cycle.planning_proposal_id is None and (
+                cycle.status != update.recommended_status
+                or update.recommended_status == SuccessorPlanningStatus.FOLLOW_UP_PLAN_REQUIRED
+            ):
+                raise ValueError("successor cycle has no verified planning outcome")
             if cycle.planning_proposal_id is not None:
                 proposal = self.runs.load_artifact(
                     parent_run_id,
@@ -192,10 +206,17 @@ class SuccessorPlanningService:
                     cycle.planning_proposal_hash,
                 ) != (proposal.proposal_id, content_hash(proposal)):
                     raise ValueError("successor proposal binding is invalid")
+                if (
+                    proposal.provider_config.get("successor_parent_binding_id"),
+                    proposal.provider_config.get("successor_parent_binding_hash"),
+                ) != (binding.binding_id, binding.content_hash):
+                    raise ValueError("successor proposal does not bind its parent")
                 if not validate_planning_proposal_set(
                     proposal, planning_input
                 ).valid:
                     raise ValueError("stored successor proposal is invalid")
+                if len(cycle.candidate_plan_ids) != len(proposal.candidates):
+                    raise ValueError("successor candidate inventory does not match the proposal")
                 plans = tuple(
                     self.runs.load_artifact(
                         parent_run_id,
@@ -291,8 +312,8 @@ class SuccessorPlanningService:
                 ) != (
                     selection.selection_id,
                     selection.content_hash,
-                    invocation.invocation_id,
-                    invocation.content_hash,
+                    cycle.invocation_id,
+                    cycle.invocation_hash,
                     cycle.planning_proposal_id,
                     cycle.planning_proposal_hash,
                     selected.plan_id,
@@ -351,6 +372,11 @@ class SuccessorPlanningService:
                 content_hash(gate),
             ):
                 raise ValueError("successor cycle approval binding is invalid")
+            expected_status = (
+                SuccessorPlanningStatus.APPROVED if gate.passed else SuccessorPlanningStatus.REJECTED
+            )
+            if cycle.status != expected_status:
+                raise ValueError("successor cycle status does not match the approval gate")
             authority = validate_approved_plan_authority(
                 selected,
                 validations[selected.plan_id],
@@ -374,13 +400,13 @@ class SuccessorPlanningService:
                 "SUCCESSOR_CYCLE_INTEGRITY_INVALID", str(error)
             ) from error
 
-    def _load_complete_planning_stage(
+    def load_complete_planning_stage(
         self,
         *,
         parent_run_id: str,
         prefix: str,
         invocation: SuccessorPlanningInvocation,
-        planner: Any,
+        recorded_outcome: SuccessorPlanningCycle | None = None,
     ) -> tuple[CompilationResult, tuple[PlanValidationRecord, ...]]:
         """Load and verify a locally complete planning outcome without inference."""
 
@@ -412,7 +438,7 @@ class SuccessorPlanningService:
                 PlanningProposalSet,
             )
             expected = ScientificProblemCompiler(
-                planner, evidence_repository=self.composite_evidence
+                None, evidence_repository=self.composite_evidence
             ).compile_proposal(planning_input, proposal)
             plans = tuple(
                 self.runs.load_artifact(
@@ -469,7 +495,9 @@ class SuccessorPlanningService:
             planning_outcome = build_content_bound(
                 SuccessorPlanningCycle, "successor-cycle", payload
             )
-            self._validate_reusable_cycle(
+            if recorded_outcome is not None and recorded_outcome != planning_outcome:
+                raise ValueError("planning outcome differs from verified planning artifacts")
+            self.validate_reusable_cycle(
                 parent_run_id=parent_run_id,
                 prefix=prefix,
                 cycle=planning_outcome,
@@ -490,6 +518,20 @@ class SuccessorPlanningService:
             raise ResultFeedbackError(
                 "SUCCESSOR_PLANNING_OUTPUT_INCOMPLETE", str(error)
             ) from error
+
+
+class SuccessorPlanningService:
+    def __init__(self, *, state_dir: Path, knowledge_dir: Path) -> None:
+        self.state_dir = state_dir.resolve()
+        self.knowledge_dir = knowledge_dir.resolve()
+        self.runs = ScientificProblemRunRepository(self.state_dir)
+        self.composite_evidence = CompositeEvidenceStore(
+            KnowledgeEvidenceStore(self.knowledge_dir),
+            ProjectEvidenceStore(self.state_dir),
+        )
+        self.artifacts = ResultArtifacts(self.runs)
+        self.parent_authority = ParentAuthority(self.runs, self.composite_evidence, self.artifacts)
+        self.stage_reader = SuccessorStageReader(self.runs, self.composite_evidence)
 
     def _rebuild_complete_approval_cycle(
         self,
@@ -595,7 +637,7 @@ class SuccessorPlanningService:
             cycle = build_content_bound(
                 SuccessorPlanningCycle, "successor-cycle", payload
             )
-            self._validate_reusable_cycle(
+            self.stage_reader.validate_reusable_cycle(
                 parent_run_id=parent_run_id,
                 prefix=prefix,
                 cycle=cycle,
@@ -1413,7 +1455,7 @@ class SuccessorPlanningService:
                         "SUCCESSOR_CYCLE_INTEGRITY_INVALID",
                         "completed successor cycle has no invocation directory",
                     )
-                self._validate_reusable_cycle(
+                self.stage_reader.validate_reusable_cycle(
                     parent_run_id=parent_run_id,
                     prefix=matching_prefix,
                     cycle=matching_cycle,
@@ -1639,11 +1681,10 @@ class SuccessorPlanningService:
             if planning_marker.exists():
                 try:
                     compilation, loaded_validations = (
-                        self._load_complete_planning_stage(
+                        self.stage_reader.load_complete_planning_stage(
                             parent_run_id=parent_run_id,
                             prefix=prefix,
                             invocation=invocation,
-                            planner=planner,
                         )
                     )
                 except ResultFeedbackError as error:

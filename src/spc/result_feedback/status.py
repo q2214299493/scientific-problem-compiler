@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+from yaml import YAMLError
 
 from ..models import (
     CurationStatus,
@@ -12,9 +15,86 @@ from ..models import (
     ResultEvidenceType,
     SuccessorParentBinding,
     SuccessorPlanningCycle,
+    SuccessorPlanningInvocation,
 )
+from ..repositories import CompositeEvidenceStore, KnowledgeEvidenceStore, ProjectEvidenceStore
 from ..workflow.repository import ScientificProblemRunRepository
 from .submission import ResultFeedbackError
+from .successor import SuccessorStageReader
+
+
+def _successor_stage_status(
+    reader: SuccessorStageReader,
+    run_id: str,
+    directory: Path,
+    binding: SuccessorParentBinding | None,
+) -> tuple[str, SuccessorPlanningCycle | None]:
+    runs = reader.runs
+    prefix = directory.relative_to(runs.run_dir(run_id)).as_posix()
+    approval_claimed = (directory / "provider-calls/approval.yaml").exists()
+    planning_claimed = (directory / "provider-calls/planning.yaml").exists()
+    has_cycle_record = (directory / "cycle.yaml").exists()
+    if not has_cycle_record:
+        if approval_claimed:
+            return "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN", None
+        if not planning_claimed:
+            return "SUCCESSOR_INVOCATION_RESERVED", None
+
+    try:
+        if binding is None or binding.parent_run_id != run_id:
+            raise ValueError("missing successor binding for this parent run")
+        cycle = (
+            runs.load_artifact(run_id, f"{prefix}/cycle.yaml", SuccessorPlanningCycle)
+            if has_cycle_record else None
+        )
+        # Historical final records can predate invocation and provider-call artifacts.
+        invocation = None
+        if (
+            cycle is None or cycle.invocation_id is not None
+            or (directory / "invocation.yaml").exists()
+        ):
+            invocation = runs.load_artifact(
+                run_id, f"{prefix}/invocation.yaml", SuccessorPlanningInvocation
+            )
+            if cycle is None or cycle.planning_proposal_id is not None:
+                claim = runs.load_artifact(
+                    run_id, f"{prefix}/provider-calls/planning.yaml", SuccessorPlanningInvocation
+                )
+                if claim != invocation:
+                    raise ValueError("planning claim does not bind the stored invocation")
+        if cycle is not None:
+            # Current invocations persist an unselected proposal as a planning outcome.
+            # Older invocations included the approval provider and could finalize at selection.
+            if (
+                invocation is not None and invocation.approval_provider_id is None
+                and cycle.planning_proposal_id is not None and cycle.selected_plan_id is None
+            ):
+                raise ValueError("an unselected planning outcome is not a final cycle")
+            reader.validate_reusable_cycle(
+                parent_run_id=run_id, prefix=prefix, cycle=cycle, invocation=invocation
+            )
+            return cycle.status.value, cycle
+
+        outcome = None
+        if (directory / "planning-outcome.yaml").exists():
+            outcome = runs.load_artifact(
+                run_id, f"{prefix}/planning-outcome.yaml", SuccessorPlanningCycle
+            )
+        compilation, _ = reader.load_complete_planning_stage(
+            parent_run_id=run_id, prefix=prefix, invocation=invocation, recorded_outcome=outcome
+        )
+        if not all(report.valid for report in compilation.reports):
+            raise ValueError("successor planning artifacts failed validation")
+        if outcome is not None:
+            if len(compilation.candidates) < 2:
+                raise ValueError("human candidate selection requires multiple candidates")
+            return outcome.status.value, None
+        return "PLANNING_COMPLETE_AWAITING_SELECTION_OR_APPROVAL", None
+    except (OSError, ValueError, YAMLError):
+        # A query may observe an interrupted or in-progress write. It never repairs it.
+        if approval_claimed:
+            return "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN", None
+        return "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN", None
 
 
 def result_feedback_status(
@@ -64,6 +144,14 @@ def result_feedback_status(
     bindings_by_index: dict[int, SuccessorParentBinding] = {}
     successor_root = run_root / "successor-planning"
     if successor_root.exists():
+        run = repository.get(parent_run_id)
+        reader = SuccessorStageReader(
+            repository,
+            CompositeEvidenceStore(
+                KnowledgeEvidenceStore(Path(run.knowledge_dir), initialize=False),
+                ProjectEvidenceStore(repository.root.parent, initialize=False),
+            ),
+        )
         for directory in successor_root.glob("cycle-*"):
             if directory.is_symlink():
                 raise ResultFeedbackError(
@@ -92,60 +180,30 @@ def result_feedback_status(
                     "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
                     f"symlinked successor parent binding: {binding_path.name}",
                 )
-            if binding_path.exists():
+            try:
                 binding = repository.load_artifact(
                     parent_run_id,
                     binding_path.relative_to(run_root).as_posix(),
                     SuccessorParentBinding,
                 )
+            except (OSError, ValueError, YAMLError):
+                binding = None
+            if binding is not None:
                 if binding.successor_cycle_index != index:
                     raise ResultFeedbackError(
                         "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
                         "successor cycle directory index does not match "
                         "its parent-binding lineage index",
                     )
-                bindings_by_index[index] = binding
-            cycle_path = directory / "cycle.yaml"
-            if cycle_path.exists():
-                cycle = repository.load_artifact(
-                    parent_run_id,
-                    cycle_path.relative_to(run_root).as_posix(),
-                    SuccessorPlanningCycle,
-                )
-                binding = bindings_by_index.get(index)
-                if binding is None or (
-                    cycle.parent_binding_id,
-                    cycle.parent_binding_hash,
-                ) != (binding.binding_id, binding.content_hash):
-                    raise ResultFeedbackError(
-                        "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                        "completed successor cycle does not bind the "
-                        "parent-binding stored in its directory",
-                    )
+                if binding.parent_run_id == parent_run_id:
+                    bindings_by_index[index] = binding
+            status, cycle = _successor_stage_status(
+                reader, parent_run_id, directory, bindings_by_index.get(index)
+            )
+            if cycle is not None:
                 cycles_by_index[index] = cycle
-                continue
-            planning_outcome_path = directory / "planning-outcome.yaml"
-            if planning_outcome_path.exists():
-                planning_outcome = repository.load_artifact(
-                    parent_run_id,
-                    planning_outcome_path.relative_to(run_root).as_posix(),
-                    SuccessorPlanningCycle,
-                )
-                incomplete_cycles.append(
-                    {"cycle": index, "status": planning_outcome.status.value}
-                )
-                continue
-            approval_claimed = (directory / "provider-calls" / "approval.yaml").exists()
-            planning_claimed = (directory / "provider-calls" / "planning.yaml").exists()
-            if approval_claimed:
-                status = "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"
-            elif planning_claimed and (directory / "planning-proposal.yaml").exists():
-                status = "PLANNING_COMPLETE_AWAITING_SELECTION_OR_APPROVAL"
-            elif planning_claimed:
-                status = "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"
             else:
-                status = "SUCCESSOR_INVOCATION_RESERVED"
-            incomplete_cycles.append({"cycle": index, "status": status})
+                incomplete_cycles.append({"cycle": index, "status": status})
     cycles = [cycles_by_index[index] for index in sorted(cycles_by_index)]
     assessment_by_submission = {item.submission_id: item for item in assessments}
     materialized_ids = {item.submission_id for item in receipts}
