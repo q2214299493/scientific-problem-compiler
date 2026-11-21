@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Mapping
 import hashlib
@@ -15,7 +14,6 @@ from ...models import (
     AcquisitionInputKind,
     AcquisitionStatus,
     CanonicalHTMLTextArtifact,
-    CanonicalTextBlock,
     FullTextAccessStatus,
     FullTextCandidate,
     HTMLLiteratureIngestionRecord,
@@ -34,8 +32,10 @@ from ...models import (
 )
 from ...repositories import EvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
-from ..ingestion import LiteratureIngestionService, LiteratureMetadata, validate_literature_ingestion_chain
-from ..literature_text import AcquisitionError
+from ..ingestion.html import HTMLLiteratureTextExtractor
+from ..ingestion.service import LiteratureIngestionService
+from ..literature_text import AcquisitionError, HTMLTextExtractor, LiteratureMetadata
+from ..representation import validate_literature_representation
 from .metadata import (
     SUPPORTED_HTML_TYPES,
     SUPPORTED_PDF_TYPES,
@@ -49,15 +49,6 @@ from .metadata import (
 )
 from .resolvers import ArticleURLResolver, DOIResolver, LocalPDFResolver, ResourceResolver
 from .transport import SafeHTTPError, SafeHTTPFetcher
-
-
-@dataclass(frozen=True)
-class HTMLTextExtraction:
-    source_url: str
-    artifact_sha256: str
-    canonical_text: str
-    text_sha256: str
-    blocks: tuple[CanonicalTextBlock, ...]
 
 
 @dataclass(frozen=True)
@@ -85,7 +76,7 @@ class LiteratureAcquisitionService:
         html_extractor: HTMLLiteratureTextExtractor | None = None,
     ) -> None:
         self.fetcher = fetcher or SafeHTTPFetcher()
-        self.html_extractor = html_extractor or HTMLLiteratureTextExtractor()
+        self.html_extractor: HTMLTextExtractor = html_extractor or HTMLLiteratureTextExtractor()
 
     def add(
         self,
@@ -915,170 +906,3 @@ class LiteratureAcquisitionService:
             attempt_ids=tuple(item.attempt_id for item in attempts),
             warnings=warnings,
         )
-
-
-class _CanonicalHTMLParser(HTMLParser):
-    BLOCK_TAGS = frozenset(
-        {
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "p",
-            "li",
-            "blockquote",
-            "caption",
-            "th",
-            "td",
-            "figcaption",
-        }
-    )
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.active: list[tuple[str, list[str]]] = []
-        self.blocks: list[tuple[str, str]] = []
-        self.ignored_depth = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        del attrs
-        normalized = tag.casefold()
-        if normalized in {"script", "style", "noscript"}:
-            self.ignored_depth += 1
-        elif not self.ignored_depth and normalized in self.BLOCK_TAGS:
-            self.active.append((normalized, []))
-
-    def handle_endtag(self, tag: str) -> None:
-        normalized = tag.casefold()
-        if normalized in {"script", "style", "noscript"} and self.ignored_depth:
-            self.ignored_depth -= 1
-            return
-        if self.ignored_depth or normalized not in self.BLOCK_TAGS:
-            return
-        for index in range(len(self.active) - 1, -1, -1):
-            active_tag, content = self.active[index]
-            if active_tag == normalized:
-                text = " ".join("".join(content).split())
-                if text:
-                    self.blocks.append((normalized, text))
-                del self.active[index]
-                break
-
-    def handle_data(self, data: str) -> None:
-        if not self.ignored_depth and self.active:
-            self.active[-1][1].append(data)
-
-
-class HTMLLiteratureTextExtractor:
-    extractor_id = "html-canonical-text"
-    extractor_version = "2.0.0"
-    extractor_config_hash = content_hash(
-        {
-            "block_tags": tuple(sorted(_CanonicalHTMLParser.BLOCK_TAGS)),
-            "ignored_tags": ("noscript", "script", "style"),
-            "encoding": "utf-8",
-            "block_separator": "two_lf",
-        }
-    )
-
-    def extract(self, source_url: str, html_bytes: bytes) -> HTMLTextExtraction:
-        try:
-            html_text = html_bytes.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise AcquisitionError("HTML resource is not UTF-8") from error
-        parser = _CanonicalHTMLParser()
-        parser.feed(html_text)
-        if not parser.blocks:
-            raise AcquisitionError("HTML article contains no canonical text blocks")
-        texts = [text for _, text in parser.blocks]
-        canonical_text = "\n\n".join(texts)
-        blocks: list[CanonicalTextBlock] = []
-        cursor = 0
-        for block_type, block_text in parser.blocks:
-            end = cursor + len(block_text)
-            identity = {
-                "page_number": 1,
-                "block_type": f"html_{block_type}",
-                "section_path": (),
-                "start_offset": cursor,
-                "end_offset": end,
-                "text_hash": hashlib.sha256(block_text.encode("utf-8")).hexdigest(),
-            }
-            blocks.append(
-                CanonicalTextBlock(
-                    block_id=f"canonical-block-{content_hash(identity)[:24]}",
-                    **identity,
-                )
-            )
-            cursor = end + 2
-        return HTMLTextExtraction(
-            source_url=source_url,
-            artifact_sha256=hashlib.sha256(html_bytes).hexdigest(),
-            canonical_text=canonical_text,
-            text_sha256=hashlib.sha256(canonical_text.encode("utf-8")).hexdigest(),
-            blocks=tuple(blocks),
-        )
-
-
-def validate_literature_representation(
-    representation: LiteratureRepresentationReference,
-    repositories: KnowledgeRepositories,
-    evidence_store: EvidenceStore,
-) -> LiteratureRepresentationReference:
-    stored = repositories.literature_representation_refs.get(
-        representation.representation_id
-    )
-    if stored != representation:
-        raise ValueError("literature representation differs from repository record")
-    if representation.representation_kind == LiteratureRepresentationKind.PDF:
-        ingestion = repositories.literature_ingestions.get(
-            representation.ingestion_id
-        )
-        chain = validate_literature_ingestion_chain(
-            ingestion, repositories, evidence_store
-        )
-        if (
-            representation.ingestion_hash != ingestion.content_hash
-            or representation.raw_artifact_id != chain.raw_artifact.artifact_id
-            or representation.raw_artifact_hash != chain.raw_artifact.content_hash
-            or representation.canonical_text_id
-            != chain.canonical_text.canonical_text_id
-            or representation.canonical_text_hash
-            != chain.canonical_text.content_hash
-            or representation.source_id != chain.source.source_id
-            or representation.source_version != chain.source.version
-        ):
-            raise ValueError("PDF representation binding is invalid")
-        return representation
-    ingestion = repositories.html_literature_ingestions.get(
-        representation.ingestion_id
-    )
-    raw = repositories.raw_html_literature_artifacts.get(
-        representation.raw_artifact_id
-    )
-    canonical = repositories.canonical_html_text_artifacts.get(
-        representation.canonical_text_id or ""
-    )
-    source = evidence_store.get_source(
-        representation.source_id, representation.source_version
-    )
-    evidence_store.verify_source_integrity(source)
-    if (
-        representation.ingestion_hash != ingestion.content_hash
-        or representation.literature_id != ingestion.literature_id
-        or representation.raw_artifact_hash != raw.content_hash
-        or representation.canonical_text_hash != canonical.content_hash
-        or ingestion.raw_artifact_id != raw.artifact_id
-        or ingestion.raw_artifact_hash != raw.content_hash
-        or ingestion.canonical_text_id != canonical.canonical_text_id
-        or ingestion.canonical_text_hash != canonical.content_hash
-        or canonical.raw_artifact_id != raw.artifact_id
-        or canonical.raw_artifact_hash != raw.content_hash
-        or ingestion.source_id != source.source_id
-        or ingestion.source_version != source.version
-        or source.content_sha256 != canonical.text_sha256
-    ):
-        raise ValueError("HTML representation binding is invalid")
-    return representation

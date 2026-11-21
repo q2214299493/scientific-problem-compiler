@@ -51,12 +51,20 @@ from ...models import (
 )
 from ...repositories import EvidenceStore as EvidenceStore, KnowledgeRepositories as KnowledgeRepositories
 from ...serialization import content_hash as content_hash
-from ..ingestion import (
-    LiteratureIngestionService as LiteratureIngestionService,
-    LiteratureMetadata as LiteratureMetadata,
-    validate_literature_ingestion_chain as validate_literature_ingestion_chain,
+from ..ingestion.html import (
+    HTMLLiteratureTextExtractor as HTMLLiteratureTextExtractor,
+    _CanonicalHTMLParser as _CanonicalHTMLParser,
 )
-from ..literature_text import AcquisitionError as AcquisitionError
+from ..ingestion.service import LiteratureIngestionService as LiteratureIngestionService
+from ..literature_text import (
+    AcquisitionError as AcquisitionError,
+    HTMLTextExtraction as HTMLTextExtraction,
+    LiteratureMetadata as LiteratureMetadata,
+)
+from ..representation import (
+    validate_literature_ingestion_chain as validate_literature_ingestion_chain,
+    validate_literature_representation as validate_literature_representation,
+)
 from .metadata import (
     DOI_PATTERN as DOI_PATTERN,
     METADATA_FIELDS as METADATA_FIELDS,
@@ -82,12 +90,8 @@ from .resolvers import (
     ResourceResolver as ResourceResolver,
 )
 from .service import (
-    HTMLLiteratureTextExtractor as HTMLLiteratureTextExtractor,
-    HTMLTextExtraction as HTMLTextExtraction,
     LiteratureAcquisitionService as LiteratureAcquisitionService,
     _CandidateResult as _CandidateResult,
-    _CanonicalHTMLParser as _CanonicalHTMLParser,
-    validate_literature_representation as validate_literature_representation,
 )
 from .transport import (
     HTTPResponse as HTTPResponse,

@@ -25,8 +25,7 @@ from ...models import (
     ResolvedLiteratureResource,
 )
 from ...serialization import content_hash
-from ..ingestion import LiteratureMetadata
-from ..literature_text import AcquisitionError
+from ..literature_text import AcquisitionError, LiteratureMetadata
 from .transport import HTTPResponse
 
 
