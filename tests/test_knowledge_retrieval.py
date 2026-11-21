@@ -564,6 +564,20 @@ def test_unaccepted_opinion_cannot_support_accepted_expert_case(tmp_path: Path) 
         _retrieve(repositories, store, "not sufficiently convincing")
 
 
+def test_trust_preserves_first_rejected_dependency_across_domains(tmp_path: Path) -> None:
+    repositories, store, _, _, _, opinion, _, _ = _prepare(
+        tmp_path, claim_status=CurationStatus.REJECTED, opinion_status=CurationStatus.REJECTED,
+    )
+    with pytest.raises(TrustedKnowledgeError) as caught:
+        TrustedKnowledgeValidator(repositories, store).validate()
+
+    assert caught.value.code == "UNTRUSTED_SCIENTIFIC_DEPENDENCY"
+    assert str(caught.value) == (
+        "UNTRUSTED_SCIENTIFIC_DEPENDENCY: trusted record depends on unaccepted "
+        f"expert_opinion:{opinion.opinion_id}"
+    )
+
+
 def test_scientific_context_phase2_pipeline_consumes_persistent_knowledge(tmp_path: Path) -> None:
     repositories, store, claim, _, _, _, case, _ = _prepare(tmp_path)
     state_dir = tmp_path / ".spc"

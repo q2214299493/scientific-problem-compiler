@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING, Any, Mapping
 from pydantic import BaseModel
 
 from ..interpretation.validators import (
-    _source_quote_binding_issues,
-    result_context_record_issues,
-    source_claim_binding_issues,
+    _source_quote_binding_issues as _source_quote_binding_issues,
+    result_context_record_issues as result_context_record_issues,
+    source_claim_binding_issues as source_claim_binding_issues,
 )
 from ..models import (
     CanonicalHTMLTextArtifact,
@@ -32,7 +32,7 @@ from ..models import (
     LiteratureDocument,
     LiteratureIngestionRecord,
     LiteratureIngestionStatus,
-    LiteratureRepresentationKind,
+    LiteratureRepresentationKind as LiteratureRepresentationKind,
     LiteratureRepresentationReference,
     LiteratureRepresentationSelection,
     LiteratureSupplementarySource,
@@ -46,7 +46,7 @@ from ..models import (
     SourceClaim,
     SourceDocument,
     SourceQuote,
-    SourceRole,
+    SourceRole as SourceRole,
     SourceType,
 )
 from ..serialization import content_hash
@@ -54,6 +54,11 @@ from .k1f_authority import (
     K1FCompilationAuthorityIndex,
     K1FScientificAuthorityStatus,
     classify_k1f_scientific_authority,
+)
+
+from .trust_rules import (
+    CURATION_REQUIRED_TYPES, REPRESENTATION_COMPONENT_TYPES as REPRESENTATION_COMPONENT_TYPES,
+    TrustedKnowledgeError, expert, interpretation, literature,
 )
 
 if TYPE_CHECKING:
@@ -114,38 +119,6 @@ REPOSITORY_NODE_SPECS = (
     ("model_fact", "model_facts", "fact_id"),
     ("knowledge_relation", "relations", "relation_id"),
 )
-
-CURATION_REQUIRED_TYPES = frozenset(
-    {
-        "expert_source",
-        "literature_document",
-        "literature_representation_selection",
-        "literature_supplementary_source",
-        "expert_opinion",
-        "source_claim",
-        "method_fact",
-        "model_fact",
-        "reported_result",
-        "knowledge_relation",
-    }
-)
-
-REPRESENTATION_COMPONENT_TYPES = frozenset(
-    {
-        "raw_literature_artifact",
-        "canonical_text_artifact",
-        "literature_ingestion",
-        "raw_html_literature_artifact",
-        "canonical_html_text_artifact",
-        "html_literature_ingestion",
-    }
-)
-
-
-class TrustedKnowledgeError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(f"{code}: {message}")
 
 
 @dataclass(frozen=True)
@@ -534,52 +507,142 @@ class TrustedKnowledgeValidator:
                     "STALE_K1F_SCIENTIFIC_AUTHORITY",
                     f"trusted record depends on stale K1F authority {key[0]}:{key[1]}",
                 )
+        def visit(dependency: tuple[str, str]) -> BaseModel:
+            return self._validate_record(dependency, current, visiting)
+
         visiting.add(key)
         try:
             if key[0] == "expert_source":
-                self._validate_expert_source(record, current, visiting)
+                expert.validate_expert_source(
+                    record,
+                    repositories=self.repositories,
+                    visit=visit,
+                )
             elif isinstance(record, LiteratureDocument):
-                self._validate_literature(record, current, visiting)
+                literature.validate_literature(
+                    record,
+                    repositories=self.repositories,
+                    reachable=self._reachable,
+                    visit=visit,
+                    verify_source=self._verify_source,
+                    current=current,
+                )
             elif isinstance(record, RawLiteratureArtifact):
                 self.repositories.raw_literature_artifacts.get(record.artifact_id)
             elif isinstance(record, CanonicalTextArtifact):
-                self._validate_canonical_text(record, current, visiting)
+                literature.validate_canonical_text(
+                    record,
+                    repositories=self.repositories,
+                    visit=visit,
+                )
             elif isinstance(record, LiteratureIngestionRecord):
-                self._validate_ingestion(record, current, visiting)
+                literature.validate_ingestion(
+                    record,
+                    reachable=self._reachable,
+                    visit=visit,
+                    require_record=self._require_record,
+                    verify_source=self._verify_source,
+                )
             elif isinstance(record, RawHTMLLiteratureArtifact):
                 self.repositories.raw_html_literature_artifacts.get(
                     record.artifact_id
                 )
             elif isinstance(record, CanonicalHTMLTextArtifact):
-                self._validate_html_canonical(record, current, visiting)
+                literature.validate_html_canonical(
+                    record,
+                    repositories=self.repositories,
+                    visit=visit,
+                )
             elif isinstance(record, HTMLLiteratureIngestionRecord):
-                self._validate_html_ingestion(record, current, visiting)
+                literature.validate_html_ingestion(
+                    record,
+                    reachable=self._reachable,
+                    visit=visit,
+                    require_record=self._require_record,
+                    verify_source=self._verify_source,
+                )
             elif isinstance(record, LiteratureRepresentationReference):
-                self._validate_representation(record, current, visiting)
+                literature.validate_representation(
+                    record,
+                    repositories=self.repositories,
+                    evidence_store=self.evidence_store,
+                    visit=visit,
+                    current=current,
+                )
             elif isinstance(record, LiteratureRepresentationSelection):
-                self._validate_representation_selection(record, current, visiting)
+                literature.validate_representation_selection(
+                    record,
+                    repositories=self.repositories,
+                    evidence_store=self.evidence_store,
+                    records=self.records,
+                    visit=visit,
+                    current=current,
+                )
             elif isinstance(record, LiteratureSupplementarySource):
-                self._validate_supplementary_source(record, current, visiting)
+                literature.validate_supplementary_source(
+                    record,
+                    repositories=self.repositories,
+                    evidence_store=self.evidence_store,
+                    reachable=self._reachable,
+                    visit=visit,
+                    current=current,
+                )
             elif isinstance(record, HistoricalLiteratureEvidenceAuthorization):
                 self._validate_historical_authorization(record)
             elif isinstance(record, ExpertProfile):
                 pass
             elif isinstance(record, ExpertAttributionRecord):
-                self._validate_attribution(record)
+                expert.validate_attribution(
+                    record,
+                    reachable=self._reachable,
+                    verify_evidence=self._verify_evidence,
+                    verify_source=self._verify_source,
+                    remember_evidence=self._remember_evidence,
+                )
             elif isinstance(record, ExpertOpinion):
-                self._validate_opinion(record, current, visiting)
+                expert.validate_opinion(
+                    record,
+                    visit=visit,
+                    verify_evidence_refs=self._verify_evidence_refs,
+                    verify_evidence=self._verify_evidence,
+                )
             elif isinstance(record, KnowledgeRelation):
-                self._validate_relation(record, current, visiting)
+                interpretation.validate_relation(
+                    record,
+                    visit=visit,
+                    require_record=self._require_record,
+                    verify_evidence_refs=self._verify_evidence_refs,
+                    current=current,
+                )
             elif isinstance(record, SourceQuote):
-                self._validate_source_quote(record)
+                interpretation.validate_source_quote(
+                    record,
+                    evidence_store=self.evidence_store,
+                    verify_evidence=self._verify_evidence,
+                    remember_evidence=self._remember_evidence,
+                )
             elif isinstance(record, SourceClaim):
-                self._validate_source_claim(record, current, visiting)
+                interpretation.validate_source_claim(
+                    record,
+                    records=self.records,
+                    visit=visit,
+                    verify_evidence_refs=self._verify_evidence_refs,
+                )
             elif isinstance(record, MethodFact | ModelFact):
                 self._verify_evidence_refs(record.evidence_refs)
             elif isinstance(record, ReportedResult):
-                self._validate_reported_result(record, current, visiting)
+                interpretation.validate_reported_result(
+                    record,
+                    records=self.records,
+                    visit=visit,
+                    verify_evidence_refs=self._verify_evidence_refs,
+                )
             elif isinstance(record, ExpertCase):
-                self._validate_expert_case(record, current, visiting)
+                expert.validate_expert_case(
+                    record,
+                    visit=visit,
+                    verify_evidence_refs=self._verify_evidence_refs,
+                )
             elif isinstance(record, LiteratureWorkflowPattern):
                 self._verify_evidence_refs(record.evidence_refs)
             elif isinstance(record, ScientificCapability):
@@ -610,66 +673,6 @@ class TrustedKnowledgeValidator:
             )
         return False
 
-    def _validate_expert_source(
-        self,
-        record: BaseModel,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        from .expert_knowledge.contracts import ExpertSourceRecord
-        from .expert_knowledge.source import validate_expert_source
-
-        if not isinstance(record, ExpertSourceRecord):
-            raise TrustedKnowledgeError(
-                "INVALID_EXPERT_SOURCE",
-                "expert source repository contains an incompatible record",
-            )
-        try:
-            validate_expert_source(record, self.repositories)
-        except (FileNotFoundError, ValueError) as error:
-            raise TrustedKnowledgeError(
-                "INVALID_EXPERT_SOURCE",
-                f"expert source provenance is invalid: {record.expert_source_id}",
-            ) from error
-        self._validate_record(("expert_profile", record.expert_id), current, visiting)
-        attribution = self._validate_record(
-            ("expert_attribution", record.attribution_id), current, visiting
-        )
-        if (
-            not isinstance(attribution, ExpertAttributionRecord)
-            or attribution.content_hash != record.attribution_hash
-        ):
-            raise TrustedKnowledgeError(
-                "INVALID_EXPERT_SOURCE_ATTRIBUTION",
-                f"expert source attribution binding is invalid: {record.expert_source_id}",
-            )
-
-    def _validate_expert_case(
-        self,
-        record: ExpertCase,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        self._verify_evidence_refs(record.evidence_refs)
-        if not record.opinion_refs:
-            return
-        opinion_evidence: set[str] = set()
-        for opinion_id in record.opinion_refs:
-            opinion = self._validate_record(
-                ("expert_opinion", opinion_id), current, visiting
-            )
-            if not isinstance(opinion, ExpertOpinion):
-                raise TrustedKnowledgeError(
-                    "INVALID_EXPERT_CASE_OPINION",
-                    f"expert case dependency is not an opinion: {opinion_id}",
-                )
-            opinion_evidence.update(opinion.evidence_refs)
-        if not set(record.evidence_refs).issubset(opinion_evidence):
-            raise TrustedKnowledgeError(
-                "EXPERT_CASE_EVIDENCE_MISMATCH",
-                f"expert case evidence is not derived from its opinions: {record.case_id}",
-            )
-
     def _k1f_authority(
         self,
         key: tuple[str, str],
@@ -694,533 +697,6 @@ class TrustedKnowledgeValidator:
                 "INVALID_K1F_SCIENTIFIC_AUTHORITY",
                 f"K1F authority is missing or corrupted for {key[0]}:{key[1]}",
             ) from error
-
-    def _validate_literature(
-        self,
-        document: LiteratureDocument,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        ingestions = tuple(
-            ingestion
-            for ingestion in self.repositories.literature_ingestions.list()
-            if ingestion.literature_id == document.literature_id
-        )
-        html_ingestions = tuple(
-            ingestion
-            for ingestion in self.repositories.html_literature_ingestions.list()
-            if ingestion.literature_id == document.literature_id
-        )
-        if ingestions or html_ingestions:
-            try:
-                selection = (
-                    self.repositories.literature_representation_selections.resolve_current(
-                        document.literature_id
-                    )
-                )
-            except (FileNotFoundError, ValueError) as error:
-                raise TrustedKnowledgeError(
-                    "INVALID_LITERATURE_REPRESENTATION_SELECTION",
-                    str(error),
-                ) from error
-            selection_curation = current.get(
-                ("literature_representation_selection", selection.selection_id)
-            )
-            if (
-                selection_curation is None
-                or selection_curation.status != CurationStatus.ACCEPTED
-            ):
-                raise TrustedKnowledgeError(
-                    "UNTRUSTED_LITERATURE_REPRESENTATION_SELECTION",
-                    f"current representation selection is not accepted: {selection.selection_id}",
-                )
-            self._validate_record(
-                ("literature_representation_selection", selection.selection_id),
-                current,
-                visiting,
-            )
-            return
-        source = self._verify_source(document.source_id, document.source_version)
-        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
-
-    def _validate_supplementary_source(
-        self,
-        supplement: LiteratureSupplementarySource,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        if self.evidence_store is None:
-            raise TrustedKnowledgeError(
-                "EVIDENCE_STORE_REQUIRED",
-                "supplementary source validation requires an EvidenceStore",
-            )
-        document = self._validate_record(
-            ("literature_document", supplement.literature_id), current, visiting
-        )
-        try:
-            from .ingestion import validate_literature_supplementary_source
-
-            raw, canonical, source = validate_literature_supplementary_source(
-                supplement, self.repositories, self.evidence_store
-            )
-        except (FileNotFoundError, ValueError) as error:
-            raise TrustedKnowledgeError(
-                "INVALID_SUPPLEMENTARY_SOURCE",
-                f"supplementary source chain is unavailable: {supplement.supplement_id}",
-            ) from error
-        if (
-            not isinstance(document, LiteratureDocument)
-            or document.content_hash != supplement.literature_hash
-        ):
-            raise TrustedKnowledgeError(
-                "INVALID_SUPPLEMENTARY_SOURCE",
-                f"supplementary source chain does not match: {supplement.supplement_id}",
-            )
-        curation = current.get(
-            ("literature_supplementary_source", supplement.supplement_id)
-        )
-        if curation is not None:
-            for evidence_id in curation.evidence_refs:
-                evidence = self.evidence_store.get_evidence(evidence_id)
-                self.evidence_store.verify_evidence_integrity(evidence)
-                if (evidence.source_id, evidence.source_version) != (
-                    supplement.source_id,
-                    supplement.source_version,
-                ):
-                    raise TrustedKnowledgeError(
-                        "SUPPLEMENTARY_EVIDENCE_SOURCE_MISMATCH",
-                        f"curation evidence belongs to another source: {evidence_id}",
-                    )
-        self._reachable[("raw_literature_artifact", raw.artifact_id)] = raw
-        self._reachable[("canonical_text_artifact", canonical.canonical_text_id)] = canonical
-        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
-
-    def _validate_representation_selection(
-        self,
-        selection: LiteratureRepresentationSelection,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        try:
-            current_selection = (
-                self.repositories.literature_representation_selections.resolve_current(
-                    selection.literature_id
-                )
-            )
-        except (FileNotFoundError, ValueError) as error:
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_REPRESENTATION_SELECTION", str(error)
-            ) from error
-        selection_curation = current.get(
-            ("literature_representation_selection", selection.selection_id)
-        )
-        if current_selection.selection_id != selection.selection_id:
-            raise TrustedKnowledgeError(
-                "HISTORICAL_REPRESENTATION_NOT_TRUSTED",
-                f"selection is not current: {selection.selection_id}",
-            )
-        if (
-            selection_curation is None
-            or selection_curation.status != CurationStatus.ACCEPTED
-        ):
-            raise TrustedKnowledgeError(
-                "UNTRUSTED_LITERATURE_REPRESENTATION_SELECTION",
-                f"selection is not explicitly accepted: {selection.selection_id}",
-            )
-        from .ingestion import LiteratureRepresentationSelector
-
-        try:
-            representation = LiteratureRepresentationSelector.resolve_selection(
-                selection, self.repositories, self.evidence_store
-            )
-        except (FileNotFoundError, ValueError) as error:
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_REPRESENTATION_SELECTION",
-                str(error),
-            ) from error
-        self.records[
-            ("literature_representation_ref", representation.representation_id)
-        ] = representation
-        self._validate_record(
-            ("literature_representation_ref", representation.representation_id),
-            current,
-            visiting,
-        )
-
-    def _validate_canonical_text(
-        self,
-        canonical: CanonicalTextArtifact,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        self.repositories.canonical_text_artifacts.get(canonical.canonical_text_id)
-        raw = self._validate_record(
-            ("raw_literature_artifact", canonical.raw_artifact_id), current, visiting
-        )
-        if (
-            not isinstance(raw, RawLiteratureArtifact)
-            or canonical.raw_artifact_hash != raw.content_hash
-            or canonical.literature_id != raw.literature_id
-        ):
-            raise TrustedKnowledgeError(
-                "CANONICAL_RAW_ARTIFACT_MISMATCH",
-                f"canonical text does not bind its raw artifact: {canonical.canonical_text_id}",
-            )
-
-    def _validate_html_canonical(
-        self,
-        canonical: CanonicalHTMLTextArtifact,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        self.repositories.canonical_html_text_artifacts.get(
-            canonical.canonical_text_id
-        )
-        raw = self._validate_record(
-            ("raw_html_literature_artifact", canonical.raw_artifact_id),
-            current,
-            visiting,
-        )
-        if (
-            not isinstance(raw, RawHTMLLiteratureArtifact)
-            or canonical.raw_artifact_hash != raw.content_hash
-            or canonical.literature_id != raw.literature_id
-            or canonical.source_url != raw.source_url
-        ):
-            raise TrustedKnowledgeError(
-                "HTML_CANONICAL_RAW_ARTIFACT_MISMATCH",
-                f"HTML canonical text does not bind its raw artifact: {canonical.canonical_text_id}",
-            )
-
-    def _validate_representation(
-        self,
-        representation: LiteratureRepresentationReference,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        from .representation import validate_literature_representation
-        from .ingestion import LiteratureRepresentationSelector
-
-        try:
-            selection = (
-                self.repositories.literature_representation_selections.resolve_current(
-                    representation.literature_id
-                )
-            )
-            selection_curation = current.get(
-                ("literature_representation_selection", selection.selection_id)
-            )
-            selected = LiteratureRepresentationSelector.resolve_selection(
-                selection, self.repositories, self.evidence_store
-            )
-            if (
-                selection_curation is None
-                or selection_curation.status != CurationStatus.ACCEPTED
-                or selected.representation_id != representation.representation_id
-            ):
-                raise ValueError("representation is not the accepted current selection")
-            validate_literature_representation(
-                representation, self.repositories, self.evidence_store
-            )
-        except (FileNotFoundError, ValueError) as error:
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_REPRESENTATION", str(error)
-            ) from error
-        ingestion_type = (
-            "literature_ingestion"
-            if representation.representation_kind == LiteratureRepresentationKind.PDF
-            else "html_literature_ingestion"
-        )
-        ingestion = self._validate_record(
-            (ingestion_type, representation.ingestion_id), current, visiting
-        )
-        if (
-            representation.literature_id != getattr(ingestion, "literature_id", None)
-            or representation.ingestion_hash
-            != getattr(ingestion, "content_hash", None)
-        ):
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_REPRESENTATION",
-                f"representation ingestion binding is invalid: {representation.representation_id}",
-            )
-
-    def _validate_html_ingestion(
-        self,
-        ingestion: HTMLLiteratureIngestionRecord,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        if ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED:
-            raise TrustedKnowledgeError(
-                "UNTRUSTED_HTML_LITERATURE_INGESTION",
-                f"only accepted HTML ingestion records are trusted: {ingestion.ingestion_id}",
-            )
-        document = self._require_record("literature_document", ingestion.literature_id)
-        if not isinstance(document, LiteratureDocument):
-            raise TrustedKnowledgeError(
-                "INVALID_HTML_LITERATURE_INGESTION_BINDING",
-                f"HTML ingestion has no LiteratureDocument: {ingestion.ingestion_id}",
-            )
-        raw = self._validate_record(
-            ("raw_html_literature_artifact", ingestion.raw_artifact_id),
-            current,
-            visiting,
-        )
-        canonical = self._validate_record(
-            ("canonical_html_text_artifact", ingestion.canonical_text_id),
-            current,
-            visiting,
-        )
-        source = self._verify_source(ingestion.source_id, ingestion.source_version)
-        if (
-            not isinstance(raw, RawHTMLLiteratureArtifact)
-            or not isinstance(canonical, CanonicalHTMLTextArtifact)
-            or ingestion.raw_artifact_hash != raw.content_hash
-            or ingestion.canonical_text_hash != canonical.content_hash
-            or ingestion.literature_id != raw.literature_id
-            or ingestion.literature_id != canonical.literature_id
-            or ingestion.extractor_id != canonical.extractor_id
-            or ingestion.extractor_version != canonical.extractor_version
-            or ingestion.extractor_config_hash != canonical.extractor_config_hash
-            or source.content_sha256 != canonical.text_sha256
-            or source.source_role != SourceRole.LITERATURE_AUTHOR
-            or source.source_type != SourceType.LITERATURE_ARTICLE
-        ):
-            raise TrustedKnowledgeError(
-                "HTML_LITERATURE_INGESTION_HASH_MISMATCH",
-                f"HTML ingestion binding is invalid: {ingestion.ingestion_id}",
-            )
-        self._reachable[
-            ("source_document", f"{source.source_id}@{source.version}")
-        ] = source
-
-    def _validate_ingestion(
-        self,
-        ingestion: LiteratureIngestionRecord,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        if ingestion.ingestion_status != LiteratureIngestionStatus.ACCEPTED:
-            raise TrustedKnowledgeError(
-                "UNTRUSTED_LITERATURE_INGESTION",
-                f"only accepted ingestion records are trusted: {ingestion.ingestion_id}",
-            )
-        document = self._require_record("literature_document", ingestion.literature_id)
-        if not isinstance(document, LiteratureDocument):
-            raise TrustedKnowledgeError(
-                "INVALID_LITERATURE_INGESTION_BINDING",
-                f"ingestion has no LiteratureDocument: {ingestion.ingestion_id}",
-            )
-        raw = self._validate_record(
-            ("raw_literature_artifact", ingestion.raw_artifact_id), current, visiting
-        )
-        canonical = self._validate_record(
-            ("canonical_text_artifact", ingestion.canonical_text_id or ""),
-            current,
-            visiting,
-        )
-        if (
-            not isinstance(raw, RawLiteratureArtifact)
-            or not isinstance(canonical, CanonicalTextArtifact)
-            or ingestion.raw_artifact_hash != raw.content_hash
-            or ingestion.canonical_text_hash != canonical.content_hash
-            or ingestion.literature_id != raw.literature_id
-            or ingestion.literature_id != canonical.literature_id
-            or ingestion.parser_id != canonical.parser_id
-            or ingestion.parser_version != canonical.parser_version
-            or ingestion.parser_config_hash != canonical.parser_config_hash
-        ):
-            raise TrustedKnowledgeError(
-                "LITERATURE_INGESTION_HASH_MISMATCH",
-                f"ingestion artifact/parser binding is invalid: {ingestion.ingestion_id}",
-            )
-        source = self._verify_source(
-            ingestion.source_id or "", ingestion.source_version or ""
-        )
-        if (
-            source.content_sha256 != canonical.text_sha256
-            or source.source_role != SourceRole.LITERATURE_AUTHOR
-            or source.source_type != SourceType.LITERATURE_ARTICLE
-        ):
-            raise TrustedKnowledgeError(
-                "CANONICAL_SOURCE_HASH_MISMATCH",
-                f"SourceDocument is not the canonical literature source: {ingestion.ingestion_id}",
-            )
-        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
-
-    def _validate_attribution(self, attribution: ExpertAttributionRecord) -> None:
-        if attribution.attribution_status not in {None, "confirmed"}:
-            raise TrustedKnowledgeError(
-                "UNRESOLVED_EXPERT_ATTRIBUTION",
-                f"expert attribution is not confirmed: {attribution.attribution_id}",
-            )
-        source = self._verify_source(attribution.source_id, attribution.source_version)
-        for evidence_id in attribution.evidence_refs:
-            evidence, evidence_source = self._verify_evidence(evidence_id)
-            if (evidence.source_id, evidence.source_version) != (
-                attribution.source_id,
-                attribution.source_version,
-            ):
-                raise TrustedKnowledgeError(
-                    "EXPERT_ATTRIBUTION_SOURCE_MISMATCH",
-                    f"attribution evidence comes from another source: {evidence_id}",
-                )
-            self._remember_evidence(evidence, evidence_source)
-        self._reachable[("source_document", f"{source.source_id}@{source.version}")] = source
-
-    def _validate_opinion(
-        self,
-        opinion: ExpertOpinion,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        self._validate_record(("expert_profile", opinion.expert_id), current, visiting)
-        if not opinion.attribution_refs:
-            raise TrustedKnowledgeError(
-                "MISSING_EXPERT_ATTRIBUTION",
-                f"accepted ExpertOpinion has no attribution: {opinion.opinion_id}",
-            )
-        attributed_evidence: set[str] = set()
-        attributed_spans: list[EvidenceSpan] = []
-        for attribution_id in opinion.attribution_refs:
-            attribution = self._validate_record(
-                ("expert_attribution", attribution_id), current, visiting
-            )
-            if not isinstance(attribution, ExpertAttributionRecord):
-                raise TrustedKnowledgeError(
-                    "INVALID_EXPERT_ATTRIBUTION",
-                    f"record is not an ExpertAttributionRecord: {attribution_id}",
-                )
-            if attribution.expert_id != opinion.expert_id:
-                raise TrustedKnowledgeError(
-                    "EXPERT_ATTRIBUTION_OWNER_MISMATCH",
-                    f"attribution belongs to another expert: {attribution_id}",
-                )
-            attributed_evidence.update(attribution.evidence_refs)
-            attributed_spans.extend(
-                self._verify_evidence(evidence_id)[0]
-                for evidence_id in attribution.evidence_refs
-            )
-        for evidence_id in opinion.evidence_refs:
-            evidence = self._verify_evidence(evidence_id)[0]
-            covered = evidence_id in attributed_evidence or any(
-                span.source_id == evidence.source_id
-                and span.source_version == evidence.source_version
-                and span.start_offset <= evidence.start_offset
-                and span.end_offset >= evidence.end_offset
-                for span in attributed_spans
-            )
-            if not covered:
-                raise TrustedKnowledgeError(
-                    "EXPERT_OPINION_EVIDENCE_NOT_ATTRIBUTED",
-                    f"opinion evidence is not covered by its attributions: {opinion.opinion_id}",
-                )
-        self._verify_evidence_refs(opinion.evidence_refs)
-        for claim_id in opinion.related_claim_refs:
-            self._validate_record(("source_claim", claim_id), current, visiting)
-        for workflow_id in opinion.related_workflow_refs:
-            self._validate_record(("workflow_pattern", workflow_id), current, visiting)
-        if opinion.supersedes is not None:
-            self._validate_record(("expert_opinion", opinion.supersedes), current, visiting)
-
-    def _validate_relation(
-        self,
-        relation: KnowledgeRelation,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        self._verify_evidence_refs(relation.evidence_refs)
-        for key in (
-            (relation.subject_type, relation.subject_id),
-            (relation.object_type, relation.object_id),
-        ):
-            if key[0] in REPRESENTATION_COMPONENT_TYPES:
-                raise TrustedKnowledgeError(
-                    "UNTRUSTED_RELATION_ENDPOINT",
-                    "relations must reference the common literature representation, "
-                    f"not an internal component: {key[0]}:{key[1]}",
-                )
-            self._require_record(*key)
-            curation = current.get(key)
-            if (key[0] in CURATION_REQUIRED_TYPES or curation is not None) and (
-                curation is None or curation.status != CurationStatus.ACCEPTED
-            ):
-                raise TrustedKnowledgeError(
-                    "UNTRUSTED_RELATION_ENDPOINT",
-                    f"accepted relation points to untrusted target {key[0]}:{key[1]}",
-                )
-            self._validate_record(key, current, visiting)
-
-    def _validate_source_quote(self, quote: SourceQuote) -> None:
-        if self.evidence_store is None:
-            raise TrustedKnowledgeError(
-                "EVIDENCE_STORE_REQUIRED",
-                "trusted knowledge validation requires an EvidenceStore",
-            )
-        evidence, source = self._verify_evidence(quote.evidence_ref)
-        issues = _source_quote_binding_issues(
-            quote, evidence, source, path=f"source_quote:{quote.quote_id}",
-        )
-        self._raise_issues(issues)
-        self._remember_evidence(evidence, source)
-
-    def _validate_source_claim(
-        self,
-        claim: SourceClaim,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        quotes_by_id = {
-            quote_id: quote
-            for quote_id in claim.source_quote_refs
-            if isinstance(
-                (quote := self.records.get(("source_quote", quote_id))), SourceQuote
-            )
-        }
-        self._raise_issues(
-            source_claim_binding_issues(
-                claim,
-                quotes_by_id,
-                path=f"source_claim:{claim.claim_id}",
-            )
-        )
-        self._verify_evidence_refs(claim.evidence_refs)
-        for quote_id in claim.source_quote_refs:
-            self._validate_record(("source_quote", quote_id), current, visiting)
-
-    def _validate_reported_result(
-        self,
-        result: ReportedResult,
-        current: Mapping[tuple[str, str], KnowledgeCurationRecord],
-        visiting: set[tuple[str, str]],
-    ) -> None:
-        self._verify_evidence_refs(result.evidence_refs)
-        result_context = result.result_context
-        if result_context is None:
-            return
-        method_facts = {
-            fact_id: fact
-            for fact_id in result_context.method_fact_refs
-            if isinstance((fact := self.records.get(("method_fact", fact_id))), MethodFact)
-        }
-        model_facts = {
-            fact_id: fact
-            for fact_id in result_context.model_fact_refs
-            if isinstance((fact := self.records.get(("model_fact", fact_id))), ModelFact)
-        }
-        self._raise_issues(
-            result_context_record_issues(
-                result,
-                method_facts,
-                model_facts,
-                path=f"reported_result:{result.result_id}.result_context",
-                require_context=False,
-            )
-        )
-        for fact_id in result_context.method_fact_refs:
-            self._validate_record(("method_fact", fact_id), current, visiting)
-        for fact_id in result_context.model_fact_refs:
-            self._validate_record(("model_fact", fact_id), current, visiting)
 
     def _verify_evidence_refs(self, evidence_refs: tuple[str, ...]) -> None:
         for evidence_id in evidence_refs:
@@ -1303,104 +779,14 @@ class TrustedKnowledgeValidator:
     def _validate_historical_authorization(
         self, authorization: HistoricalLiteratureEvidenceAuthorization
     ) -> None:
-        if self.evidence_store is None:
-            raise TrustedKnowledgeError(
-                "EVIDENCE_STORE_REQUIRED",
-                "historical evidence authorization requires an EvidenceStore",
-            )
-        from .representation import validate_literature_representation
-        from .ingestion import LiteratureRepresentationSelector
-
-        try:
-            if authorization.representation_id is not None:
-                representation = LiteratureRepresentationSelector.resolve_reference(
-                    authorization.representation_id,
-                    self.repositories,
-                    self.evidence_store,
-                )
-                if authorization.representation_hash != representation.content_hash:
-                    raise ValueError("historical representation hash mismatch")
-            else:
-                representation = LiteratureRepresentationSelector.resolve_reference(
-                    authorization.ingestion_id or "",
-                    self.repositories,
-                    self.evidence_store,
-                )
-                if authorization.ingestion_hash != representation.ingestion_hash:
-                    raise ValueError("historical ingestion hash mismatch")
-            validate_literature_representation(
-                representation, self.repositories, self.evidence_store
-            )
-            if (
-                authorization.literature_id != representation.literature_id
-                or authorization.source_id != representation.source_id
-                or authorization.source_version != representation.source_version
-            ):
-                raise ValueError("historical authorization binding mismatch")
-            for evidence_id in authorization.evidence_refs:
-                evidence = self.evidence_store.get_evidence(evidence_id)
-                evidence_source = self.evidence_store.verify_evidence_integrity(evidence)
-                if (evidence_source.source_id, evidence_source.version) != (
-                    authorization.source_id,
-                    authorization.source_version,
-                ):
-                    raise ValueError("historical evidence comes from another source")
-                self._remember_evidence(evidence, evidence_source)
-        except Exception as error:
-            if isinstance(error, TrustedKnowledgeError):
-                raise
-            raise TrustedKnowledgeError(
-                "INVALID_HISTORICAL_EVIDENCE_AUTHORIZATION",
-                f"historical evidence authorization is invalid: {authorization.authorization_id}",
-            ) from error
-        self._reachable[
-            ("historical_evidence_authorization", authorization.authorization_id)
-        ] = authorization
-        self._reachable[
-            ("literature_representation_ref", representation.representation_id)
-        ] = representation
-        if representation.representation_kind == LiteratureRepresentationKind.PDF:
-            ingestion = self.repositories.literature_ingestions.get(
-                representation.ingestion_id
-            )
-            canonical = self.repositories.canonical_text_artifacts.get(
-                representation.canonical_text_id or ""
-            )
-            raw = self.repositories.raw_literature_artifacts.get(
-                representation.raw_artifact_id
-            )
-            record_types = (
-                ("literature_ingestion", ingestion.ingestion_id, ingestion),
-                ("canonical_text_artifact", canonical.canonical_text_id, canonical),
-                ("raw_literature_artifact", raw.artifact_id, raw),
-            )
-        else:
-            ingestion = self.repositories.html_literature_ingestions.get(
-                representation.ingestion_id
-            )
-            canonical = self.repositories.canonical_html_text_artifacts.get(
-                representation.canonical_text_id or ""
-            )
-            raw = self.repositories.raw_html_literature_artifacts.get(
-                representation.raw_artifact_id
-            )
-            record_types = (
-                ("html_literature_ingestion", ingestion.ingestion_id, ingestion),
-                (
-                    "canonical_html_text_artifact",
-                    canonical.canonical_text_id,
-                    canonical,
-                ),
-                ("raw_html_literature_artifact", raw.artifact_id, raw),
-            )
-        for record_type, record_id, record in record_types:
-            self._reachable[(record_type, record_id)] = record
-        source = self._verify_source(
-            representation.source_id or "", representation.source_version or ""
+        literature.validate_historical_authorization(
+            authorization,
+            repositories=self.repositories,
+            evidence_store=self.evidence_store,
+            reachable=self._reachable,
+            verify_source=self._verify_source,
+            remember_evidence=self._remember_evidence,
         )
-        self._reachable[
-            ("source_document", f"{source.source_id}@{source.version}")
-        ] = source
 
     def _verify_source(self, source_id: str, source_version: str) -> SourceDocument:
         if self.evidence_store is None:
@@ -1441,12 +827,6 @@ class TrustedKnowledgeValidator:
             for (kind, _), record in sorted(self._reachable.items())
             if kind == record_type and isinstance(record, model_type)
         )
-
-    @staticmethod
-    def _raise_issues(issues: list[Any]) -> None:
-        if issues:
-            issue = issues[0]
-            raise TrustedKnowledgeError(issue.code, issue.message)
 
     @staticmethod
     def _record_hash(record: BaseModel) -> str:
