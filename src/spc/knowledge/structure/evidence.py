@@ -139,6 +139,7 @@ def create_structured_evidence_locator(
     cell: TableCellStructure | None = None,
     figure: FigureStructure | None = None,
 ) -> tuple[EvidenceSpan, StructuredEvidenceLocator]:
+    """Persist the locator and verify its evidence, structure and exact canonical offsets."""
     identity = {
         "evidence_id": evidence.evidence_id,
         "source_id": evidence.source_id,

@@ -1,4 +1,4 @@
-"""Ingest a local literature PDF and bind the canonical source."""
+"""Persist ingested literature and bind its canonical source and provenance."""
 
 from __future__ import annotations
 

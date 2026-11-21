@@ -90,7 +90,12 @@ class HTMLLiteratureTextExtractor:
         blocks: list[CanonicalTextBlock] = []
         cursor = 0
         for block_type, block_text in parser.blocks:
-            blocks.append(canonical_block(block_text, page_number=1, block_type=f"html_{block_type}", section_path=(), start=cursor))
+            blocks.append(
+                canonical_block(
+                    block_text, page_number=1, block_type=f"html_{block_type}",
+                    section_path=(), start=cursor,
+                )
+            )
             cursor += len(block_text) + 2
         return HTMLTextExtraction(
             source_url=source_url,

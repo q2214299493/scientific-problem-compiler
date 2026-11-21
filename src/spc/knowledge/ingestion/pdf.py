@@ -66,7 +66,12 @@ class PypdfLiteratureTextExtractor:
         cursor = 0
         for page_number, page_text in enumerate(page_texts, start=1):
             if page_text:
-                blocks.append(canonical_block(page_text, page_number=page_number, block_type="page_text", section_path=(), start=cursor))
+                blocks.append(
+                    canonical_block(
+                        page_text, page_number=page_number, block_type="page_text",
+                        section_path=(), start=cursor,
+                    )
+                )
             cursor += len(page_text)
             if page_number < len(page_texts):
                 cursor += len(PAGE_SEPARATOR)

@@ -16,7 +16,7 @@ from ..serialization import content_hash
 
 
 class AcquisitionError(ValueError):
-    pass
+    """Shared failure type for resource acquisition and canonical HTML extraction."""
 
 
 class LiteratureMetadata(StrictModel):
@@ -102,6 +102,14 @@ class LiteratureTextExtractor(CanonicalTextExtractor[RawLiteratureArtifact, Path
 
 
 PAGE_SEPARATOR = "\n\n\f\n\n"
+CANONICALIZATION_POLICY = {
+    "page_order": "pdf_page_tree_order",
+    "line_breaks": "normalize_to_lf",
+    "unicode": "NFKC",
+    "page_separator": "two_lf_form_feed_two_lf",
+    "whitespace": "collapse_horizontal_and_repeated_blank_lines",
+    "hyphenation": "preserve",
+}
 
 
 def canonicalize_page(text: str) -> str:
@@ -115,11 +123,14 @@ def canonicalize_page(text: str) -> str:
         compact.pop()
     return "\n".join(compact)
 
+
 def has_usable_text(text: str) -> bool:
     return any(character.isalnum() for character in text)
 
 
-def canonical_block(text: str, *, page_number: int, block_type: str, section_path: tuple[str, ...], start: int) -> CanonicalTextBlock:
+def canonical_block(
+    text: str, *, page_number: int, block_type: str, section_path: tuple[str, ...], start: int
+) -> CanonicalTextBlock:
     identity = {
         "page_number": page_number,
         "block_type": block_type,
@@ -129,16 +140,6 @@ def canonical_block(text: str, *, page_number: int, block_type: str, section_pat
         "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
     return CanonicalTextBlock(block_id=f"canonical-block-{content_hash(identity)[:24]}", **identity)
-
-
-CANONICALIZATION_POLICY = {
-    "page_order": "pdf_page_tree_order",
-    "line_breaks": "normalize_to_lf",
-    "unicode": "NFKC",
-    "page_separator": "two_lf_form_feed_two_lf",
-    "whitespace": "collapse_horizontal_and_repeated_blank_lines",
-    "hyphenation": "preserve",
-}
 
 
 @dataclass(frozen=True)

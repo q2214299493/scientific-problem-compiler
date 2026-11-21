@@ -99,7 +99,12 @@ class DocxSupplementaryTextExtractor:
         blocks: list[CanonicalTextBlock] = []
         offset = 0
         for block_type, section_path, value in pieces:
-            blocks.append(canonical_block(value, page_number=1, block_type=block_type, section_path=section_path, start=offset))
+            blocks.append(
+                canonical_block(
+                    value, page_number=1, block_type=block_type,
+                    section_path=section_path, start=offset,
+                )
+            )
             offset += len(value) + len(separator)
         return LiteratureTextExtraction(
             text=text,
