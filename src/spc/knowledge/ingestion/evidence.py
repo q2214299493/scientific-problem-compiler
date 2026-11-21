@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
-from ...models import EvidenceSpan, LiteratureRepresentationKind
+from ...models import EvidenceSpan, LiteratureRepresentationKind, SourceDocument
 from ...repositories import EvidenceStore, KnowledgeEvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
 from ..representation import LiteratureRepresentationSelector, validate_literature_representation
 from .supplementary import validate_literature_supplementary_source
+
+
+def _store_canonical_span(
+    source: SourceDocument, canonical_text_id: str, start_offset: int, end_offset: int,
+    text: str, locator: str | None, evidence_store: EvidenceStore,
+) -> EvidenceSpan:
+    evidence_identity = {
+        "canonical_text_id": canonical_text_id,
+        "start_offset": start_offset,
+        "end_offset": end_offset,
+        "text_hash": content_hash({"text": text}),
+    }
+    evidence = EvidenceSpan(
+        evidence_id=f"evidence-{content_hash(evidence_identity)[:24]}",
+        source_id=source.source_id,
+        source_version=source.version,
+        content_sha256=source.content_sha256,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        text=text,
+        locator=locator,
+    )
+    evidence_store.add_evidence(evidence)
+    return evidence
 
 
 def create_evidence_span_from_canonical_text(
@@ -60,24 +84,7 @@ def create_evidence_span_from_canonical_text(
     )
     evidence_store.verify_source_integrity(source)
     recovered = text[start_offset:end_offset]
-    evidence_identity = {
-        "canonical_text_id": canonical_text_id,
-        "start_offset": start_offset,
-        "end_offset": end_offset,
-        "text_hash": content_hash({"text": recovered}),
-    }
-    evidence = EvidenceSpan(
-        evidence_id=f"evidence-{content_hash(evidence_identity)[:24]}",
-        source_id=source.source_id,
-        source_version=source.version,
-        content_sha256=source.content_sha256,
-        start_offset=start_offset,
-        end_offset=end_offset,
-        text=recovered,
-        locator=locator,
-    )
-    evidence_store.add_evidence(evidence)
-    return evidence
+    return _store_canonical_span(source, canonical_text_id, start_offset, end_offset, recovered, locator, evidence_store)
 
 
 def create_supplementary_evidence_span(
@@ -126,21 +133,7 @@ def create_supplementary_evidence_span(
         raise ValueError("supplementary quote must occur exactly once in its block")
     start_offset = block.start_offset + block_text.index(exact_text)
     end_offset = start_offset + len(exact_text)
-    identity = {
-        "canonical_text_id": canonical.canonical_text_id,
-        "start_offset": start_offset,
-        "end_offset": end_offset,
-        "text_hash": content_hash({"text": exact_text}),
-    }
-    evidence = EvidenceSpan(
-        evidence_id=f"evidence-{content_hash(identity)[:24]}",
-        source_id=source.source_id,
-        source_version=source.version,
-        content_sha256=source.content_sha256,
-        start_offset=start_offset,
-        end_offset=end_offset,
-        text=exact_text,
-        locator=f"{source_locator}; {locator}",
+    return _store_canonical_span(
+        source, canonical.canonical_text_id, start_offset, end_offset,
+        exact_text, f"{source_locator}; {locator}", evidence_store,
     )
-    evidence_store.add_evidence(evidence)
-    return evidence

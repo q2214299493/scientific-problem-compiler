@@ -135,6 +135,39 @@ def validate_literature_representation(
     return representation
 
 
+def build_representation_reference(
+    *,
+    kind: LiteratureRepresentationKind,
+    literature_id: str,
+    raw_artifact_id: str,
+    raw_artifact_hash: str,
+    canonical_text_id: str | None,
+    canonical_text_hash: str | None,
+    ingestion_id: str,
+    ingestion_hash: str,
+    source_id: str | None,
+    source_version: str | None,
+) -> LiteratureRepresentationReference:
+    identity = {
+        "representation_kind": kind,
+        "literature_id": literature_id,
+        "raw_artifact_id": raw_artifact_id,
+        "raw_artifact_hash": raw_artifact_hash,
+        "canonical_text_id": canonical_text_id,
+        "canonical_text_hash": canonical_text_hash,
+        "ingestion_id": ingestion_id,
+        "ingestion_hash": ingestion_hash,
+        "source_id": source_id,
+        "source_version": source_version,
+    }
+    identity = {key: value for key, value in identity.items() if value is not None}
+    representation_id = f"literature-representation-{content_hash(identity)[:24]}"
+    payload = {"representation_id": representation_id, **identity}
+    return LiteratureRepresentationReference(
+        **payload, content_hash=content_hash(payload)
+    )
+
+
 class LiteratureRepresentationSelector:
     @staticmethod
     def _pdf_representation(
@@ -145,24 +178,17 @@ class LiteratureRepresentationSelector:
         chain = validate_literature_ingestion_chain(
             ingestion, repositories, evidence_store
         )
-        identity = {
-            "representation_kind": LiteratureRepresentationKind.PDF,
-            "literature_id": ingestion.literature_id,
-            "raw_artifact_id": chain.raw_artifact.artifact_id,
-            "raw_artifact_hash": chain.raw_artifact.content_hash,
-            "canonical_text_id": chain.canonical_text.canonical_text_id,
-            "canonical_text_hash": chain.canonical_text.content_hash,
-            "ingestion_id": ingestion.ingestion_id,
-            "ingestion_hash": ingestion.content_hash,
-            "source_id": chain.source.source_id,
-            "source_version": chain.source.version,
-        }
-        representation_id = (
-            f"literature-representation-{content_hash(identity)[:24]}"
-        )
-        payload = {"representation_id": representation_id, **identity}
-        representation = LiteratureRepresentationReference(
-            **payload, content_hash=content_hash(payload)
+        representation = build_representation_reference(
+            kind=LiteratureRepresentationKind.PDF,
+            literature_id=ingestion.literature_id,
+            raw_artifact_id=chain.raw_artifact.artifact_id,
+            raw_artifact_hash=chain.raw_artifact.content_hash,
+            canonical_text_id=chain.canonical_text.canonical_text_id,
+            canonical_text_hash=chain.canonical_text.content_hash,
+            ingestion_id=ingestion.ingestion_id,
+            ingestion_hash=ingestion.content_hash,
+            source_id=chain.source.source_id,
+            source_version=chain.source.version,
         )
         repositories.literature_representation_refs.put(
             representation.representation_id, representation

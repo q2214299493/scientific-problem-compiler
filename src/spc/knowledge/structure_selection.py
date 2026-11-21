@@ -10,7 +10,7 @@ from ..models import (
 )
 from ..repositories import EvidenceStore, KnowledgeRepositories
 from ..serialization import content_hash
-from .acquisition import validate_literature_representation
+from .representation import validate_literature_representation
 
 
 class DocumentStructureSelector:

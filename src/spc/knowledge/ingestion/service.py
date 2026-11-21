@@ -6,7 +6,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from ...models import (
+    CanonicalHTMLTextArtifact,
     CanonicalTextArtifact,
+    HTMLLiteratureIngestionRecord,
+    RawHTMLLiteratureArtifact,
+    SourceDocument,
+    LiteratureRepresentationKind,
+    LiteratureRepresentationReference,
     LiteratureDocument,
     LiteratureIngestionOutcome,
     LiteratureIngestionRecord,
@@ -16,7 +22,10 @@ from ...models import (
 )
 from ...repositories import EvidenceStore, KnowledgeRepositories
 from ...serialization import content_hash
+from ..representation import build_representation_reference, validate_literature_representation
 from ..literature_text import (
+    HTMLTextExtraction,
+    HTMLTextExtractor,
     LiteratureExtractionError,
     LiteratureMetadata,
     LiteratureTextExtraction,
@@ -128,7 +137,7 @@ class LiteratureIngestionService:
             extraction=extraction,
         )
         repositories.literature_ingestions.put(ingestion.ingestion_id, ingestion)
-        self._finalize_literature_document(
+        finalize_literature_document(
             metadata_record,
             literature_id,
             raw_artifact,
@@ -196,31 +205,127 @@ class LiteratureIngestionService:
             content_hash=content_hash(payload),
         )
 
-    @staticmethod
-    def _finalize_literature_document(
-        metadata: LiteratureMetadata,
-        literature_id: str,
-        raw_artifact: RawLiteratureArtifact,
-        canonical: CanonicalTextArtifact,
-        source_id: str,
-        source_version: str,
-        repositories: KnowledgeRepositories,
-    ) -> LiteratureDocument:
-        try:
-            return repositories.literature_documents.get(literature_id)
-        except FileNotFoundError:
-            pass
-        identity = {
-            **metadata.model_dump(mode="json", exclude_none=True),
-            "literature_id": literature_id,
-            "raw_artifact_ref": raw_artifact.stored_path,
-            "canonical_text_ref": canonical.stored_path,
-            "source_id": source_id,
-            "source_version": source_version,
-        }
-        document = LiteratureDocument(
-            **identity,
-            content_hash=content_hash(identity),
-        )
-        repositories.literature_documents.put(literature_id, document)
-        return document
+
+def finalize_literature_document(
+    metadata: LiteratureMetadata,
+    literature_id: str,
+    raw_artifact: RawLiteratureArtifact | RawHTMLLiteratureArtifact,
+    canonical: CanonicalTextArtifact | CanonicalHTMLTextArtifact,
+    source_id: str,
+    source_version: str,
+    repositories: KnowledgeRepositories,
+) -> LiteratureDocument:
+    try:
+        return repositories.literature_documents.get(literature_id)
+    except FileNotFoundError:
+        pass
+    identity = {
+        **metadata.model_dump(mode="json", exclude_none=True),
+        "literature_id": literature_id,
+        "raw_artifact_ref": raw_artifact.stored_path,
+        "canonical_text_ref": canonical.stored_path,
+        "source_id": source_id,
+        "source_version": source_version,
+    }
+    document = LiteratureDocument(
+        **identity,
+        content_hash=content_hash(identity),
+    )
+    repositories.literature_documents.put(literature_id, document)
+    return document
+
+
+def _html_ingestion_record(
+    raw: RawHTMLLiteratureArtifact,
+    canonical: CanonicalHTMLTextArtifact,
+    source: SourceDocument,
+) -> HTMLLiteratureIngestionRecord:
+    identity = {
+        "literature_id": raw.literature_id,
+        "raw_artifact_id": raw.artifact_id,
+        "raw_artifact_hash": raw.content_hash,
+        "canonical_text_id": canonical.canonical_text_id,
+        "canonical_text_hash": canonical.content_hash,
+        "source_id": source.source_id,
+        "source_version": source.version,
+        "extractor_id": canonical.extractor_id,
+        "extractor_version": canonical.extractor_version,
+        "extractor_config_hash": canonical.extractor_config_hash,
+        "ingestion_status": LiteratureIngestionStatus.ACCEPTED,
+    }
+    ingestion_id = f"html-literature-ingestion-{content_hash(identity)[:24]}"
+    payload = {"ingestion_id": ingestion_id, **identity}
+    return HTMLLiteratureIngestionRecord(
+        **payload, content_hash=content_hash(payload)
+    )
+
+
+def ingest_extracted_html(
+    *,
+    body: bytes,
+    source_url: str,
+    media_type: str,
+    extraction: HTMLTextExtraction,
+    extractor: HTMLTextExtractor,
+    metadata: LiteratureMetadata,
+    repositories: KnowledgeRepositories,
+    evidence_store: EvidenceStore,
+) -> LiteratureRepresentationReference:
+    """Persist the fetched bytes, their canonical blocks, and the verified source binding."""
+    literature_id = literature_identity_id(
+        title=metadata.title,
+        authors=metadata.authors,
+        year=metadata.year,
+        doi=metadata.doi,
+    )
+    raw = repositories.raw_html_literature_artifacts.put(
+        body,
+        source_url=source_url,
+        literature_id=literature_id,
+        media_type=media_type,
+    )
+    canonical = repositories.canonical_html_text_artifacts.put(
+        extraction.canonical_text,
+        raw_artifact=raw,
+        extractor_id=extractor.extractor_id,
+        extractor_version=extractor.extractor_version,
+        extractor_config_hash=extractor.extractor_config_hash,
+        blocks=extraction.blocks,
+    )
+    canonical_path = repositories.root.joinpath(
+        *Path(canonical.stored_path).parts
+    )
+    source = evidence_store.ingest_source(
+        canonical_path,
+        f"source-{literature_id}",
+        f"html-{canonical.canonical_text_id.removeprefix('canonical-html-text-')}",
+        metadata.title,
+        source_role="literature_author",
+        source_type="literature_article",
+    )
+    ingestion = _html_ingestion_record(raw, canonical, source)
+    repositories.html_literature_ingestions.put(
+        ingestion.ingestion_id, ingestion
+    )
+    finalize_literature_document(
+        metadata, literature_id, raw, canonical, source.source_id, source.version, repositories
+    )
+    representation = build_representation_reference(
+        kind=LiteratureRepresentationKind.HTML,
+        literature_id=literature_id,
+        raw_artifact_id=raw.artifact_id,
+        raw_artifact_hash=raw.content_hash,
+        canonical_text_id=canonical.canonical_text_id,
+        canonical_text_hash=canonical.content_hash,
+        ingestion_id=ingestion.ingestion_id,
+        ingestion_hash=ingestion.content_hash,
+        source_id=source.source_id,
+        source_version=source.version,
+    )
+    repositories.literature_representation_refs.put(
+        representation.representation_id, representation
+    )
+    validate_literature_representation(
+        representation, repositories, evidence_store
+    )
+    return representation

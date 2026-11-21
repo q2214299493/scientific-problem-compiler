@@ -898,7 +898,7 @@ class TrustedKnowledgeValidator:
         current: Mapping[tuple[str, str], KnowledgeCurationRecord],
         visiting: set[tuple[str, str]],
     ) -> None:
-        from .acquisition import validate_literature_representation
+        from .representation import validate_literature_representation
         from .ingestion import LiteratureRepresentationSelector
 
         try:
@@ -1308,7 +1308,7 @@ class TrustedKnowledgeValidator:
                 "EVIDENCE_STORE_REQUIRED",
                 "historical evidence authorization requires an EvidenceStore",
             )
-        from .acquisition import validate_literature_representation
+        from .representation import validate_literature_representation
         from .ingestion import LiteratureRepresentationSelector
 
         try:
