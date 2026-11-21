@@ -36,6 +36,7 @@ from spc.result_feedback import (
 )
 from spc.serialization import content_hash, dump_yaml, file_sha256, load_data
 from spc.workflow import ScientificProblemWorkflow
+from spc.workflow.repository import ScientificProblemRunRepository
 from test_hierarchical_planning import (
     BaselineRepairHierarchicalProvider,
     CountingHierarchicalProvider,
@@ -580,6 +581,67 @@ def _tree_snapshot(root: Path):
         path.relative_to(root): file_sha256(path) if path.is_file() else None
         for path in root.rglob("*")
     }
+
+
+@pytest.fixture(scope="module")
+def successor_status_artifacts(tmp_path_factory):
+    root = tmp_path_factory.mktemp("successor-status-artifacts")
+    repositories, workflow, run, plan = _approved_parent(root)
+    submission, artifact_root, _ = _submission(root, run, plan)
+    _intake_and_accept(root, repositories, run, submission, artifact_root)
+    service = SuccessorPlanningService(state_dir=root / ".spc", knowledge_dir=repositories.root)
+    planner = TwoCandidateSuccessorPlanner()
+    inputs = {
+        "parent_run_id": run.run_id,
+        "submission_ids": (submission.submission_id,),
+        "planning_provider": planner,
+    }
+    pending = service.compile(**inputs)
+    completed = service.compile(**inputs, selected_candidate_id=pending.candidate_plan_ids[0])
+    assert completed.status.value == "APPROVED"
+    return workflow.runs.run_dir(run.run_id)
+
+
+@pytest.mark.parametrize(
+    ("artifacts", "expected"),
+    [
+        ((), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml",), "SUCCESSOR_INVOCATION_RESERVED"),
+        (("invocation.yaml", "research-update.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "planning-proposal.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "planning-outcome.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "candidates/*.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "compilation-receipts/*.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "validation/*.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("selection.yaml",), "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"),
+        (("approval/approval-review.yaml",), "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"),
+        (("provider-calls/planning.yaml", "approval/plan-gate.yaml"), "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"),
+    ],
+)
+def test_successor_status_detects_orphaned_stage_artifacts(
+    tmp_path, successor_status_artifacts, artifacts, expected
+):
+    repository = ScientificProblemRunRepository(tmp_path)
+    run_id = successor_status_artifacts.name
+    run_root = repository.run_dir(run_id)
+    prefix = Path("successor-planning/cycle-1")
+    cycle_dir = run_root / prefix
+    cycle_dir.mkdir(parents=True)
+    (run_root / "run.json").write_bytes((successor_status_artifacts / "run.json").read_bytes())
+    source = successor_status_artifacts / prefix
+    for pattern in artifacts:
+        artifact = next(source.glob(pattern))
+        target = cycle_dir / artifact.relative_to(source)
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(artifact.read_bytes())
+
+    before = _tree_snapshot(tmp_path)
+    status = result_feedback_status(run_id, repository)["successor_planning"]
+    assert status["latest_status"] == expected
+    assert status["incomplete_cycles"] == [{"cycle": 1, "status": expected}]
+    assert status["cycles"] == 0
+    assert status["latest_complete_cycle"] is None
+    assert _tree_snapshot(tmp_path) == before
 
 
 def test_successor_status_reads_historical_run_with_empty_planning_files(tmp_path):

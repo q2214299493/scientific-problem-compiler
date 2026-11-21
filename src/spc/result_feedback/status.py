@@ -23,6 +23,11 @@ from .submission import ResultFeedbackError
 from .successor import SuccessorStageReader
 
 
+def _has_stage_artifacts(directory: Path) -> bool:
+    # A linked output directory cannot establish that the stage is empty.
+    return directory.is_symlink() or any(directory.glob("*.yaml"))
+
+
 def _successor_stage_status(
     reader: SuccessorStageReader,
     run_id: str,
@@ -35,9 +40,23 @@ def _successor_stage_status(
     planning_claimed = (directory / "provider-calls/planning.yaml").exists()
     has_cycle_record = (directory / "cycle.yaml").exists()
     if not has_cycle_record:
-        if approval_claimed:
+        if approval_claimed or _has_stage_artifacts(directory / "approval"):
             return "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN", None
         if not planning_claimed:
+            # Selection is the handoff to approval. With a planning claim, the
+            # verified planning stage below can still report that it awaits approval.
+            if (directory / "selection.yaml").exists():
+                return "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN", None
+            invocation_path = directory / "invocation.yaml"
+            if (
+                not invocation_path.is_file()
+                or any(path != invocation_path for path in directory.glob("*.yaml"))
+                or any(
+                    _has_stage_artifacts(directory / stage)
+                    for stage in ("candidates", "compilation-receipts", "validation")
+                )
+            ):
+                return "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN", None
             return "SUCCESSOR_INVOCATION_RESERVED", None
 
     try:
