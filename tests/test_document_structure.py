@@ -684,7 +684,7 @@ def test_trusted_snapshot_validates_selected_structure_once(
         selection.selection_id,
         selection.content_hash,
     )
-    from spc.knowledge import structure as structure_module
+    from spc.knowledge.structure import validation as structure_module
 
     original_validate = structure_module.validate_document_structure
     calls = 0

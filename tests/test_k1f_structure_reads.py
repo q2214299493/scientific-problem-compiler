@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from spc.knowledge import structure as structure_module
+from spc.knowledge.structure import validation as structure_module
 from spc.knowledge.structure import validate_document_structure
 from spc.models import LiteratureRepresentationKind
 from test_literature_knowledge import (

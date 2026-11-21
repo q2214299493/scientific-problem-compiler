@@ -27,7 +27,7 @@ from ...repositories import EvidenceStore, KnowledgeRepositories, ModelRepositor
 from ...serialization import content_hash
 from ...backends.rebinding import exact_normalized_matches
 from ..ingestion import create_evidence_span_from_canonical_text
-from ..structure import _create_locator
+from ..structure import create_structured_evidence_locator
 from .context import (
     resolve_figure_ownership,
     resolve_table_ownership,
@@ -439,7 +439,7 @@ class LiteratureKnowledgeMaterializer:
             table_ownership = resolve_table_ownership(block, structure, repositories)
             table, cell = table_ownership if table_ownership is not None else (None, None)
             figure = resolve_figure_ownership(block, structure, repositories)
-            evidence, locator = _create_locator(
+            evidence, locator = create_structured_evidence_locator(
                 evidence=evidence,
                 artifact=structure,
                 block=block,
