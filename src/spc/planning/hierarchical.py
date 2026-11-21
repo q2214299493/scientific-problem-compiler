@@ -20,7 +20,7 @@ from ..models import (
     ScientificPlanningInput,
 )
 from ..serialization import content_hash
-from ..validators import ValidationIssue, ValidationReport
+from ..validation.common import ValidationIssue, ValidationReport, validation_report
 from .mock_provider import build_proposal_set
 from .validators import validate_planning_proposal_set
 
@@ -348,7 +348,7 @@ def validate_research_direction_set(
                 message=f"blocking evidence gap {gap_id} is absent from all directions",
             )
         )
-    return ValidationReport(valid=not issues, issues=tuple(issues))
+    return validation_report(issues)
 
 
 def build_direction_triage_record(
@@ -570,7 +570,7 @@ def validate_direction_triage(
                     message=f"triage removed every direction for blocking gap {gap.gap_id}",
                 )
             )
-    return ValidationReport(valid=not issues, issues=tuple(issues))
+    return validation_report(issues)
 
 
 def build_hierarchical_expansion(
@@ -776,4 +776,4 @@ def validate_hierarchical_expansion(
         expansion.planning_proposal, planning_input
     )
     issues.extend(proposal_report.issues)
-    return ValidationReport(valid=not issues, issues=tuple(issues))
+    return validation_report(issues)

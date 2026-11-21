@@ -29,7 +29,7 @@ from ..models import (
 )
 from ..plan_paths import scientific_value_hash, scientific_values_equal
 from ..serialization import content_hash
-from ..validators import ValidationIssue, ValidationReport
+from ..validation.common import ValidationIssue, ValidationReport, validation_report
 from .mock_provider import build_proposal_set
 
 
@@ -602,7 +602,7 @@ def validate_plan_revision_response(
                 path="feedback_responses",
             )
         )
-    return ValidationReport(valid=not issues, issues=tuple(issues))
+    return validation_report(issues)
 
 
 def build_revision_proposal_set(

@@ -4,7 +4,6 @@ from collections import Counter
 from itertools import combinations
 import math
 import re
-from typing import Iterable
 
 from ..models import (
     EvidenceSpan,
@@ -21,12 +20,8 @@ from ..models import (
     SourceType,
 )
 from ..serialization import content_hash
-from ..validators import EvidenceSpanRepository, ValidationIssue, ValidationReport
-
-
-def _report(issues: Iterable[ValidationIssue]) -> ValidationReport:
-    result = tuple(issues)
-    return ValidationReport(valid=not result, issues=result)
+from ..validation.common import ValidationIssue, ValidationReport, validation_report
+from ..validation.evidence import EvidenceSpanRepository
 
 
 def _context_evidence_ids(context: ScientificContextPacket) -> set[str]:
@@ -91,7 +86,7 @@ def validate_claim_evidence_refs(
                 path=f"source_claims[{index}]",
             )
         )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def source_quote_record_issues(
@@ -312,7 +307,7 @@ def validate_source_quotes(
     evidence_repository: EvidenceSpanRepository,
 ) -> ValidationReport:
     issues, _ = _source_quote_issues(packet, context, evidence_repository)
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_claim_source_binding(
@@ -329,7 +324,7 @@ def validate_claim_source_binding(
                 path=f"source_claims[{index}]",
             )
         )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_result_units(packet: ScientificEvidencePacket) -> ValidationReport:
@@ -343,7 +338,7 @@ def validate_result_units(packet: ScientificEvidencePacket) -> ValidationReport:
                     path=f"reported_results[{index}]",
                 )
             )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_result_provenance(
@@ -398,7 +393,7 @@ def validate_result_provenance(
                     path=path,
                 )
             )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def result_context_record_issues(
@@ -491,7 +486,7 @@ def validate_result_context(packet: ScientificEvidencePacket) -> ValidationRepor
                 require_context=True,
             )
         )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def _mismatched_context_fields(left: ReportedResult, right: ReportedResult) -> set[str]:
@@ -534,7 +529,7 @@ def validate_result_comparability(packet: ScientificEvidencePacket) -> Validatio
                     path="comparison_constraints",
                 )
             )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_conflict_sets(packet: ScientificEvidencePacket) -> ValidationReport:
@@ -557,7 +552,7 @@ def validate_conflict_sets(packet: ScientificEvidencePacket) -> ValidationReport
                     path=f"conflict_sets[{index}]",
                 )
             )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_comparison_constraints(
@@ -604,7 +599,7 @@ def validate_comparison_constraints(
                 path=path,
             )
         )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_gap_capabilities(
@@ -633,7 +628,7 @@ def validate_gap_capabilities(
                     path=path,
                 )
             )
-    return _report(issues)
+    return validation_report(issues)
 
 
 def validate_evidence_packet_integrity(
@@ -774,4 +769,4 @@ def validate_evidence_packet_integrity(
                 path="capability_candidates",
             )
         )
-    return _report(issues)
+    return validation_report(issues)

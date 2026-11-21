@@ -9,7 +9,7 @@ from ..models import (
     RevisionApprovalReviewInput,
 )
 from ..plan_paths import resolve_plan_path
-from ..validators import ValidationIssue, ValidationReport
+from ..validation.common import ValidationIssue, ValidationReport, format_issue_codes, validation_report
 
 
 ApprovalInput = ApprovalReviewInput | RevisionApprovalReviewInput
@@ -223,11 +223,11 @@ def validate_approval_response(
                 message="initial approval cannot use the revision approval contract",
             )
         )
-    return ValidationReport(valid=not issues, issues=tuple(issues))
+    return validation_report(issues)
 
 
 class ApprovalResponseError(ValueError):
     def __init__(self, report: ValidationReport) -> None:
         self.report = report
-        codes = ", ".join(issue.code for issue in report.issues)
+        codes = format_issue_codes(report)
         super().__init__(f"ApprovalLLMResponse validation failed: {codes}")

@@ -15,13 +15,14 @@ from ..models import (
     ScientificQuestionPlan,
 )
 from ..serialization import content_hash, file_sha256, load_data
+from ..validation.common import format_issue_messages
 from ..validators import ValidationIssue, ValidationReport, validate_export
 
 
 class DownstreamImportError(RuntimeError):
     def __init__(self, report: ValidationReport) -> None:
         self.report = report
-        super().__init__("; ".join(f"{item.code}: {item.message}" for item in report.issues))
+        super().__init__(format_issue_messages(report))
 
 
 class DownstreamImportValidator:
