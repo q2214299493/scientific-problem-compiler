@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
@@ -148,6 +151,26 @@ class PinnedHTTPTransport:
         ) from last_error
 
 
+# Synchronous resolvers and injected connectors can use different fetchers in one
+# import. Carry its restrictions through those calls without mutating a fetcher.
+_url_checks: ContextVar[tuple[Callable[[str], None], ...]] = ContextVar(
+    "spc_http_url_checks", default=(),
+)
+
+
+@contextmanager
+def restrict_http_urls(check: Callable[[str], None]) -> Iterator[None]:
+    checks = _url_checks.get()
+    if check in checks:
+        yield
+        return
+    token = _url_checks.set((*checks, check))
+    try:
+        yield
+    finally:
+        _url_checks.reset(token)
+
+
 class SafeHTTPFetcher:
     def __init__(
         self,
@@ -171,6 +194,8 @@ class SafeHTTPFetcher:
     ) -> HTTPResponse:
         current = url
         for redirect_count in range(self.max_redirects + 1):
+            for check in _url_checks.get():
+                check(current)
             validated_ips = self._validated_ips(current)
             response = self.transport.request(
                 current,

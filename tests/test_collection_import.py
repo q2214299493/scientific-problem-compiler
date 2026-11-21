@@ -372,6 +372,10 @@ def test_changed_second_crawl_creates_snapshot_and_diff(tmp_path: Path) -> None:
     diff = diff_collection_snapshots(first.snapshot, second.snapshot)
 
     assert first.snapshot.snapshot_id != second.snapshot.snapshot_id
+    # Historical snapshot and diff bindings from 1b8dac8 for these page bytes.
+    assert first.snapshot.content_hash == "8994989e8785fb183891e84b8d81d030a049911716f1151f13957c4395c1b789"
+    assert second.snapshot.content_hash == "8fea38b544269ae3963b10386ef8c816455ddc2ccafe7a2989f86d7985b435b8"
+    assert diff.content_hash == "4824711d51524c90162cde3cd5cf66a7e97db13b313dccebee540125e1148d2e"
     assert len(repos.collection_snapshots.list()) == 2
     assert len(diff.added_resource_ids) == 1
     assert len(diff.removed_resource_ids) == 1
