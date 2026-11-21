@@ -698,7 +698,7 @@ def test_structure_read_witness_uses_exact_bytes_and_rejects_changed_reread(tmp_
 def test_identity_bound_list_loads_and_checks_each_record_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from spc import repositories as repository_module
+    from spc.repository_components import base as repository_module
 
     repositories, _store, _outcome, _structure = setup_html_literature(tmp_path)
     repository = repositories.document_structure_blocks

@@ -36,6 +36,7 @@ from spc.repositories import (
     KnowledgeRepositories,
     SourceEvidenceStore,
 )
+from spc.repository_components.collection import CollectionRepositories
 from spc.serialization import content_hash
 
 
@@ -399,7 +400,7 @@ def test_import_isolates_failed_pdf_and_preserves_counts_and_trust_boundary(
     repos, store = repositories(tmp_path)
     definition = make_collection_definition(entry, "base")
     outcome = CollectionImportService(fetcher=fetcher(responses)).run(
-        definition, repos, store
+        definition, repos.collection, store
     )
     record = repos.collection_imports.get(outcome.import_id)
 
@@ -556,7 +557,9 @@ def test_cli_custom_collection_scope_is_applied(monkeypatch: pytest.MonkeyPatch)
             assert indent == 2
             return "{}"
 
-    def fake_run(_self, definition, _repositories, evidence_store):
+    def fake_run(_self, definition, repositories, evidence_store):
+        assert isinstance(repositories, CollectionRepositories)
+        assert repositories.evidence_store is evidence_store
         captured["definition"] = definition
         captured["evidence_store"] = evidence_store
         return FakeOutcome()

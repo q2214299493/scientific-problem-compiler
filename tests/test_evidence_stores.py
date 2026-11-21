@@ -101,7 +101,7 @@ def test_list_evidence_shares_sources_only_within_one_closed_read(
 def test_list_evidence_keeps_verification_when_source_cache_budget_is_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from spc import repositories as repository_module
+    from spc.repository_components import evidence as repository_module
 
     store, _source, first, second = _shared_source_evidence(tmp_path)
     monkeypatch.setattr(repository_module, "_MAX_LIST_SOURCE_BYTES", 0)
@@ -122,7 +122,7 @@ def test_list_evidence_keeps_verification_when_source_cache_budget_is_exhausted(
 def test_list_evidence_rejects_changes_during_shared_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
 ) -> None:
-    from spc import repositories as repository_module
+    from spc.repository_components import evidence as repository_module
 
     store, source, first, second = _shared_source_evidence(tmp_path)
     original = repository_module.load_model

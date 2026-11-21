@@ -253,6 +253,9 @@ from .result_feedback import (
     SuccessorPlanningService,
     result_feedback_status,
 )
+from .repository_components.collection import CollectionRepositories
+from .repository_components.expert import ExpertRepositories
+from .repository_components.literature import LiteratureRepositories
 from .repositories import (
     CompositeEvidenceStore,
     KnowledgeEvidenceStore,
@@ -332,11 +335,12 @@ def ingest_literature(
     metadata_payload = load_data(metadata)
     if not isinstance(metadata_payload, dict):
         raise typer.BadParameter("--metadata must contain a mapping")
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = LiteratureIngestionService().ingest(
         paper,
         metadata_payload,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories,
+        repositories.evidence_store,
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -356,11 +360,12 @@ def add_literature(
     metadata_payload = load_data(metadata) if metadata is not None else None
     if metadata_payload is not None and not isinstance(metadata_payload, dict):
         raise typer.BadParameter("--metadata must contain a mapping")
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = LiteratureAcquisitionService().add(
         source,
         domain,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories,
+        repositories.evidence_store,
         explicit_metadata=metadata_payload,
     )
     typer.echo(outcome.model_dump_json(indent=2))
@@ -406,10 +411,11 @@ def import_literature_collection(
         domain,
         scope_policy=policy,
     )
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = CollectionImportService().run(
         definition,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        CollectionRepositories(repositories),
+        repositories.evidence_store,
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -433,12 +439,13 @@ def select_literature_representation(
     """Select one validated PDF/HTML representation without curating it."""
     if (representation_id is None) == (ingestion_id is None):
         raise typer.BadParameter("provide exactly one of --representation-id or compatibility --ingestion-id")
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = LiteratureRepresentationSelector().select(
         literature_id,
         representation_id or ingestion_id or "",
         selected_by,
         rationale,
-        KnowledgeRepositories(knowledge_dir),
+        repositories,
         _evidence_view(knowledge_dir, state_dir),
     )
     typer.echo(outcome.model_dump_json(indent=2))
@@ -480,8 +487,8 @@ def structure_literature(
     ] = None,
 ) -> None:
     """Create an exact-offset document structure for one representation."""
-    repositories = KnowledgeRepositories(knowledge_dir)
-    evidence_store = KnowledgeEvidenceStore(knowledge_dir)
+    repositories = LiteratureRepositories(knowledge_dir)
+    evidence_store = repositories.evidence_store
     backend_run_id = None
     external_proposal_id = None
     external_promotion_id = None
@@ -632,7 +639,7 @@ def add_expert(
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
 ) -> None:
     """Create one explicit expert identity/context profile."""
-    repositories = KnowledgeRepositories(knowledge_dir)
+    repositories = ExpertRepositories(knowledge_dir)
     profile = make_expert_profile(name, organization=organization, role=role)
     try:
         existing = repositories.expert_profiles.get(profile.expert_id)
@@ -670,7 +677,7 @@ def add_expert_source(
         expert_id,
         source,
         source_type,
-        repositories,
+        repositories.expert,
         domain=domain,
         source_relationship=source_relationship,
         attribution_basis=attribution_basis,
@@ -1056,14 +1063,14 @@ def select_document_structure(
     ] = False,
 ) -> None:
     """Explicitly promote one stored document structure artifact."""
-    repositories = KnowledgeRepositories(knowledge_dir)
+    repositories = LiteratureRepositories(knowledge_dir)
     artifact = repositories.document_structure_artifacts.get(structure_id)
     selection = DocumentStructureSelector().select(
         artifact.literature_id,
         representation_id,
         structure_id,
         repositories,
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories.evidence_store,
         rationale=rationale,
         allow_rollback=allow_rollback,
     )
@@ -1085,7 +1092,7 @@ def inspect_literature_structure(
     """Inspect a stored structure with deterministic exact-field filters."""
     result = inspect_document_structure(
         structure_id,
-        KnowledgeRepositories(knowledge_dir),
+        LiteratureRepositories(knowledge_dir),
         page=page,
         section_path=tuple(section) if section else None,
         table_label=table_label,
