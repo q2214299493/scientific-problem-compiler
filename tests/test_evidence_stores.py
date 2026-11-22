@@ -21,8 +21,9 @@ from spc.repositories import (
     KnowledgeRepositories,
     ProjectEvidenceStore,
 )
-from spc.retrieval import ScientificContextBuilder
+from spc.retrieval import RetrievalIntegrityError, ScientificContextBuilder
 from spc.serialization import content_hash, dump_yaml
+from spc.workflow.knowledge_access import open_knowledge
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -599,10 +600,32 @@ def test_trusted_shared_pdf_snapshot_fails_on_source_tampering(tmp_path: Path) -
         )
 
 
+def test_open_knowledge_rechecks_evidence_paths_after_loading_catalogs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    load = KnowledgeRepositories.load_capabilities
+
+    def replace_evidence_directory(repositories, records):
+        load(repositories, records)
+        directory = repositories.evidence_store.root / "evidence"
+        directory.rename(directory.with_name("original-evidence"))
+        try:
+            directory.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks are unavailable on this platform")
+
+    monkeypatch.setattr(KnowledgeRepositories, "load_capabilities", replace_evidence_directory)
+    with pytest.raises(ValueError, match="evidence repository directory escapes its root"):
+        open_knowledge(tmp_path / "knowledge", tmp_path / "state", "base", DomainPackLoader())
+    assert not (tmp_path / "state").exists()
+
+
 def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> None:
     knowledge_root = tmp_path / "knowledge"
     knowledge = KnowledgeEvidenceStore(knowledge_root)
-    add_text_evidence(
+    source, _ = add_text_evidence(
         knowledge,
         tmp_path,
         source_id="shared-retrieval",
@@ -610,7 +633,8 @@ def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> 
         text="surface pathway observable",
     )
 
-    packet = ScientificContextBuilder().build(
+    builder = ScientificContextBuilder()
+    packet = builder.build(
         "surface pathway observable",
         "base",
         state_dir=tmp_path / "project-b" / ".spc",
@@ -620,6 +644,15 @@ def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> 
     assert {hit.record_id for hit in packet.evidence_hits} == {
         "ev-shared-retrieval"
     }
+
+    stored = knowledge.root / source.stored_path
+    stored.chmod(0o644)
+    stored.write_bytes(b"changed between retrievals")
+    with pytest.raises(RetrievalIntegrityError, match="hash does not match"):
+        builder.build(
+            "surface pathway observable", "base",
+            state_dir=tmp_path / "project-b" / ".spc", knowledge_dir=knowledge_root,
+        )
 
 
 def test_literature_cli_defaults_to_knowledge_evidence_store(tmp_path: Path) -> None:
