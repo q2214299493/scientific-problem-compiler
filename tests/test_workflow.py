@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from spc.cli import app
-from spc.knowledge.trust import TrustedKnowledgeValidator
+from spc.knowledge.trust import TrustedKnowledgeError, TrustedKnowledgeValidator
 from spc.models import (
     CurationStatus,
     EvidenceSpan,
@@ -17,15 +18,27 @@ from spc.models import (
     ScientificQuestionPlan,
 )
 from spc.repositories import ProjectEvidenceStore
-from spc.serialization import content_hash, load_data
+from spc.serialization import content_hash, file_sha256, load_data
 from spc.workflow import (
     ScientificProblemWorkflow,
     render_scientific_run_markdown,
 )
-from test_knowledge_retrieval import _prepare
+from spc.workflow.service import build_knowledge_status
+from test_knowledge_retrieval import _curate, _prepare
 
 
 REQUEST = "The mechanism is not sufficiently convincing without a distinguishing observation."
+
+
+def test_workflow_service_compatibility_exports() -> None:
+    from spc.workflow import service
+    from spc.workflow.repository import ScientificProblemRunRepository as Repository
+    from spc.workflow.service import ScientificProblemRunRepository
+
+    assert ScientificProblemRunRepository is Repository
+    assert "ScientificProblemRunRepository" in service.__all__
+    for name in service.__all__:
+        assert hasattr(service, name), name
 
 
 def test_trusted_prepared_knowledge_dry_run_is_offline_and_bounded(tmp_path: Path) -> None:
@@ -389,3 +402,165 @@ def test_unified_cli_dry_run_and_markdown_export(tmp_path: Path) -> None:
     )
     assert export_result.exit_code == 0, export_result.output
     assert REQUEST in report_path.read_text(encoding="utf-8")
+
+
+def test_legacy_entry_reuses_complete_outputs_with_explicit_approver(tmp_path, monkeypatch):
+    from spc.approval import MockApprovalProvider
+    from spc.planning import MockPlanningProvider
+    from spc.retrieval import ScientificContextBuilder
+    from spc.workflow import service
+
+    knowledge, *_ = _prepare(tmp_path)
+    assert service.ScientificProblemWorkflow is ScientificProblemWorkflow
+    workflow = service.ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    run = workflow.start(REQUEST, "base", approval_provider="mock").run
+    root = workflow.runs.run_dir(run.run_id)
+    artifacts = {path: path.read_bytes() for path in root.rglob("*.yaml")}
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a completed stage was invoked during resume")
+
+    monkeypatch.setattr(ScientificContextBuilder, "build", unexpected)
+    monkeypatch.setattr(MockPlanningProvider, "propose", unexpected)
+    monkeypatch.setattr(MockApprovalProvider, "review", unexpected)
+    resumed = workflow.resume(run.run_id, approval_provider="mock").run
+
+    assert resumed == run
+    assert artifacts == {path: path.read_bytes() for path in root.rglob("*.yaml")}
+    assert service.scientific_run_status(resumed, workflow.runs)["current_stage"] == "APPROVED"
+    assert service.render_scientific_run_markdown(resumed, workflow.runs) == render_scientific_run_markdown(run, workflow.runs)
+
+
+@pytest.mark.parametrize("stage", ["planning", "approval"])
+def test_resume_after_interrupted_direct_provider_keeps_claim(tmp_path, monkeypatch, stage):
+    from spc.approval import MockApprovalProvider
+    from spc.planning import MockPlanningProvider
+
+    knowledge, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    calls = 0
+
+    def interrupt(*args):
+        nonlocal calls
+        calls += 1
+        raise KeyboardInterrupt
+
+    provider, method = (MockPlanningProvider, "propose") if stage == "planning" else (MockApprovalProvider, "review")
+    monkeypatch.setattr(provider, method, interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        workflow.start(REQUEST, "base", approval_provider="mock")
+    interrupted, = workflow.runs.list()
+    resumed = workflow.resume(interrupted.run_id, approval_provider="mock").run
+
+    assert resumed.status == ScientificProblemRunStatus.FAILED
+    assert resumed.failure.stage == stage
+    assert resumed.failure.category == "ProviderOutcomeUncertain"
+    assert not resumed.failure.retryable
+    assert calls == 1
+
+
+def test_resume_validates_complete_approval_after_projection_write_interruption(tmp_path, monkeypatch):
+    from spc.approval import MockApprovalProvider
+
+    knowledge, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    original_save = workflow.runs.save
+
+    def interrupted(run):
+        if run.status == ScientificProblemRunStatus.APPROVED:
+            raise KeyboardInterrupt
+        return original_save(run)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workflow.runs, "save", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            workflow.start(REQUEST, "base", approval_provider="mock")
+    pending, = workflow.runs.list()
+    assert pending.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+    monkeypatch.setattr(MockApprovalProvider, "review", lambda *args: pytest.fail("review repeated"))
+    resumed = workflow.resume(pending.run_id).run
+    assert resumed.status == ScientificProblemRunStatus.APPROVED
+    assert resumed.approval_receipt_id and resumed.gate_id
+
+
+@pytest.fixture
+def record_index_spy(monkeypatch):
+    spy = Mock(wraps=TrustedKnowledgeValidator.record_index)
+    monkeypatch.setattr(TrustedKnowledgeValidator, "record_index", staticmethod(spy))
+    return spy
+
+
+def test_knowledge_status_is_read_only_before_initialization(tmp_path, record_index_spy):
+    status = build_knowledge_status(tmp_path / "knowledge", tmp_path / ".spc")
+    assert status["literature"]["trusted_documents"] == 0
+    assert not tuple(tmp_path.iterdir())
+    assert record_index_spy.call_count == 1
+
+
+def _read_status_without_writes(root):
+    def inventory():
+        return {
+            path.relative_to(root): file_sha256(path) if path.is_file() else None
+            for path in root.rglob("*")
+        }
+
+    before = inventory()
+    try:
+        return build_knowledge_status(root / "knowledge", root / ".spc")
+    finally:
+        assert inventory() == before
+
+
+def test_knowledge_status_reindexes_and_rechecks_evidence_on_each_query(tmp_path, record_index_spy):
+    _, store, *_ = _prepare(tmp_path)
+    status = _read_status_without_writes(tmp_path)
+    assert record_index_spy.call_count == 1
+    assert status == {
+        "literature": {
+            "documents": 1, "trusted_documents": 1,
+            "machine_extracted_records": 0, "accepted_scientific_records": 4,
+        },
+        "experts": {
+            "profiles": 1, "sources": 0, "accepted_attributions": 1, "opinions": 1,
+            "trusted_opinions": 1, "expert_cases": 1, "trusted_cases": 1,
+        },
+        "trust": {
+            "broken_provenance_count": 0, "broken_provenance": [],
+            "pending_curation_count": 0, "pending_curation": (),
+        },
+        "model_inference_performed": False,
+    }
+
+    source = store.source_content_path(store.get_source("source-k1h-paper", "v1"))
+    source.chmod(0o600)
+    source.write_bytes(b"changed between status queries")
+    changed = _read_status_without_writes(tmp_path)
+    assert record_index_spy.call_count == 2
+    assert changed["literature"]["trusted_documents"] == 0
+    assert changed["trust"]["broken_provenance"] == [
+        "INVALID_KNOWLEDGE_EVIDENCE: evidence is unavailable or invalid: ev-k1h-literature"
+    ]
+
+
+def test_knowledge_status_preserves_curation_filter_and_stale_target_error(tmp_path):
+    repositories, _, claim, method, result, _, _, relations = _prepare(
+        tmp_path,
+        claim_status=CurationStatus.MACHINE_EXTRACTED,
+        opinion_status=CurationStatus.REJECTED,
+        case_status=CurationStatus.REJECTED,
+    )
+    status = _read_status_without_writes(tmp_path)
+    expected_pending = tuple(sorted([
+        *(f"knowledge_relation:{relation.relation_id}" for relation in relations),
+        f"method_fact:{method.fact_id}", f"reported_result:{result.result_id}",
+        f"source_claim:{claim.claim_id}", "source_claim:claim-k1h-conflict",
+    ]))
+    assert status["trust"]["pending_curation"] == expected_pending
+    assert status["literature"]["machine_extracted_records"] == len(expected_pending)
+    assert status["literature"]["accepted_scientific_records"] == 0
+    assert status["experts"]["trusted_opinions"] == status["experts"]["trusted_cases"] == 0
+
+    _curate(repositories, "source_claim", claim.claim_id, method, CurationStatus.ACCEPTED)
+    with pytest.raises(TrustedKnowledgeError) as error:
+        _read_status_without_writes(tmp_path)
+    assert error.value.code == "CURATION_TARGET_HASH_MISMATCH"

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-import spc.workflow.service as workflow_service
+from spc.workflow import providers as workflow_providers
 from spc.cli import app
 from spc.models import (
     ApprovalDecision,
@@ -160,7 +160,7 @@ def test_hierarchical_workflow_runs_three_stages_and_resume_reuses_them(
     CountingHierarchicalProvider.triage_calls = 0
     CountingHierarchicalProvider.expansion_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", CountingHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", CountingHierarchicalProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
@@ -585,7 +585,7 @@ def test_unresolved_human_choice_blocks_expansion_and_resume(
     provider_class.directions_calls = 0
     provider_class.triage_calls = 0
     provider_class.expansion_calls = 0
-    monkeypatch.setattr(workflow_service, "MockPlanningProvider", provider_class)
+    monkeypatch.setattr(workflow_providers, "MockPlanningProvider", provider_class)
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
     )
@@ -638,7 +638,7 @@ def test_all_directions_unavailable_is_blocked_and_resume_does_not_reinvoke(
     ExcludingProvider.directions_calls = 0
     ExcludingProvider.triage_calls = 0
     ExcludingProvider.expansion_calls = 0
-    monkeypatch.setattr(workflow_service, "MockPlanningProvider", ExcludingProvider)
+    monkeypatch.setattr(workflow_providers, "MockPlanningProvider", ExcludingProvider)
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
     )
@@ -670,7 +670,7 @@ def test_uncertain_direction_attempt_is_not_blindly_retried(
     repositories, *_ = _prepare(tmp_path)
     InterruptedDirectionProvider.directions_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", InterruptedDirectionProvider
+        workflow_providers, "MockPlanningProvider", InterruptedDirectionProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
@@ -754,7 +754,7 @@ def test_hierarchical_candidate_uses_existing_bounded_revision_loop(
 ) -> None:
     repositories, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service,
+        workflow_providers,
         "MockPlanningProvider",
         BaselineRepairHierarchicalProvider,
     )
@@ -770,7 +770,7 @@ def test_hierarchical_candidate_uses_existing_bounded_revision_loop(
         max_plan_revisions=1,
     ).run
 
-    chain = workflow._load_revision_chain(run.run_id)
+    chain = workflow.runs.load_revision_chain(run.run_id)
     assert chain is not None
     assert run.status == ScientificProblemRunStatus.APPROVED
     assert chain.revisions_used == 1
@@ -812,10 +812,10 @@ def test_wrong_direction_records_replanning_without_restarting_hierarchy(
     CountingHierarchicalProvider.triage_calls = 0
     CountingHierarchicalProvider.expansion_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", CountingHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", CountingHierarchicalProvider
     )
     monkeypatch.setattr(
-        workflow_service, "MockApprovalProvider", ReplanningApprovalProvider
+        workflow_providers, "MockApprovalProvider", ReplanningApprovalProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
@@ -829,7 +829,7 @@ def test_wrong_direction_records_replanning_without_restarting_hierarchy(
         max_plan_revisions=2,
     ).run
     assert run.status == ScientificProblemRunStatus.REQUIRES_REPLANNING
-    chain = workflow._load_revision_chain(run.run_id)
+    chain = workflow.runs.load_revision_chain(run.run_id)
     assert chain is not None
     assert chain.revisions_used == 0
 
@@ -984,3 +984,17 @@ def test_plan_cli_accepts_explicit_hierarchical_strategy(tmp_path: Path) -> None
     assert result.exit_code == 0, result.output
     for name in ("directions.yaml", "triage.yaml", "expansion.yaml"):
         assert (output_dir / "hierarchical-planning" / name).is_file()
+
+
+def test_status_ignores_hierarchy_directory_without_an_authoritative_cycle(tmp_path):
+    knowledge, *_ = _prepare(tmp_path)
+    workflow = ScientificProblemWorkflow(state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root)
+    run = workflow.start(REQUEST, "base").run
+    stray = workflow.runs.resolve_artifact_path(run.run_id, "evidence-hierarchy-99/directions.yaml")
+    stray.parent.mkdir()
+    stray.write_text("{}", encoding="utf-8")
+
+    status = scientific_run_status(run, workflow.runs)
+    assert status["hierarchical_planning"] is None
+    assert status["current_stage"] == "AWAITING_APPROVAL"
+    assert status["approval_state"] is None

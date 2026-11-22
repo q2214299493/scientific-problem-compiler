@@ -328,6 +328,10 @@ def test_codex_cli_transport_isolated_proposal_is_audited_and_materialized(
 
     invocation = compiled.proposal_set.provider_invocation
     assert invocation is not None
+    baseline_path = Path(__file__).parent / "fixtures" / "provider-invocation-200a208.json"
+    baseline = json.loads(baseline_path.read_bytes())
+    assert type(invocation).model_validate(baseline["provider_invocation"]) == invocation
+    assert compiled.proposal_set.model_dump(mode="json", include=set(baseline)) == baseline
     assert invocation.runtime_version == "codex-cli 99.1.2-test"
     assert invocation.transport_version == "1.1.0"
     assert invocation.selected_model == "test-codex-model"

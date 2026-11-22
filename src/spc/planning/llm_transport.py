@@ -2,9 +2,27 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
+import math
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+
+
+def validate_generation_parameters(
+    temperature: float,
+    max_attempts: int,
+    *,
+    temperature_error: str = "temperature must be a finite non-negative number",
+) -> None:
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError(temperature_error)
+    if not 1 <= max_attempts <= 5:
+        raise ValueError("max_attempts must be between one and five")
+
+
+def validate_max_batches(max_batches: int | None, *, error_message: str) -> None:
+    if max_batches is not None and max_batches < 1:
+        raise ValueError(error_message)
 
 
 class LLMTransport(Protocol):

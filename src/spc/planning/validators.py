@@ -4,13 +4,13 @@ from ..domains import DomainPackLoader
 from ..models import PlanningProposalSet, PlanningStrategyClass, ScientificPlanningInput
 from ..retrieval.ranker import contains_ontology_variant, normalize_text, ontology_groups
 from ..serialization import content_hash
-from ..validators import ValidationIssue, ValidationReport
+from ..validation.common import ValidationIssue, ValidationReport, format_issue_codes, validation_report
 
 
 class PlanningProposalError(ValueError):
     def __init__(self, report: ValidationReport) -> None:
         self.report = report
-        codes = ", ".join(issue.code for issue in report.issues)
+        codes = format_issue_codes(report)
         super().__init__(f"PlanningProposalSet validation failed: {codes}")
 
 
@@ -289,4 +289,4 @@ def validate_planning_proposal_set(
                     message=f"blocking evidence gap {gap.gap_id} is neither addressed nor propagated",
                 )
             )
-    return ValidationReport(valid=not issues, issues=tuple(issues))
+    return validation_report(issues)

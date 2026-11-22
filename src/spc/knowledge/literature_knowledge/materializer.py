@@ -24,10 +24,11 @@ from ...models import (
     SourceQuote,
 )
 from ...repositories import EvidenceStore, KnowledgeRepositories, ModelRepository
+from ...repository_components.base import put_reuse
 from ...serialization import content_hash
 from ...backends.rebinding import exact_normalized_matches
 from ..ingestion import create_evidence_span_from_canonical_text
-from ..structure import _create_locator
+from ..structure import create_structured_evidence_locator
 from .context import (
     resolve_figure_ownership,
     resolve_table_ownership,
@@ -95,13 +96,7 @@ class LiteratureKnowledgeCompilationOutcome:
 
 
 def _put_reuse(repository: ModelRepository, key: str, record: BaseModel) -> None:
-    try:
-        existing = repository.get(key)
-    except FileNotFoundError:
-        repository.put(key, record)
-        return
-    if existing != record:
-        raise FileExistsError(f"conflicting materialized record: {key}")
+    put_reuse(repository, key, record, conflict_prefix="conflicting materialized record")
 
 
 def _rebind_or_create_quote_evidence(
@@ -388,7 +383,7 @@ class LiteratureKnowledgeMaterializer:
             or proposal_set.compilation_input_hash != compilation_input.content_hash
         ):
             raise ValueError("literature knowledge proposal does not bind the compilation input")
-        LiteratureKnowledgeProposalSetRepository(repositories.root).put(
+        LiteratureKnowledgeProposalSetRepository.for_operation(repositories).put(
             proposal_set.proposal_set_id,
             proposal_set,
         )
@@ -439,7 +434,7 @@ class LiteratureKnowledgeMaterializer:
             table_ownership = resolve_table_ownership(block, structure, repositories)
             table, cell = table_ownership if table_ownership is not None else (None, None)
             figure = resolve_figure_ownership(block, structure, repositories)
-            evidence, locator = _create_locator(
+            evidence, locator = create_structured_evidence_locator(
                 evidence=evidence,
                 artifact=structure,
                 block=block,
@@ -474,7 +469,7 @@ class LiteratureKnowledgeMaterializer:
                 quote=quote,
             )
             _put_reuse(
-                LiteratureKnowledgeGroundingRepository(repositories.root),
+                LiteratureKnowledgeGroundingRepository.for_operation(repositories),
                 grounding.grounding_id,
                 grounding,
             )
@@ -708,7 +703,7 @@ class LiteratureKnowledgeMaterializer:
         payload = {"compilation_id": compilation_id, **compilation_identity}
         record = LiteratureKnowledgeCompilationRecord(**payload, content_hash=content_hash(payload))
         _put_reuse(
-            LiteratureKnowledgeCompilationRepository(repositories.root),
+            LiteratureKnowledgeCompilationRepository.for_operation(repositories),
             record.compilation_id,
             record,
         )

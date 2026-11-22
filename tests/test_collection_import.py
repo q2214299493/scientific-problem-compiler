@@ -36,6 +36,7 @@ from spc.repositories import (
     KnowledgeRepositories,
     SourceEvidenceStore,
 )
+from spc.repository_components.collection import CollectionRepositories
 from spc.serialization import content_hash
 
 
@@ -371,6 +372,10 @@ def test_changed_second_crawl_creates_snapshot_and_diff(tmp_path: Path) -> None:
     diff = diff_collection_snapshots(first.snapshot, second.snapshot)
 
     assert first.snapshot.snapshot_id != second.snapshot.snapshot_id
+    # Historical snapshot and diff bindings from 1b8dac8 for these page bytes.
+    assert first.snapshot.content_hash == "8994989e8785fb183891e84b8d81d030a049911716f1151f13957c4395c1b789"
+    assert second.snapshot.content_hash == "8fea38b544269ae3963b10386ef8c816455ddc2ccafe7a2989f86d7985b435b8"
+    assert diff.content_hash == "4824711d51524c90162cde3cd5cf66a7e97db13b313dccebee540125e1148d2e"
     assert len(repos.collection_snapshots.list()) == 2
     assert len(diff.added_resource_ids) == 1
     assert len(diff.removed_resource_ids) == 1
@@ -399,7 +404,7 @@ def test_import_isolates_failed_pdf_and_preserves_counts_and_trust_boundary(
     repos, store = repositories(tmp_path)
     definition = make_collection_definition(entry, "base")
     outcome = CollectionImportService(fetcher=fetcher(responses)).run(
-        definition, repos, store
+        definition, repos.collection, store
     )
     record = repos.collection_imports.get(outcome.import_id)
 
@@ -556,7 +561,9 @@ def test_cli_custom_collection_scope_is_applied(monkeypatch: pytest.MonkeyPatch)
             assert indent == 2
             return "{}"
 
-    def fake_run(_self, definition, _repositories, evidence_store):
+    def fake_run(_self, definition, repositories, evidence_store):
+        assert isinstance(repositories, CollectionRepositories)
+        assert repositories.evidence_store is evidence_store
         captured["definition"] = definition
         captured["evidence_store"] = evidence_store
         return FakeOutcome()

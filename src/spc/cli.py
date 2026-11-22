@@ -253,6 +253,9 @@ from .result_feedback import (
     SuccessorPlanningService,
     result_feedback_status,
 )
+from .repository_components.collection import CollectionRepositories
+from .repository_components.expert import ExpertRepositories
+from .repository_components.literature import LiteratureRepositories
 from .repositories import (
     CompositeEvidenceStore,
     KnowledgeEvidenceStore,
@@ -288,13 +291,25 @@ app = typer.Typer(
 )
 
 
+def _require_llm_options(endpoint: str | None, model: str | None) -> tuple[str, str]:
+    if endpoint is None or model is None:
+        raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
+    return endpoint, model
+
+
+def _require_codex_model(model: str | None) -> str:
+    if model is None:
+        raise typer.BadParameter("--provider codex requires an explicit --codex-model")
+    return model
+
+
 def _emit_report(report: object) -> None:
     typer.echo(json.dumps(report.model_dump(mode="json"), indent=2, ensure_ascii=False))
 
 
-def _evidence_view(knowledge_dir: Path, state_dir: Path) -> CompositeEvidenceStore:
+def _evidence_view(knowledge_store: KnowledgeEvidenceStore, state_dir: Path) -> CompositeEvidenceStore:
     return CompositeEvidenceStore(
-        KnowledgeEvidenceStore(knowledge_dir),
+        knowledge_store,
         ProjectEvidenceStore(state_dir),
     )
 
@@ -332,11 +347,12 @@ def ingest_literature(
     metadata_payload = load_data(metadata)
     if not isinstance(metadata_payload, dict):
         raise typer.BadParameter("--metadata must contain a mapping")
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = LiteratureIngestionService().ingest(
         paper,
         metadata_payload,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories,
+        repositories.evidence_store,
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -356,11 +372,12 @@ def add_literature(
     metadata_payload = load_data(metadata) if metadata is not None else None
     if metadata_payload is not None and not isinstance(metadata_payload, dict):
         raise typer.BadParameter("--metadata must contain a mapping")
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = LiteratureAcquisitionService().add(
         source,
         domain,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories,
+        repositories.evidence_store,
         explicit_metadata=metadata_payload,
     )
     typer.echo(outcome.model_dump_json(indent=2))
@@ -406,10 +423,11 @@ def import_literature_collection(
         domain,
         scope_policy=policy,
     )
+    repositories = LiteratureRepositories(knowledge_dir)
     outcome = CollectionImportService().run(
         definition,
-        KnowledgeRepositories(knowledge_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        CollectionRepositories(repositories),
+        repositories.evidence_store,
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -433,13 +451,15 @@ def select_literature_representation(
     """Select one validated PDF/HTML representation without curating it."""
     if (representation_id is None) == (ingestion_id is None):
         raise typer.BadParameter("provide exactly one of --representation-id or compatibility --ingestion-id")
+    repositories = LiteratureRepositories(knowledge_dir)
+    repositories.evidence_store.prepare_directories(initialize=True)
     outcome = LiteratureRepresentationSelector().select(
         literature_id,
         representation_id or ingestion_id or "",
         selected_by,
         rationale,
-        KnowledgeRepositories(knowledge_dir),
-        _evidence_view(knowledge_dir, state_dir),
+        repositories,
+        _evidence_view(repositories.evidence_store, state_dir),
     )
     typer.echo(outcome.model_dump_json(indent=2))
 
@@ -450,10 +470,13 @@ def migrate_knowledge_evidence_command(
     state_dir: Annotated[Path, typer.Option("--state-dir")] = Path(".spc"),
 ) -> None:
     """Copy legacy literature evidence into the shared knowledge evidence store."""
+    repositories = KnowledgeRepositories(knowledge_dir)
+    legacy_store = ProjectEvidenceStore(state_dir)
+    repositories.evidence_store.prepare_directories(initialize=True)
     result = migrate_knowledge_evidence(
-        KnowledgeRepositories(knowledge_dir),
-        ProjectEvidenceStore(state_dir),
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories,
+        legacy_store,
+        repositories.evidence_store,
     )
     typer.echo(json.dumps(asdict(result), indent=2, ensure_ascii=False))
 
@@ -480,8 +503,8 @@ def structure_literature(
     ] = None,
 ) -> None:
     """Create an exact-offset document structure for one representation."""
-    repositories = KnowledgeRepositories(knowledge_dir)
-    evidence_store = KnowledgeEvidenceStore(knowledge_dir)
+    repositories = LiteratureRepositories(knowledge_dir)
+    evidence_store = repositories.evidence_store
     backend_run_id = None
     external_proposal_id = None
     external_promotion_id = None
@@ -632,7 +655,7 @@ def add_expert(
     knowledge_dir: Annotated[Path, typer.Option("--knowledge-dir")] = Path("knowledge"),
 ) -> None:
     """Create one explicit expert identity/context profile."""
-    repositories = KnowledgeRepositories(knowledge_dir)
+    repositories = ExpertRepositories(knowledge_dir)
     profile = make_expert_profile(name, organization=organization, role=role)
     try:
         existing = repositories.expert_profiles.get(profile.expert_id)
@@ -670,7 +693,7 @@ def add_expert_source(
         expert_id,
         source,
         source_type,
-        repositories,
+        repositories.expert,
         domain=domain,
         source_relationship=source_relationship,
         attribution_basis=attribution_basis,
@@ -723,10 +746,7 @@ def extract_expert_knowledge(
         selected_provider = MockExpertKnowledgeProvider()
         provider_notice = "offline test provider; output is not expert interpretation"
     elif provider == "codex":
-        if codex_model is None:
-            raise typer.BadParameter(
-                "--provider codex requires an explicit --codex-model"
-            )
+        codex_model = _require_codex_model(codex_model)
         expert_knowledge_llm_wire_schema()
         transport = CodexCLILLMTransport(
             codex_executable,
@@ -880,10 +900,7 @@ def extract_literature_knowledge(
         selected_provider = MockLiteratureKnowledgeProvider()
         provider_notice = "offline test provider; output is not scientific paper interpretation"
     elif provider == "llm":
-        if llm_endpoint is None or llm_model is None:
-            raise typer.BadParameter(
-                "--provider llm requires --llm-endpoint and --llm-model"
-            )
+        llm_endpoint, llm_model = _require_llm_options(llm_endpoint, llm_model)
         selected_provider = StructuredLLMLiteratureKnowledgeProvider(
             HTTPJSONLLMTransport(
                 llm_endpoint,
@@ -900,10 +917,7 @@ def extract_literature_knowledge(
         )
         provider_notice = "structured proposal provider; explicit human curation remains required"
     elif provider == "codex":
-        if codex_model is None:
-            raise typer.BadParameter(
-                "--provider codex requires an explicit --codex-model"
-            )
+        codex_model = _require_codex_model(codex_model)
         transport = CodexCLILLMTransport(
             codex_executable,
             model=codex_model,
@@ -933,11 +947,12 @@ def extract_literature_knowledge(
         raise typer.BadParameter("--provider must be 'mock', 'llm', or 'codex'")
     repositories = KnowledgeRepositories(knowledge_dir)
     try:
+        repositories.evidence_store.prepare_directories(initialize=True)
         outcome = LiteratureKnowledgeCompiler().compile(
             literature_id,
             selected_provider,
             repositories,
-            KnowledgeEvidenceStore(knowledge_dir),
+            repositories.evidence_store,
             include_supplementary=include_supplementary,
         )
     except (
@@ -1002,10 +1017,11 @@ def inspect_literature_knowledge(
 ) -> None:
     """Inspect deterministic K1F records and their grounding provenance."""
     repositories = KnowledgeRepositories(knowledge_dir)
+    repositories.evidence_store.prepare_directories(initialize=True)
     result = LiteratureScientificKnowledgeViewBuilder().build(
         literature_id,
         repositories,
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories.evidence_store,
         view_mode=view,
         record_type=record_type,
         curation_status=curation_status,
@@ -1056,14 +1072,14 @@ def select_document_structure(
     ] = False,
 ) -> None:
     """Explicitly promote one stored document structure artifact."""
-    repositories = KnowledgeRepositories(knowledge_dir)
+    repositories = LiteratureRepositories(knowledge_dir)
     artifact = repositories.document_structure_artifacts.get(structure_id)
     selection = DocumentStructureSelector().select(
         artifact.literature_id,
         representation_id,
         structure_id,
         repositories,
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories.evidence_store,
         rationale=rationale,
         allow_rollback=allow_rollback,
     )
@@ -1085,7 +1101,7 @@ def inspect_literature_structure(
     """Inspect a stored structure with deterministic exact-field filters."""
     result = inspect_document_structure(
         structure_id,
-        KnowledgeRepositories(knowledge_dir),
+        LiteratureRepositories(knowledge_dir),
         page=page,
         section_path=tuple(section) if section else None,
         table_label=table_label,
@@ -1150,7 +1166,8 @@ def retrieve_knowledge(
     repositories.load_expert_cases(pack.expert_cases)
     repositories.load_workflow_patterns(pack.workflow_patterns)
     repositories.load_capabilities(pack.capabilities)
-    store = KnowledgeEvidenceStore(knowledge_dir)
+    store = repositories.evidence_store
+    store.prepare_directories(initialize=True)
     query = build_retrieval_query(query_text, domain, pack.profile)
     from .knowledge.trust import _ValidatedTrustedRead
 
@@ -1223,7 +1240,7 @@ def interpret(
     try:
         packet = ScientificEvidencePacketBuilder(MockInterpretationProvider()).build(
             context,
-            _evidence_view(knowledge_dir, state_dir),
+            _evidence_view(KnowledgeEvidenceStore(knowledge_dir), state_dir),
         )
     except EvidencePacketIntegrityError as error:
         _emit_report(error.report)
@@ -1255,19 +1272,20 @@ def plan(
     evidence_packet = load_model(evidence_packet_file, ScientificEvidencePacket)
     if context.domain != domain:
         raise typer.BadParameter("--domain must match the ScientificContextPacket domain")
-    evidence_repository = _evidence_view(knowledge_dir, state_dir)
+    repositories = KnowledgeRepositories(knowledge_dir)
+    evidence_repository = _evidence_view(repositories.evidence_store, state_dir)
     try:
+        repositories.evidence_store.prepare_directories(initialize=True)
         planning_input = PlanningContextResolver().resolve(
             context,
             evidence_packet,
-            KnowledgeRepositories(knowledge_dir),
+            repositories,
             evidence_repository,
         )
         if provider == "mock":
             planning_provider = MockPlanningProvider()
         elif provider == "llm":
-            if llm_endpoint is None or llm_model is None:
-                raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
+            llm_endpoint, llm_model = _require_llm_options(llm_endpoint, llm_model)
             planning_provider = StructuredLLMPlanningProvider(
                 HTTPJSONLLMTransport(
                     llm_endpoint,
@@ -1462,7 +1480,7 @@ def validate(
         report = validate_question_plan(
             plan,
             pack.capabilities,
-            _evidence_view(knowledge_dir, state_dir),
+            _evidence_view(KnowledgeEvidenceStore(knowledge_dir), state_dir),
         )
         if record_output is not None:
             dump_yaml(
@@ -1503,22 +1521,23 @@ def review(
     planning_input = load_model(planning_input_file, ScientificPlanningInput)
     candidate_plan = load_model(candidate_plan_file, ScientificQuestionPlan)
     validation_record = load_model(validation_record_file, PlanValidationRecord)
-    evidence_repository = _evidence_view(knowledge_dir, state_dir)
+    repositories = KnowledgeRepositories(knowledge_dir)
+    evidence_repository = _evidence_view(repositories.evidence_store, state_dir)
     try:
+        repositories.evidence_store.prepare_directories(initialize=True)
         review_input = ApprovalContextResolver().resolve(
             context,
             evidence_packet,
             planning_input,
             candidate_plan,
             validation_record,
-            KnowledgeRepositories(knowledge_dir),
+            repositories,
             evidence_repository,
         )
         if provider == "mock":
             approval_provider = MockApprovalProvider()
         elif provider == "llm":
-            if llm_endpoint is None or llm_model is None:
-                raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
+            llm_endpoint, llm_model = _require_llm_options(llm_endpoint, llm_model)
             approval_provider = StructuredLLMApprovalProvider(
                 HTTPJSONLLMTransport(
                     llm_endpoint,
@@ -1689,7 +1708,7 @@ def export(
     try:
         path = GenericExportService(
             exports_dir,
-            _evidence_view(knowledge_dir, state_dir),
+            _evidence_view(KnowledgeEvidenceStore(knowledge_dir), state_dir),
         ).export(
             plan=plan,
             verdict=verdict,

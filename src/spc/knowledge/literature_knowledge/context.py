@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from ...immutable import FrozenDict
 from ...models import (
     CurationStatus,
@@ -20,10 +18,11 @@ from ...repositories import (
     TableCellStructureRepository,
     TableStructureRepository,
 )
-from ...serialization import content_hash
+from ...serialization import build_content_bound_record as _content_bound
 from ..ingestion import LiteratureRepresentationSelector
 from ..structure import validate_document_structure
 from ..structure_selection import resolve_current_structure_selection
+from ..text_chunking import bounded_text_ranges
 from ..trust import TrustedKnowledgeValidator
 from .contracts import LiteratureKnowledgeChunk, LiteratureKnowledgeCompilationInput
 from .repositories import (
@@ -42,12 +41,6 @@ COMPILER_POLICY_VERSION = "1.0.0"
 CHUNK_POLICY_ID = "spc-structure-block-bounded-chunks"
 CHUNK_POLICY_VERSION = "1.0.0"
 MAX_CHUNK_CHARACTERS = 8_000
-
-
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
 
 
 def resolve_literature_knowledge_input(
@@ -113,7 +106,7 @@ def resolve_literature_knowledge_input(
         "compilation_input_id",
         identity,
     )
-    LiteratureKnowledgeCompilationInputRepository(repositories.root).put(
+    LiteratureKnowledgeCompilationInputRepository.for_operation(repositories).put(
         record.compilation_input_id,
         record,
     )
@@ -125,7 +118,7 @@ def validate_literature_knowledge_input(
     repositories: KnowledgeRepositories,
     evidence_store: EvidenceStore | None = None,
 ) -> LiteratureKnowledgeCompilationInput:
-    stored = LiteratureKnowledgeCompilationInputRepository(repositories.root).get(
+    stored = LiteratureKnowledgeCompilationInputRepository.for_operation(repositories).get(
         record.compilation_input_id
     )
     if stored != record:
@@ -141,24 +134,6 @@ def validate_literature_knowledge_input(
     if current != record:
         raise ValueError("literature knowledge input is not bound to current authority")
     return record
-
-
-def _bounded_ranges(start: int, end: int, text: str) -> Iterable[tuple[int, int]]:
-    cursor = start
-    while cursor < end:
-        boundary = min(cursor + MAX_CHUNK_CHARACTERS, end)
-        if boundary < end:
-            relative = text[cursor:boundary]
-            split = max(relative.rfind("\n"), relative.rfind(" "))
-            if split > MAX_CHUNK_CHARACTERS // 2:
-                boundary = cursor + split + 1
-        while cursor < boundary and text[cursor].isspace():
-            cursor += 1
-        while boundary > cursor and text[boundary - 1].isspace():
-            boundary -= 1
-        if boundary > cursor:
-            yield cursor, boundary
-        cursor = max(boundary, cursor + 1)
 
 
 def _canonical_block_map(
@@ -312,7 +287,7 @@ def validate_literature_knowledge_chunk(
     compilation_input: LiteratureKnowledgeCompilationInput,
     repositories: KnowledgeRepositories,
 ) -> LiteratureKnowledgeChunk:
-    stored = LiteratureKnowledgeChunkRepository(repositories.root).get(chunk.chunk_id)
+    stored = LiteratureKnowledgeChunkRepository.for_operation(repositories).get(chunk.chunk_id)
     if stored != chunk:
         raise ValueError("literature knowledge chunk differs from repository record")
     if (
@@ -376,7 +351,9 @@ def build_literature_knowledge_chunks(
             or block.content_region not in compilation_input.included_content_regions
         ):
             continue
-        for start, end in _bounded_ranges(block.start_offset, block.end_offset, canonical_text):
+        for start, end in bounded_text_ranges(
+            canonical_text, block.start_offset, block.end_offset, max_characters=MAX_CHUNK_CHARACTERS
+        ):
             identity = {
                 "literature_id": compilation_input.literature_id,
                 "representation_id": compilation_input.representation_id,
@@ -400,6 +377,6 @@ def build_literature_knowledge_chunks(
                 "chunk_id",
                 identity,
             )
-            LiteratureKnowledgeChunkRepository(repositories.root).put(chunk.chunk_id, chunk)
+            LiteratureKnowledgeChunkRepository.for_operation(repositories).put(chunk.chunk_id, chunk)
             chunks.append(chunk)
     return tuple(sorted(chunks, key=lambda item: (item.canonical_start_offset, item.chunk_id)))

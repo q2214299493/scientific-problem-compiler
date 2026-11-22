@@ -185,10 +185,10 @@ def _curate(
     )
 
 
-def setup_html_literature(tmp_path: Path):
+def setup_html_literature(tmp_path: Path, *, body: bytes = HTML):
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
     store = KnowledgeEvidenceStore(repositories.root)
-    fetcher = SafeHTTPFetcher(StaticHTMLTransport(), dns_resolver=lambda _host: ("93.184.216.34",))
+    fetcher = SafeHTTPFetcher(StaticHTMLTransport(body), dns_resolver=lambda _host: ("93.184.216.34",))
     outcome = LiteratureAcquisitionService(fetcher).add(ARTICLE_URL, "base", repositories, store)
     LiteratureRepresentationSelector().select(
         outcome.literature_id or "",
@@ -698,7 +698,7 @@ def test_structure_read_witness_uses_exact_bytes_and_rejects_changed_reread(tmp_
 def test_identity_bound_list_loads_and_checks_each_record_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from spc import repositories as repository_module
+    from spc.repository_components import base as repository_module
 
     repositories, _store, _outcome, _structure = setup_html_literature(tmp_path)
     repository = repositories.document_structure_blocks
@@ -789,7 +789,7 @@ def test_structure_fingerprint_is_bound_before_initial_validation(
 def test_structure_fingerprint_catches_change_during_source_revalidation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from spc.knowledge import acquisition
+    from spc.knowledge import representation
 
     repositories, store, outcome, _structure = setup_html_literature(tmp_path)
     selection = repositories.document_structure_selections.resolve_current(outcome.representation_id or "")
@@ -797,14 +797,14 @@ def test_structure_fingerprint_catches_change_during_source_revalidation(
     block_id = next(iter(artifact.block_hashes))
     index = _fingerprinted_structure_index(repositories, store)
     index._validate_structure_once(selection, repositories, store)
-    original = acquisition.validate_literature_representation
+    original = representation.validate_literature_representation
 
     def change_after_source_check(*args, **kwargs):
         checked = original(*args, **kwargs)
         (repositories.document_structure_blocks.root / f"{block_id}.json").write_text("{}", encoding="utf-8")
         return checked
 
-    monkeypatch.setattr(acquisition, "validate_literature_representation", change_after_source_check)
+    monkeypatch.setattr(representation, "validate_literature_representation", change_after_source_check)
     with pytest.raises(ValueError, match="structure changed during trusted read"):
         index.revalidate_structures()
 

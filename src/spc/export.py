@@ -21,6 +21,7 @@ from .models import (
     ScientificQuestionPlan,
 )
 from .serialization import content_hash, dump_json, dump_yaml, file_sha256, require_safe_path_component
+from .validation.common import format_issue_messages
 from .validators import (
     EvidenceSpanRepository,
     ValidationIssue,
@@ -42,7 +43,7 @@ class AgentAdapter(Protocol):
 class ExportError(RuntimeError):
     def __init__(self, report: ValidationReport) -> None:
         self.report = report
-        super().__init__("; ".join(f"{item.code}: {item.message}" for item in report.issues))
+        super().__init__(format_issue_messages(report))
 
 
 class GenericExportService:

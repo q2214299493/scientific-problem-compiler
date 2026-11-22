@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from ...models import CurationStatus
 from ...repositories import KnowledgeRepositories
+from ...repository_components.base import put_reuse
+from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
+from ..text_chunking import bounded_text_ranges
 from ..trust import TrustedKnowledgeValidator
 from .contracts import (
     ExpertKnowledgeChunk,
@@ -19,20 +20,8 @@ CHUNK_POLICY_VERSION = "1.0.0"
 MAX_CHUNK_CHARACTERS = 2_000
 
 
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
-
-
 def _put_reuse(repository, key: str, record) -> None:
-    try:
-        existing = repository.get(key)
-    except FileNotFoundError:
-        repository.put(key, record)
-        return
-    if existing != record:
-        raise FileExistsError(f"conflicting immutable expert compilation record: {key}")
+    put_reuse(repository, key, record, conflict_prefix="conflicting immutable expert compilation record")
 
 
 def resolve_expert_knowledge_input(
@@ -87,24 +76,6 @@ def resolve_expert_knowledge_input(
     return record
 
 
-def _bounded_ranges(start: int, end: int, text: str) -> Iterable[tuple[int, int]]:
-    cursor = start
-    while cursor < end:
-        boundary = min(cursor + MAX_CHUNK_CHARACTERS, end)
-        if boundary < end:
-            relative = text[cursor:boundary]
-            split = max(relative.rfind("\n"), relative.rfind(" "))
-            if split > MAX_CHUNK_CHARACTERS // 2:
-                boundary = cursor + split + 1
-        while cursor < boundary and text[cursor].isspace():
-            cursor += 1
-        while boundary > cursor and text[boundary - 1].isspace():
-            boundary -= 1
-        if boundary > cursor:
-            yield cursor, boundary
-        cursor = max(boundary, cursor + 1)
-
-
 def _page_segments(length: int, pages: tuple[ExpertSourcePage, ...]):
     if pages:
         return tuple((page.start_offset, page.end_offset, page.page_number) for page in pages)
@@ -124,7 +95,7 @@ def build_expert_knowledge_chunks(
     text = content_path.read_text(encoding="utf-8")
     chunks: list[ExpertKnowledgeChunk] = []
     for start, end, page_number in _page_segments(len(text), source_record.page_ranges):
-        for chunk_start, chunk_end in _bounded_ranges(start, end, text):
+        for chunk_start, chunk_end in bounded_text_ranges(text, start, end, max_characters=MAX_CHUNK_CHARACTERS):
             identity = {
                 "expert_source_id": source_record.expert_source_id,
                 "expert_id": source_record.expert_id,

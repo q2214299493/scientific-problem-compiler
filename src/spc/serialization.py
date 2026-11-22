@@ -40,6 +40,15 @@ def content_hash(value: BaseModel | dict[str, Any] | list[Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def build_content_bound_record(
+    model_type: type[ModelT], prefix: str, id_field: str, identity: dict[str, Any]
+) -> ModelT:
+    """Bind the caller's prepared identity, then hash the record including its ID."""
+    record_id = f"{prefix}-{content_hash(identity)[:24]}"
+    payload = {id_field: record_id, **identity}
+    return model_type(**payload, content_hash=content_hash(payload))
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

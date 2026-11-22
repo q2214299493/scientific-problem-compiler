@@ -6,21 +6,8 @@ from pydantic import Field, model_validator
 
 from ...models import NonBlankStr, Sha256Str, StrictModel
 from ...serialization import content_hash
+from ...validation.common import require_content_binding as _validate_content_bound
 from ..literature_knowledge.contracts import LiteratureKnowledgeProviderInvocation
-
-
-def _validate_content_bound(model: StrictModel, *, id_field: str, prefix: str) -> None:
-    identity = model.model_dump(
-        mode="json",
-        exclude={id_field, "content_hash"},
-        exclude_none=True,
-    )
-    expected_id = f"{prefix}-{content_hash(identity)[:24]}"
-    if getattr(model, id_field) != expected_id:
-        raise ValueError(f"{type(model).__name__} identity is not content-bound")
-    payload = {id_field: expected_id, **identity}
-    if getattr(model, "content_hash") != content_hash(payload):
-        raise ValueError(f"{type(model).__name__} content_hash is invalid")
 
 
 class ExpertKnowledgeViewMode(StrEnum):

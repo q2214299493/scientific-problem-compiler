@@ -1,0 +1,163 @@
+old_file,old_line,old_symbol,kind,new_file,new_line,new_symbol,production_modules_importing_original_top_level_symbol
+acquisition.py,59,DOI_PATTERN,Assign,acquisition/metadata.py,38,DOI_PATTERN,
+acquisition.py,60,SUPPORTED_PDF_TYPES,Assign,acquisition/metadata.py,32,SUPPORTED_PDF_TYPES,
+acquisition.py,61,SUPPORTED_HTML_TYPES,Assign,acquisition/metadata.py,35,SUPPORTED_HTML_TYPES,spc.knowledge.collection
+acquisition.py,64,AcquisitionError,Class,literature_text.py,18,AcquisitionError,spc.knowledge; spc.knowledge.collection
+acquisition.py,68,SafeHTTPError,Class,acquisition/transport.py,17,SafeHTTPError,spc.knowledge; spc.knowledge.collection
+acquisition.py,69,SafeHTTPError.__init__,Function,acquisition/transport.py,18,SafeHTTPError.__init__,spc.knowledge; spc.knowledge.collection
+acquisition.py,76,HTTPResponse,Class,acquisition/transport.py,25,HTTPResponse,spc.knowledge
+acquisition.py,84,HTTPTransport,Class,acquisition/transport.py,33,HTTPTransport,
+acquisition.py,85,HTTPTransport.request,Function,acquisition/transport.py,34,HTTPTransport.request,
+acquisition.py,97,_PinnedHTTPConnection,Class,acquisition/transport.py,46,_PinnedHTTPConnection,
+acquisition.py,98,_PinnedHTTPConnection.__init__,Function,acquisition/transport.py,47,_PinnedHTTPConnection.__init__,
+acquisition.py,102,_PinnedHTTPConnection.connect,Function,acquisition/transport.py,51,_PinnedHTTPConnection.connect,
+acquisition.py,108,_PinnedHTTPSConnection,Class,acquisition/transport.py,57,_PinnedHTTPSConnection,
+acquisition.py,109,_PinnedHTTPSConnection.__init__,Function,acquisition/transport.py,58,_PinnedHTTPSConnection.__init__,
+acquisition.py,120,_PinnedHTTPSConnection.connect,Function,acquisition/transport.py,69,_PinnedHTTPSConnection.connect,
+acquisition.py,127,PinnedHTTPTransport,Class,acquisition/transport.py,76,PinnedHTTPTransport,spc.knowledge
+acquisition.py,130,PinnedHTTPTransport.__init__,Function,acquisition/transport.py,79,PinnedHTTPTransport.__init__,spc.knowledge
+acquisition.py,133,PinnedHTTPTransport.request,Function,acquisition/transport.py,82,PinnedHTTPTransport.request,spc.knowledge
+acquisition.py,202,SafeHTTPFetcher,Class,acquisition/transport.py,151,SafeHTTPFetcher,spc.knowledge; spc.knowledge.collection; spc.knowledge.expert_knowledge.source
+acquisition.py,203,SafeHTTPFetcher.__init__,Function,acquisition/transport.py,152,SafeHTTPFetcher.__init__,spc.knowledge; spc.knowledge.collection; spc.knowledge.expert_knowledge.source
+acquisition.py,220,SafeHTTPFetcher.fetch,Function,acquisition/transport.py,169,SafeHTTPFetcher.fetch,spc.knowledge; spc.knowledge.collection; spc.knowledge.expert_knowledge.source
+acquisition.py,297,SafeHTTPFetcher._validated_ips,Function,acquisition/transport.py,246,SafeHTTPFetcher._validated_ips,spc.knowledge; spc.knowledge.collection; spc.knowledge.expert_knowledge.source
+acquisition.py,333,SafeHTTPFetcher._resolve_host,Function,acquisition/transport.py,282,SafeHTTPFetcher._resolve_host,spc.knowledge; spc.knowledge.collection; spc.knowledge.expert_knowledge.source
+acquisition.py,346,normalize_doi,Function,acquisition/metadata.py,41,normalize_doi,spc.backends.retrieval.resolver; spc.knowledge; spc.knowledge.collection
+acquisition.py,365,detect_acquisition_input,Function,acquisition/metadata.py,60,detect_acquisition_input,spc.knowledge
+acquisition.py,381,_make_candidate,Function,acquisition/metadata.py,76,_make_candidate,
+acquisition.py,387,_make_resource,Function,acquisition/metadata.py,82,_make_resource,
+acquisition.py,410,_make_metadata_retrieval,Function,acquisition/metadata.py,105,_make_metadata_retrieval,
+acquisition.py,440,_make_request,Function,acquisition/metadata.py,135,_make_request,
+acquisition.py,455,_reprioritize_candidates,Function,acquisition/metadata.py,150,_reprioritize_candidates,
+acquisition.py,474,_pdf_metadata,Function,acquisition/metadata.py,169,_pdf_metadata,
+acquisition.py,489,ResourceResolver,Class,acquisition/resolvers.py,37,ResourceResolver,spc.knowledge
+acquisition.py,493,ResourceResolver.resolve,Function,acquisition/resolvers.py,41,ResourceResolver.resolve,spc.knowledge
+acquisition.py,497,LocalPDFResolver,Class,acquisition/resolvers.py,45,LocalPDFResolver,spc.knowledge
+acquisition.py,501,LocalPDFResolver.resolve,Function,acquisition/resolvers.py,49,LocalPDFResolver.resolve,spc.knowledge
+acquisition.py,536,DOIResolver,Class,acquisition/resolvers.py,84,DOIResolver,spc.knowledge
+acquisition.py,540,DOIResolver.__init__,Function,acquisition/resolvers.py,88,DOIResolver.__init__,spc.knowledge
+acquisition.py,544,DOIResolver.resolve,Function,acquisition/resolvers.py,92,DOIResolver.resolve,spc.knowledge
+acquisition.py,620,DOIResolver._year,Function,acquisition/resolvers.py,168,DOIResolver._year,spc.knowledge
+acquisition.py,634,_MetadataHTMLParser,Class,acquisition/metadata.py,184,_MetadataHTMLParser,
+acquisition.py,635,_MetadataHTMLParser.__init__,Function,acquisition/metadata.py,185,_MetadataHTMLParser.__init__,
+acquisition.py,642,_MetadataHTMLParser.handle_starttag,Function,acquisition/metadata.py,192,_MetadataHTMLParser.handle_starttag,
+acquisition.py,654,_MetadataHTMLParser.handle_endtag,Function,acquisition/metadata.py,204,_MetadataHTMLParser.handle_endtag,
+acquisition.py,658,_MetadataHTMLParser.handle_data,Function,acquisition/metadata.py,208,_MetadataHTMLParser.handle_data,
+acquisition.py,663,ArticleURLResolver,Class,acquisition/resolvers.py,182,ArticleURLResolver,spc.knowledge
+acquisition.py,667,ArticleURLResolver.__init__,Function,acquisition/resolvers.py,186,ArticleURLResolver.__init__,spc.knowledge
+acquisition.py,671,ArticleURLResolver.resolve,Function,acquisition/resolvers.py,190,ArticleURLResolver.resolve,spc.knowledge
+acquisition.py,773,HTMLTextExtraction,Class,literature_text.py,146,HTMLTextExtraction,spc.knowledge
+acquisition.py,781,_CanonicalHTMLParser,Class,ingestion/html.py,13,_CanonicalHTMLParser,
+acquisition.py,800,_CanonicalHTMLParser.__init__,Function,ingestion/html.py,32,_CanonicalHTMLParser.__init__,
+acquisition.py,806,_CanonicalHTMLParser.handle_starttag,Function,ingestion/html.py,38,_CanonicalHTMLParser.handle_starttag,
+acquisition.py,814,_CanonicalHTMLParser.handle_endtag,Function,ingestion/html.py,46,_CanonicalHTMLParser.handle_endtag,
+acquisition.py,830,_CanonicalHTMLParser.handle_data,Function,ingestion/html.py,62,_CanonicalHTMLParser.handle_data,
+acquisition.py,835,HTMLLiteratureTextExtractor,Class,ingestion/html.py,67,HTMLLiteratureTextExtractor,spc.knowledge; spc.knowledge.expert_knowledge.source
+acquisition.py,847,HTMLLiteratureTextExtractor.extract,Function,ingestion/html.py,79,HTMLLiteratureTextExtractor.extract,spc.knowledge; spc.knowledge.expert_knowledge.source
+acquisition.py,886,METADATA_FIELDS,Assign,acquisition/metadata.py,213,METADATA_FIELDS,
+acquisition.py,899,_normalized_metadata_value,Function,acquisition/metadata.py,226,_normalized_metadata_value,
+acquisition.py,922,_metadata_from_resource,Function,acquisition/metadata.py,249,_metadata_from_resource,
+acquisition.py,933,_merge_metadata,Function,acquisition/metadata.py,260,_merge_metadata,
+acquisition.py,997,_CandidateResult,Class,acquisition/service.py,48,_CandidateResult,
+acquisition.py,1013,validate_literature_representation,Function,representation.py,76,validate_literature_representation,spc.backends.rebinding; spc.knowledge; spc.knowledge.ingestion; spc.knowledge.k1f_authority; spc.knowledge.structure; spc.knowledge.structure_selection; spc.knowledge.trust; spc.repository_components.snapshot
+acquisition.py,1075,LiteratureAcquisitionService,Class,acquisition/service.py,64,LiteratureAcquisitionService,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1076,LiteratureAcquisitionService.__init__,Function,acquisition/service.py,65,LiteratureAcquisitionService.__init__,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1085,LiteratureAcquisitionService.add,Function,acquisition/service.py,74,LiteratureAcquisitionService.add,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1243,LiteratureAcquisitionService._candidate_key,Function,acquisition/service.py,232,LiteratureAcquisitionService._candidate_key,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1248,LiteratureAcquisitionService._discover_doi_landing,Function,acquisition/service.py,237,LiteratureAcquisitionService._discover_doi_landing,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1313,LiteratureAcquisitionService._final_failure_status,Function,acquisition/service.py,302,LiteratureAcquisitionService._final_failure_status,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1345,LiteratureAcquisitionService._attempt_candidate,Function,acquisition/service.py,334,LiteratureAcquisitionService._attempt_candidate,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1386,LiteratureAcquisitionService._attempt_pdf,Function,acquisition/service.py,375,LiteratureAcquisitionService._attempt_pdf,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1512,LiteratureAcquisitionService._run_k1b,Function,acquisition/service.py,501,LiteratureAcquisitionService._run_k1b,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1583,LiteratureAcquisitionService._attempt_html,Function,acquisition/service.py,572,LiteratureAcquisitionService._attempt_html,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1706,LiteratureAcquisitionService._html_ingestion,Function,ingestion/service.py,238,_html_ingestion_record,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1732,LiteratureAcquisitionService._finalize_html_document,Function,ingestion/service.py,209,finalize_literature_document,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1758,LiteratureAcquisitionService._representation,Function,representation.py,138,build_representation_reference,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1791,LiteratureAcquisitionService._make_attempt,Function,acquisition/service.py,649,LiteratureAcquisitionService._make_attempt,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1834,LiteratureAcquisitionService._request,Function,acquisition/service.py,692,LiteratureAcquisitionService._request,spc.cli; spc.knowledge; spc.knowledge.collection
+acquisition.py,1842,LiteratureAcquisitionService._finish,Function,acquisition/service.py,700,LiteratureAcquisitionService._finish,spc.cli; spc.knowledge; spc.knowledge.collection
+ingestion.py,40,PAGE_SEPARATOR,Assign,literature_text.py,104,PAGE_SEPARATOR,spc.knowledge.expert_knowledge.source
+ingestion.py,41,CANONICALIZATION_POLICY,Assign,literature_text.py,105,CANONICALIZATION_POLICY,
+ingestion.py,51,LiteratureMetadata,Class,literature_text.py,22,LiteratureMetadata,spc.knowledge; spc.knowledge.acquisition
+ingestion.py,65,LiteratureTextExtraction,Class,literature_text.py,40,LiteratureTextExtraction,
+ingestion.py,73,LiteratureTextExtraction.total_pages,Function,literature_text.py,52,LiteratureTextExtraction.total_pages,
+ingestion.py,77,LiteratureTextExtraction.pages_with_text,Function,literature_text.py,56,LiteratureTextExtraction.pages_with_text,
+ingestion.py,85,LiteratureTextExtraction.pages_without_text,Function,literature_text.py,64,LiteratureTextExtraction.pages_without_text,
+ingestion.py,89,LiteratureTextExtraction.text_coverage_ratio,Function,literature_text.py,68,LiteratureTextExtraction.text_coverage_ratio,
+ingestion.py,93,LiteratureExtractionError,Class,literature_text.py,35,LiteratureExtractionError,spc.knowledge
+ingestion.py,98,ValidatedLiteratureIngestionChain,Class,representation.py,25,ValidatedLiteratureIngestionChain,
+ingestion.py,105,LiteratureTextExtractor,Class,literature_text.py,91,LiteratureTextExtractor,spc.knowledge
+ingestion.py,110,LiteratureTextExtractor.extract,Function,literature_text.py,96,LiteratureTextExtractor.extract,spc.knowledge
+ingestion.py,118,PypdfLiteratureTextExtractor,Class,ingestion/pdf.py,21,PypdfLiteratureTextExtractor,spc.knowledge; spc.knowledge.expert_knowledge.source
+ingestion.py,121,PypdfLiteratureTextExtractor.__init__,Function,ingestion/pdf.py,24,PypdfLiteratureTextExtractor.__init__,spc.knowledge; spc.knowledge.expert_knowledge.source
+ingestion.py,131,PypdfLiteratureTextExtractor.extract,Function,ingestion/pdf.py,34,PypdfLiteratureTextExtractor.extract,spc.knowledge; spc.knowledge.expert_knowledge.source
+ingestion.py,195,PypdfLiteratureTextExtractor._canonicalize_page,Function,literature_text.py,115,canonicalize_page,spc.knowledge; spc.knowledge.expert_knowledge.source
+ingestion.py,207,PypdfLiteratureTextExtractor._has_usable_text,Function,literature_text.py,127,has_usable_text,spc.knowledge; spc.knowledge.expert_knowledge.source
+ingestion.py,211,DocxSupplementaryTextExtractor,Class,ingestion/docx.py,19,DocxSupplementaryTextExtractor,
+ingestion.py,216,DocxSupplementaryTextExtractor.__init__,Function,ingestion/docx.py,24,DocxSupplementaryTextExtractor.__init__,
+ingestion.py,222,DocxSupplementaryTextExtractor.extract,Function,ingestion/docx.py,30,DocxSupplementaryTextExtractor.extract,
+ingestion.py,251,DocxSupplementaryTextExtractor.extract.paragraph_text,Function,ingestion/docx.py,59,DocxSupplementaryTextExtractor.extract.paragraph_text,
+ingestion.py,318,LiteratureIngestionService,Class,ingestion/service.py,37,LiteratureIngestionService,spc.cli; spc.knowledge; spc.knowledge.acquisition
+ingestion.py,319,LiteratureIngestionService.__init__,Function,ingestion/service.py,38,LiteratureIngestionService.__init__,spc.cli; spc.knowledge; spc.knowledge.acquisition
+ingestion.py,325,LiteratureIngestionService.ingest,Function,ingestion/service.py,44,LiteratureIngestionService.ingest,spc.cli; spc.knowledge; spc.knowledge.acquisition
+ingestion.py,441,LiteratureIngestionService._make_ingestion,Function,ingestion/service.py,160,LiteratureIngestionService._make_ingestion,spc.cli; spc.knowledge; spc.knowledge.acquisition
+ingestion.py,490,LiteratureIngestionService._finalize_literature_document,Function,ingestion/service.py,209,finalize_literature_document,spc.cli; spc.knowledge; spc.knowledge.acquisition
+ingestion.py,519,validate_literature_ingestion_chain,Function,representation.py,32,validate_literature_ingestion_chain,spc.knowledge; spc.knowledge.acquisition
+ingestion.py,563,LiteratureRepresentationSelector,Class,representation.py,171,LiteratureRepresentationSelector,spc.backends.retrieval.resolver; spc.cli; spc.knowledge; spc.knowledge.k1f_authority; spc.knowledge.literature_knowledge.context; spc.knowledge.literature_knowledge.validation; spc.knowledge.trust
+ingestion.py,565,LiteratureRepresentationSelector._pdf_representation,Function,representation.py,173,LiteratureRepresentationSelector._pdf_representation,spc.backends.retrieval.resolver; spc.cli; spc.knowledge; spc.knowledge.k1f_authority; spc.knowledge.literature_knowledge.context; spc.knowledge.literature_knowledge.validation; spc.knowledge.trust
+ingestion.py,598,LiteratureRepresentationSelector.resolve_reference,Function,representation.py,199,LiteratureRepresentationSelector.resolve_reference,spc.backends.retrieval.resolver; spc.cli; spc.knowledge; spc.knowledge.k1f_authority; spc.knowledge.literature_knowledge.context; spc.knowledge.literature_knowledge.validation; spc.knowledge.trust
+ingestion.py,622,LiteratureRepresentationSelector.resolve_selection,Function,representation.py,221,LiteratureRepresentationSelector.resolve_selection,spc.backends.retrieval.resolver; spc.cli; spc.knowledge; spc.knowledge.k1f_authority; spc.knowledge.literature_knowledge.context; spc.knowledge.literature_knowledge.validation; spc.knowledge.trust
+ingestion.py,655,LiteratureRepresentationSelector.select,Function,representation.py,254,LiteratureRepresentationSelector.select,spc.backends.retrieval.resolver; spc.cli; spc.knowledge; spc.knowledge.k1f_authority; spc.knowledge.literature_knowledge.context; spc.knowledge.literature_knowledge.validation; spc.knowledge.trust
+ingestion.py,721,create_evidence_span_from_canonical_text,Function,ingestion/evidence.py,36,create_evidence_span_from_canonical_text,spc.backends.retrieval.resolver; spc.knowledge; spc.knowledge.literature_knowledge.materializer; spc.knowledge.structure
+ingestion.py,794,ingest_literature_supplementary_pdf,Function,ingestion/supplementary.py,23,ingest_literature_supplementary_pdf,
+ingestion.py,813,ingest_literature_supplementary_docx,Function,ingestion/supplementary.py,42,ingest_literature_supplementary_docx,
+ingestion.py,830,_ingest_literature_supplementary,Function,ingestion/supplementary.py,59,_ingest_literature_supplementary,
+ingestion.py,906,validate_literature_supplementary_source,Function,ingestion/supplementary.py,135,validate_literature_supplementary_source,spc.knowledge.trust
+ingestion.py,952,create_supplementary_evidence_span,Function,ingestion/evidence.py,90,create_supplementary_evidence_span,
+structure.py,42,CanonicalArtifact,Assign,structure/records.py,27,CanonicalArtifact,
+structure.py,45,_CANONICAL_READERS,Assign,structure/validation.py,33,_CANONICAL_READERS,
+structure.py,52,DocumentStructureInput,Class,structure/records.py,31,DocumentStructureInput,spc.backends.rebinding; spc.knowledge
+structure.py,60,ExtractedDocumentStructure,Class,structure/records.py,39,ExtractedDocumentStructure,spc.backends.rebinding
+structure.py,71,DocumentStructureExtractionResult,Class,structure/records.py,50,DocumentStructureExtractionResult,spc.backends.rebinding; spc.knowledge
+structure.py,80,DocumentStructureExtractor,Class,structure/records.py,59,DocumentStructureExtractor,spc.knowledge
+structure.py,86,DocumentStructureExtractor.extract,Function,structure/records.py,65,DocumentStructureExtractor.extract,spc.knowledge
+structure.py,89,_text_hash,Function,structure/records.py,68,_text_hash,
+structure.py,93,_make_block,Function,structure/records.py,72,_make_block,spc.backends.rebinding
+structure.py,133,_label,Function,structure/html.py,34,_label,
+structure.py,138,_PDF_CAPTION_RE,Assign,structure/pdf.py,26,_PDF_CAPTION_RE,
+structure.py,144,_PDF_BARE_TABLE_RE,Assign,structure/pdf.py,34,_PDF_BARE_TABLE_RE,
+structure.py,147,_pdf_caption,Function,structure/pdf.py,37,_pdf_caption,
+structure.py,165,_heading_level,Function,structure/pdf.py,55,_heading_level,
+structure.py,173,_make_table,Function,structure/records.py,112,_make_table,spc.backends.rebinding
+structure.py,199,_make_cell,Function,structure/records.py,138,_make_cell,spc.backends.rebinding
+structure.py,232,_make_figure,Function,structure/records.py,171,_make_figure,spc.backends.rebinding
+structure.py,257,PDFDocumentStructureExtractor,Class,structure/pdf.py,63,PDFDocumentStructureExtractor,spc.knowledge
+structure.py,273,PDFDocumentStructureExtractor.extract,Function,structure/pdf.py,79,PDFDocumentStructureExtractor.extract,spc.knowledge
+structure.py,388,_HTMLElement,Class,structure/html.py,40,_HTMLElement,
+structure.py,401,_HTMLTableCell,Class,structure/html.py,53,_HTMLTableCell,
+structure.py,412,_HTMLStructureParser,Class,structure/html.py,64,_HTMLStructureParser,
+structure.py,433,_HTMLStructureParser.__init__,Function,structure/html.py,85,_HTMLStructureParser.__init__,
+structure.py,448,_HTMLStructureParser._span,Function,structure/html.py,100,_HTMLStructureParser._span,
+structure.py,462,_HTMLStructureParser._region,Function,structure/html.py,114,_HTMLStructureParser._region,
+structure.py,489,_HTMLStructureParser.handle_starttag,Function,structure/html.py,141,_HTMLStructureParser.handle_starttag,
+structure.py,551,_HTMLStructureParser.handle_endtag,Function,structure/html.py,203,_HTMLStructureParser.handle_endtag,
+structure.py,592,_HTMLStructureParser.handle_data,Function,structure/html.py,244,_HTMLStructureParser.handle_data,
+structure.py,601,_table_occupancy_layout,Function,structure/html.py,253,_table_occupancy_layout,
+structure.py,628,validate_table_cell_topology,Function,structure/validation.py,39,validate_table_cell_topology,
+structure.py,647,HTMLDocumentStructureExtractor,Class,structure/html.py,280,HTMLDocumentStructureExtractor,spc.knowledge
+structure.py,666,HTMLDocumentStructureExtractor.extract,Function,structure/html.py,299,HTMLDocumentStructureExtractor.extract,spc.knowledge
+structure.py,914,_structure_id,Function,structure/service.py,21,_structure_id,
+structure.py,934,DocumentStructureService,Class,structure/service.py,41,DocumentStructureService,spc.backends.document.builtin; spc.backends.rebinding; spc.knowledge
+structure.py,935,DocumentStructureService.extract,Function,structure/service.py,42,DocumentStructureService.extract,spc.backends.document.builtin; spc.backends.rebinding; spc.knowledge
+structure.py,1039,_validate_structure_records,Function,structure/validation.py,58,_validate_structure_records,
+structure.py,1225,validate_document_structure,Function,structure/validation.py,244,validate_document_structure,spc.backends.rebinding; spc.backends.retrieval.resolver; spc.knowledge; spc.knowledge.literature_knowledge.context; spc.knowledge.structure_selection
+structure.py,1234,validate_document_structure.read,Function,structure/validation.py,253,validate_document_structure.read,spc.backends.rebinding; spc.backends.retrieval.resolver; spc.knowledge; spc.knowledge.literature_knowledge.context; spc.knowledge.structure_selection
+structure.py,1276,format_structured_evidence_locator,Function,structure/evidence.py,23,format_structured_evidence_locator,spc.knowledge; spc.knowledge.literature_knowledge.view
+structure.py,1300,verify_structured_evidence_locator,Function,structure/evidence.py,47,verify_structured_evidence_locator,spc.backends.retrieval.resolver; spc.knowledge
+structure.py,1311,_verify_locator_against_validated_structure,Function,structure/evidence.py,58,_verify_locator_against_validated_structure,spc.knowledge.literature_knowledge.validation; spc.repository_components.snapshot
+structure.py,1384,_create_locator,Function,structure/evidence.py,131,create_structured_evidence_locator,spc.backends.retrieval.resolver; spc.knowledge.literature_knowledge.materializer
+structure.py,1425,_display_for_block,Function,structure/evidence.py,176,_display_for_block,
+structure.py,1451,create_evidence_from_block,Function,structure/evidence.py,202,create_evidence_from_block,spc.knowledge
+structure.py,1487,create_evidence_from_table_cell,Function,structure/evidence.py,238,create_evidence_from_table_cell,spc.knowledge
+structure.py,1567,create_evidence_from_figure_caption,Function,structure/evidence.py,318,create_evidence_from_figure_caption,spc.knowledge
+structure.py,1605,inspect_document_structure,Function,structure/service.py,146,inspect_document_structure,spc.cli; spc.knowledge

@@ -64,7 +64,9 @@ from spc.validators import (
     build_plan_validation_record,
     requires_independent_approval,
     validate_approval_boundary,
+    validate_approved_plan_authority,
     validate_export,
+    validate_handoff_package,
     validate_plan_compilation_receipt,
     validate_question_plan,
 )
@@ -969,6 +971,58 @@ def test_manual_verdict_cannot_masquerade_as_independent_approval(tmp_path) -> N
             receipt=independent.receipt,
             compilation_receipt=case.compilation_receipt,
         )
+
+
+def test_independent_chain_rejects_a_rehashed_forged_receipt_id(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    payload = result.receipt.model_dump(mode="json", exclude={"content_hash"}, exclude_none=True)
+    payload["receipt_id"] = "independent-approval-receipt-" + "0" * 24
+    forged = IndependentApprovalReceipt.model_construct(**payload, content_hash=content_hash(payload))
+
+    report = validate_independent_approval_chain(
+        case.plan, result.verdict, case.review_input, result.review, forged
+    )
+    assert [(issue.code, issue.message, issue.path) for issue in report.issues] == [
+        ("STALE_INDEPENDENT_APPROVAL_RECEIPT", "IndependentApprovalReceipt identity or content hash is stale", None)
+    ]
+
+
+def test_gate_binding_failures_keep_boundary_specific_diagnostics(tmp_path) -> None:
+    case = build_review_case(tmp_path)
+    result = independently_approved(case)
+    artifacts = dict(
+        trust_policy=INDEPENDENT_TRUST_POLICY,
+        compilation_receipt=case.compilation_receipt,
+        review_input=case.review_input,
+        review=result.review,
+        receipt=result.receipt,
+    )
+    gate = bind_gate_verdict(
+        case.plan, result.verdict, case.validation_record, gate_id="test-gate", passed=True, **artifacts
+    )
+    broken_hashes = {
+        field: "0" * 64
+        for field in (
+            "candidate_content_hash", "approval_verdict_hash", "plan_validation_hash",
+            "trust_policy_hash", "plan_compilation_receipt_hash", "independent_approval_receipt_hash",
+        )
+    }
+    stale_gate = gate.model_copy(update=broken_hashes)
+    authority = validate_approved_plan_authority(
+        plan=case.plan, verdict=result.verdict, validation_record=case.validation_record, gate=stale_gate, **artifacts
+    )
+    assert [issue.code for issue in authority.issues] == ["PLAN_GATE_AUTHORITY_BINDING_MISMATCH"]
+
+    handoff = validate_handoff_package(
+        case.plan, result.verdict, case.validation_record, stale_gate,
+        FTAgentAdapter().build_handoff(case.plan, "test-export"), human_selected=True, **artifacts
+    )
+    assert [issue.code for issue in handoff.issues] == [
+        "STALE_PLAN_GATE", "GATE_APPROVAL_BINDING_MISMATCH", "GATE_VALIDATION_BINDING_MISMATCH",
+        "GATE_TRUST_POLICY_BINDING_MISMATCH", "GATE_COMPILATION_RECEIPT_BINDING_MISMATCH",
+        "GATE_INDEPENDENT_APPROVAL_BINDING_MISMATCH",
+    ]
 
 
 def test_mismatched_review_hash_is_rejected(tmp_path) -> None:

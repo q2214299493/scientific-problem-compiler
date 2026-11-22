@@ -1,0 +1,451 @@
+类别,检查对象,对照或范围,方法,观察结果,判定,证据定位
+Git,01 原始main,72bc0aca096d9f4bb1b128843c5385efe42143d2,first-parent / merge-base / show,Sync local SPC code and regression tests,PASS,父提交 b6e23936e7c149176fe0165c5014bf7e0ebf3633
+Git,02 Workflow,6a9fb24328b79ae343be1f1070e0dd95189b5d1e,first-parent / merge-base / show,Refactor scientific workflow into independently recoverable stages,PASS,父提交 72bc0aca096d9f4bb1b128843c5385efe42143d2
+Git,03 Workflow Fix,68d0c340845a34f1cd8b995f695fa381b8f80c89,first-parent / merge-base / show,fix(workflow): preserve exports and isolate knowledge access,PASS,父提交 6a9fb24328b79ae343be1f1070e0dd95189b5d1e
+Git,04 阶段内提交,492707ec128f70425b932ed82410ee7e375789c0,first-parent / merge-base / show,test(result-feedback): guard human rejection and CLI status,PASS,父提交 68d0c340845a34f1cd8b995f695fa381b8f80c89
+Git,05 阶段内提交,232375fe8a5d2f4d74c2cc9895b528e351f99364,first-parent / merge-base / show,refactor(result-feedback): centralize parent authority and artifact verification,PASS,父提交 492707ec128f70425b932ed82410ee7e375789c0
+Git,06 阶段内提交,0552dbb87d297300362ed317c86def83e1b7fa4f,first-parent / merge-base / show,refactor(result-feedback): isolate result intake and human curation,PASS,父提交 232375fe8a5d2f4d74c2cc9895b528e351f99364
+Git,07 阶段内提交,bcb54538718025f9da9133a12e31071a5b120abd,first-parent / merge-base / show,refactor(result-feedback): make successor planning an independent service,PASS,父提交 0552dbb87d297300362ed317c86def83e1b7fa4f
+Git,08 阶段内提交,31abf43dedfcc72eda8bf2d6c8619be52b96b319,first-parent / merge-base / show,refactor(result-feedback): retain public exports and isolate status queries,PASS,父提交 bcb54538718025f9da9133a12e31071a5b120abd
+Git,09 Result Feedback,f5cfdd7bab4b54b255730da32e479542483795d6,first-parent / merge-base / show,refactor(result-feedback): decouple intake and successor planning,PASS,父提交 31abf43dedfcc72eda8bf2d6c8619be52b96b319
+Git,10 Models,ac25bd4055c73b9bd6c15d21ef1c21f6d394f194,first-parent / merge-base / show,refactor(models): organize scientific models by domain,PASS,父提交 f5cfdd7bab4b54b255730da32e479542483795d6
+Git,11 Repositories,94b4301e2ec3d9e805ea6e127618137dc58ec81b,first-parent / merge-base / show,refactor(repositories): organize storage components by domain,PASS,父提交 ac25bd4055c73b9bd6c15d21ef1c21f6d394f194
+Git,12 Validators,3f53101683e51dd32c9e97b26863c96763031d52,first-parent / merge-base / show,refactor(validation): consolidate shared rules and preserve trust boundaries,PASS,父提交 94b4301e2ec3d9e805ea6e127618137dc58ec81b
+Git,13 阶段内提交,259e9f7ef5ca1edbf0b02ffddba50085b4552311,first-parent / merge-base / show,test(knowledge): pin historical representation and locator identities,PASS,父提交 3f53101683e51dd32c9e97b26863c96763031d52
+Git,14 阶段内提交,235601d825402eae9f9be98be04657a41395556c,first-parent / merge-base / show,refactor(knowledge): isolate acquisition transport resolvers and metadata,PASS,父提交 259e9f7ef5ca1edbf0b02ffddba50085b4552311
+Git,15 阶段内提交,4c0154e05407735b44b2505c9be2363c64f3475d,first-parent / merge-base / show,refactor(knowledge): separate document ingestion and canonical extractors,PASS,父提交 235601d825402eae9f9be98be04657a41395556c
+Git,16 阶段内提交,9b069b36f691af530b6af4117c5d319b96c53cf4,first-parent / merge-base / show,refactor(knowledge): separate structure extraction validation and evidence locators,PASS,父提交 4c0154e05407735b44b2505c9be2363c64f3475d
+Git,17 阶段内提交,25c8ff28723f09b5f9bf99e6ef2b8a9ae39ff454,first-parent / merge-base / show,refactor(knowledge): share representation binding and source persistence,PASS,父提交 9b069b36f691af530b6af4117c5d319b96c53cf4
+Git,18 阶段内提交,3c7238a3572b3925bfb448f56bfa6a83b152e406,first-parent / merge-base / show,refactor(knowledge): preserve public imports without loading unrelated services,PASS,父提交 25c8ff28723f09b5f9bf99e6ef2b8a9ae39ff454
+Git,19 Knowledge 01A,1b8dac8761ed236a947852f8a6bd7c67d2740e85,first-parent / merge-base / show,refactor(knowledge): separate acquisition ingestion and structure,PASS,父提交 3c7238a3572b3925bfb448f56bfa6a83b152e406
+Git,20 阶段内提交,7b6fd033e4d03bd15180c66d915c9ffba02387bc,first-parent / merge-base / show,refactor(knowledge): separate record-specific trust checks,PASS,父提交 1b8dac8761ed236a947852f8a6bd7c67d2740e85
+Git,21 阶段内提交,a02603d7e26e60d4dddfa93c68e6241310dccc7d,first-parent / merge-base / show,refactor(knowledge): organize collection services and enforce request scope,PASS,父提交 7b6fd033e4d03bd15180c66d915c9ffba02387bc
+Git,22 Knowledge 01B,c5c5ec00f4998b55507966de2e49de1085ca7e67,first-parent / merge-base / show,refactor(knowledge): organize trust and collection services,PASS,父提交 a02603d7e26e60d4dddfa93c68e6241310dccc7d
+Git,23 Successor Status,4941d86b97ba6a5b7fb7ab0e7968f5156e79302a,first-parent / merge-base / show,fix(status): require verified successor planning artifacts,PASS,父提交 c5c5ec00f4998b55507966de2e49de1085ca7e67
+Git,24 Successor Status Fix,f4ce42a6a097dd7c767d1959fa465283d45ef831,first-parent / merge-base / show,fix(status): detect orphaned successor stage artifacts,PASS,父提交 4941d86b97ba6a5b7fb7ab0e7968f5156e79302a
+Git,25 Cleanup 03A,6acbaae09ffd08075afb122664b4f8015938eedd,first-parent / merge-base / show,perf(knowledge): reuse index within status query,PASS,父提交 f4ce42a6a097dd7c767d1959fa465283d45ef831
+Git,26 阶段内提交,d055db06792ba6ea5505e7da1a5ef5dff6a92c90,first-parent / merge-base / show,test(storage): protect evidence path and trusted read boundaries,PASS,父提交 6acbaae09ffd08075afb122664b4f8015938eedd
+Git,27 Cleanup 03B,253ee7605fb4e70c981de1ac8da3ef46480caf61,first-parent / merge-base / show,refactor(storage): reuse equivalent evidence stores within operation,PASS,父提交 d055db06792ba6ea5505e7da1a5ef5dff6a92c90
+Git,28 Cleanup 03C,79170b116bfa9dbff6fea162faa7f606878bb395,first-parent / merge-base / show,refactor(storage): avoid redundant cycle directory checks,PASS,父提交 253ee7605fb4e70c981de1ac8da3ef46480caf61
+Git,29 Cleanup 03C Fix,9435a5fda5879d8516a6ad4f5a36344a802f0240,first-parent / merge-base / show,fix(storage): validate successor cycle junction containment,PASS,父提交 79170b116bfa9dbff6fea162faa7f606878bb395
+Git,30 Cleanup 03D,b414df26bda444420854307073dce0a8a8e6962d,first-parent / merge-base / show,refactor(identity): consolidate shared content-bound ID helpers,PASS,父提交 9435a5fda5879d8516a6ad4f5a36344a802f0240
+Git,31 Cleanup 03E,778e0090e76538bf32976813e1ba641a34093ed3,first-parent / merge-base / show,refactor(knowledge): consolidate shared text chunking primitives,PASS,父提交 b414df26bda444420854307073dce0a8a8e6962d
+Git,32 Cleanup 03F,200a2080db642db9621d6d3ab6a62b193ccf4be4,first-parent / merge-base / show,refactor(storage): reuse equivalent repositories within operation,PASS,父提交 778e0090e76538bf32976813e1ba641a34093ed3
+Git,33 Cleanup 03G,d08ff7f56f2e816a1c65db235b3798dd58edfae3,first-parent / merge-base / show,refactor(provider): consolidate shared parameter validation,PASS,父提交 200a2080db642db9621d6d3ab6a62b193ccf4be4
+Git,34 A02 Audit,9d6665c302b96bb240f5e1382f8aded78ed98ad5,first-parent / merge-base / show,docs(audit): compare A02 equal-record writes,PASS,父提交 d08ff7f56f2e816a1c65db235b3798dd58edfae3
+Git,35 A02 Implementation,ba6c04f7d185f7abad77acfddbc0fcb853cf8744,first-parent / merge-base / show,refactor(storage): share immutable put-reuse control flow,PASS,父提交 9d6665c302b96bb240f5e1382f8aded78ed98ad5
+自动化,Ruff,src tests,python -m ruff check src tests,退出码 0，All checks passed!,PASS,pyproject.toml
+自动化,完整 pytest,43 个测试模块,python -m pytest,总计 1306，通过 1305，失败 0，错误 0，跳过 1，终端耗时 454.30 秒,含跳过,tests/
+pytest 模块,test_approval,全量 pytest,JUnit 按模块汇总,总计 2，通过 2，跳过 0,PASS,tests/test_approval.py
+pytest 模块,test_backends,全量 pytest,JUnit 按模块汇总,总计 52，通过 51，跳过 1,含跳过,tests/test_backends.py
+pytest 模块,test_codex_cli_transport,全量 pytest,JUnit 按模块汇总,总计 16，通过 16，跳过 0,PASS,tests/test_codex_cli_transport.py
+pytest 模块,test_collection_http_scope,全量 pytest,JUnit 按模块汇总,总计 9，通过 9，跳过 0,PASS,tests/test_collection_http_scope.py
+pytest 模块,test_collection_import,全量 pytest,JUnit 按模块汇总,总计 42，通过 42，跳过 0,PASS,tests/test_collection_import.py
+pytest 模块,test_content_bound_identity,全量 pytest,JUnit 按模块汇总,总计 12，通过 12，跳过 0,PASS,tests/test_content_bound_identity.py
+pytest 模块,test_cross_loop_invariants,全量 pytest,JUnit 按模块汇总,总计 55，通过 55，跳过 0,PASS,tests/test_cross_loop_invariants.py
+pytest 模块,test_document_structure,全量 pytest,JUnit 按模块汇总,总计 25，通过 25，跳过 0,PASS,tests/test_document_structure.py
+pytest 模块,test_downstream,全量 pytest,JUnit 按模块汇总,总计 25，通过 25，跳过 0,PASS,tests/test_downstream.py
+pytest 模块,test_evidence_source_reads,全量 pytest,JUnit 按模块汇总,总计 21，通过 21，跳过 0,PASS,tests/test_evidence_source_reads.py
+pytest 模块,test_evidence_stores,全量 pytest,JUnit 按模块汇总,总计 39，通过 39，跳过 0,PASS,tests/test_evidence_stores.py
+pytest 模块,test_expert_knowledge,全量 pytest,JUnit 按模块汇总,总计 14，通过 14，跳过 0,PASS,tests/test_expert_knowledge.py
+pytest 模块,test_export,全量 pytest,JUnit 按模块汇总,总计 29，通过 29，跳过 0,PASS,tests/test_export.py
+pytest 模块,test_hierarchical_planning,全量 pytest,JUnit 按模块汇总,总计 28，通过 28，跳过 0,PASS,tests/test_hierarchical_planning.py
+pytest 模块,test_immutable_put_reuse,全量 pytest,JUnit 按模块汇总,总计 41，通过 41，跳过 0,PASS,tests/test_immutable_put_reuse.py
+pytest 模块,test_independent_approval,全量 pytest,JUnit 按模块汇总,总计 58，通过 58，跳过 0,PASS,tests/test_independent_approval.py
+pytest 模块,test_interpretation,全量 pytest,JUnit 按模块汇总,总计 40，通过 40，跳过 0,PASS,tests/test_interpretation.py
+pytest 模块,test_k1f_structure_reads,全量 pytest,JUnit 按模块汇总,总计 14，通过 14，跳过 0,PASS,tests/test_k1f_structure_reads.py
+pytest 模块,test_k1f_structure_rebinding,全量 pytest,JUnit 按模块汇总,总计 2，通过 2，跳过 0,PASS,tests/test_k1f_structure_rebinding.py
+pytest 模块,test_k1f_table_reads,全量 pytest,JUnit 按模块汇总,总计 17，通过 17，跳过 0,PASS,tests/test_k1f_table_reads.py
+pytest 模块,test_knowledge,全量 pytest,JUnit 按模块汇总,总计 41，通过 41，跳过 0,PASS,tests/test_knowledge.py
+pytest 模块,test_knowledge_chunking,全量 pytest,JUnit 按模块汇总,总计 18，通过 18，跳过 0,PASS,tests/test_knowledge_chunking.py
+pytest 模块,test_knowledge_literature_compatibility,全量 pytest,JUnit 按模块汇总,总计 11，通过 11，跳过 0,PASS,tests/test_knowledge_literature_compatibility.py
+pytest 模块,test_knowledge_retrieval,全量 pytest,JUnit 按模块汇总,总计 12，通过 12，跳过 0,PASS,tests/test_knowledge_retrieval.py
+pytest 模块,test_literature_acquisition,全量 pytest,JUnit 按模块汇总,总计 56，通过 56，跳过 0,PASS,tests/test_literature_acquisition.py
+pytest 模块,test_literature_gap_audit,全量 pytest,JUnit 按模块汇总,总计 8，通过 8，跳过 0,PASS,tests/test_literature_gap_audit.py
+pytest 模块,test_literature_ingestion,全量 pytest,JUnit 按模块汇总,总计 30，通过 30，跳过 0,PASS,tests/test_literature_ingestion.py
+pytest 模块,test_literature_knowledge,全量 pytest,JUnit 按模块汇总,总计 86，通过 86，跳过 0,PASS,tests/test_literature_knowledge.py
+pytest 模块,test_literature_knowledge_wire,全量 pytest,JUnit 按模块汇总,总计 5，通过 5，跳过 0,PASS,tests/test_literature_knowledge_wire.py
+pytest 模块,test_literature_repository_reuse,全量 pytest,JUnit 按模块汇总,总计 9，通过 9，跳过 0,PASS,tests/test_literature_repository_reuse.py
+pytest 模块,test_literature_supplementary,全量 pytest,JUnit 按模块汇总,总计 11，通过 11，跳过 0,PASS,tests/test_literature_supplementary.py
+pytest 模块,test_model_contracts,全量 pytest,JUnit 按模块汇总,总计 242，通过 242，跳过 0,PASS,tests/test_model_contracts.py
+pytest 模块,test_models_and_domains,全量 pytest,JUnit 按模块汇总,总计 38，通过 38，跳过 0,PASS,tests/test_models_and_domains.py
+pytest 模块,test_offline_and_repository,全量 pytest,JUnit 按模块汇总,总计 7，通过 7，跳过 0,PASS,tests/test_offline_and_repository.py
+pytest 模块,test_plan_revision,全量 pytest,JUnit 按模块汇总,总计 33，通过 33，跳过 0,PASS,tests/test_plan_revision.py
+pytest 模块,test_planning,全量 pytest,JUnit 按模块汇总,总计 44，通过 44，跳过 0,PASS,tests/test_planning.py
+pytest 模块,test_planning_evidence_resolution,全量 pytest,JUnit 按模块汇总,总计 25，通过 25，跳过 0,PASS,tests/test_planning_evidence_resolution.py
+pytest 模块,test_provider_parameters,全量 pytest,JUnit 按模块汇总,总计 13，通过 13，跳过 0,PASS,tests/test_provider_parameters.py
+pytest 模块,test_repository_components,全量 pytest,JUnit 按模块汇总,总计 3，通过 3，跳过 0,PASS,tests/test_repository_components.py
+pytest 模块,test_result_feedback,全量 pytest,JUnit 按模块汇总,总计 24，通过 24，跳过 0,PASS,tests/test_result_feedback.py
+pytest 模块,test_retrieval,全量 pytest,JUnit 按模块汇总,总计 23，通过 23，跳过 0,PASS,tests/test_retrieval.py
+pytest 模块,test_validation_compatibility,全量 pytest,JUnit 按模块汇总,总计 6，通过 6，跳过 0,PASS,tests/test_validation_compatibility.py
+pytest 模块,test_workflow,全量 pytest,JUnit 按模块汇总,总计 20，通过 20，跳过 0,PASS,tests/test_workflow.py
+CLI,spc --help,72bc0ac → ba6c04f,同环境入口解析，独立进程,根帮助全文一致，退出 0,PASS,pyproject.toml [project.scripts] / spc.cli:app
+CLI 子命令,add-expert,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 4,PASS,src/spc/cli.py::add_expert
+CLI 子命令,add-expert-source,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 8,PASS,src/spc/cli.py::add_expert_source
+CLI 子命令,add-literature,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 5,PASS,src/spc/cli.py::add_literature
+CLI 子命令,approve,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 10,PASS,src/spc/cli.py::approve
+CLI 子命令,backend-info,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::backend_info
+CLI 子命令,backends,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，参数条目 1,PASS,src/spc/cli.py::list_backends
+CLI 子命令,build-scientific-context,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 11,PASS,src/spc/cli.py::build_scientific_context
+CLI 子命令,check-codex-provider,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::check_codex_provider
+CLI 子命令,compare,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::compare
+CLI 子命令,compile,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 4,PASS,src/spc/cli.py::compile_command
+CLI 子命令,compile-scientific-request,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，无效值=2，参数条目 19,PASS,src/spc/cli.py::compile_scientific_request
+CLI 子命令,compile-successor-plan,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 8,PASS,src/spc/cli.py::compile_successor_plan
+CLI 子命令,curate-knowledge,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 7,PASS,src/spc/cli.py::curate_knowledge
+CLI 子命令,curate-result-evidence,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 7,PASS,src/spc/cli.py::curate_result_evidence
+CLI 子命令,export,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 15,PASS,src/spc/cli.py::export
+CLI 子命令,export-scientific-run,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 6,PASS,src/spc/cli.py::export_scientific_run
+CLI 子命令,extract-expert-knowledge,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 10,PASS,src/spc/cli.py::extract_expert_knowledge
+CLI 子命令,extract-literature-knowledge,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 18,PASS,src/spc/cli.py::extract_literature_knowledge
+CLI 子命令,import-literature-collection,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 11,PASS,src/spc/cli.py::import_literature_collection
+CLI 子命令,ingest,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 7,PASS,src/spc/cli.py::ingest
+CLI 子命令,ingest-literature,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 4,PASS,src/spc/cli.py::ingest_literature
+CLI 子命令,inspect-backend-run,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::inspect_backend_run
+CLI 子命令,inspect-expert-knowledge,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 3,PASS,src/spc/cli.py::inspect_expert_knowledge
+CLI 子命令,inspect-literature-knowledge,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 7,PASS,src/spc/cli.py::inspect_literature_knowledge
+CLI 子命令,inspect-literature-structure,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 6,PASS,src/spc/cli.py::inspect_literature_structure
+CLI 子命令,inspect-scientific-run,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::inspect_scientific_run
+CLI 子命令,intake-result-evidence,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 5,PASS,src/spc/cli.py::intake_result_evidence
+CLI 子命令,interpret,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 5,PASS,src/spc/cli.py::interpret
+CLI 子命令,knowledge-status,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，参数条目 3,PASS,src/spc/cli.py::knowledge_status
+CLI 子命令,migrate-knowledge-evidence,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，参数条目 2,PASS,src/spc/cli.py::migrate_knowledge_evidence_command
+CLI 子命令,plan,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 13,PASS,src/spc/cli.py::plan
+CLI 子命令,prepare-execution,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 4,PASS,src/spc/cli.py::prepare_execution
+CLI 子命令,resume-scientific-run,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 16,PASS,src/spc/cli.py::resume_scientific_run
+CLI 子命令,retrieve,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 11,PASS,src/spc/cli.py::retrieve
+CLI 子命令,retrieve-knowledge,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 9,PASS,src/spc/cli.py::retrieve_knowledge
+CLI 子命令,review,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，无效值=2，参数条目 18,PASS,src/spc/cli.py::review
+CLI 子命令,schema,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，参数条目 1,PASS,src/spc/cli.py::schema_command
+CLI 子命令,scientific-run-status,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::show_scientific_run_status
+CLI 子命令,select-document-structure,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 5,PASS,src/spc/cli.py::select_document_structure
+CLI 子命令,select-literature-representation,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 7,PASS,src/spc/cli.py::select_literature_representation
+CLI 子命令,structure-literature,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 6,PASS,src/spc/cli.py::structure_literature
+CLI 子命令,successor-plan-status,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 2,PASS,src/spc/cli.py::successor_plan_status
+CLI 子命令,validate,72bc0ac → ba6c04f,回调导入、参数声明、完整输出与退出码,帮助=0，未知选项=2，缺必填=2，参数条目 7,PASS,src/spc/cli.py::validate
+入口,spc.models,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,244 项；显式 __all__ 的 0 个名称可取用,PASS,spc.models
+入口,spc.repositories,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,54 项；显式 __all__ 的 0 个名称可取用,PASS,spc.repositories
+入口,spc.validators,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,21 项；显式 __all__ 的 0 个名称可取用,PASS,spc.validators
+入口,spc.workflow.service,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,6 项；显式 __all__ 的 7 个名称可取用,PASS,spc.workflow.service
+入口,spc.result_feedback.service,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,5 项；显式 __all__ 的 6 个名称可取用,PASS,spc.result_feedback.service
+入口,spc.knowledge.acquisition,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,16 项；显式 __all__ 的 0 个名称可取用,PASS,spc.knowledge.acquisition
+入口,spc.knowledge.ingestion,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,15 项；显式 __all__ 的 0 个名称可取用,PASS,spc.knowledge.ingestion
+入口,spc.knowledge.structure,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,15 项；显式 __all__ 的 0 个名称可取用,PASS,spc.knowledge.structure
+入口,spc.knowledge.collection,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,10 项；显式 __all__ 的 0 个名称可取用,PASS,spc.knowledge.collection
+入口,spc.knowledge.trust,72bc0ac 定义的公开函数/类,导入并与当前定义模块的同一对象比较,3 项；显式 __all__ 的 0 个名称可取用,PASS,spc.knowledge.trust
+模型契约,StrictModel,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[StrictModel] / spc.model_definitions.base
+模型契约,EvidenceClassification,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceClassification] / spc.model_definitions.evidence
+模型契约,ApprovalDecision,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalDecision] / spc.model_definitions.approval
+模型契约,ApprovalMode,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalMode] / spc.model_definitions.approval
+模型契约,CurationStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CurationStatus] / spc.model_definitions.knowledge
+模型契约,LiteratureIngestionStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureIngestionStatus] / spc.model_definitions.literature
+模型契约,AcquisitionInputKind,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[AcquisitionInputKind] / spc.model_definitions.literature
+模型契约,AcquisitionStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[AcquisitionStatus] / spc.model_definitions.literature
+模型契约,CollectionSourceKind,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionSourceKind] / spc.model_definitions.collection
+模型契约,CollectionImportStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionImportStatus] / spc.model_definitions.collection
+模型契约,CollectionResourceKind,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionResourceKind] / spc.model_definitions.collection
+模型契约,CollectionTraversalStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionTraversalStatus] / spc.model_definitions.collection
+模型契约,CollectionCompletenessStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionCompletenessStatus] / spc.model_definitions.collection
+模型契约,CollectionDiscoveryConfidence,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionDiscoveryConfidence] / spc.model_definitions.collection
+模型契约,CollectionDiscoveryContext,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionDiscoveryContext] / spc.model_definitions.collection
+模型契约,CollectionMembershipDecision,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionMembershipDecision] / spc.model_definitions.collection
+模型契约,FullTextAccessStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[FullTextAccessStatus] / spc.model_definitions.literature
+模型契约,FullTextSourceKind,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[FullTextSourceKind] / spc.model_definitions.literature
+模型契约,LiteratureRepresentationKind,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureRepresentationKind] / spc.model_definitions.literature
+模型契约,DocumentBlockType,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[DocumentBlockType] / spc.model_definitions.literature
+模型契约,DocumentContentRegion,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[DocumentContentRegion] / spc.model_definitions.literature
+模型契约,StructureExtractionStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[StructureExtractionStatus] / spc.model_definitions.literature
+模型契约,MetadataValueOrigin,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[MetadataValueOrigin] / spc.model_definitions.literature
+模型契约,KnowledgeViewMode,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeViewMode] / spc.model_definitions.knowledge
+模型契约,KnowledgePredicate,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgePredicate] / spc.model_definitions.knowledge
+模型契约,RetrievalSourceType,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[RetrievalSourceType] / spc.model_definitions.retrieval
+模型契约,EpistemicStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[EpistemicStatus] / spc.model_definitions.evidence
+模型契约,ResultStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultStatus] / spc.model_definitions.evidence
+模型契约,EvidenceAssessmentStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceAssessmentStatus] / spc.model_definitions.evidence
+模型契约,SourceRole,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[SourceRole] / spc.model_definitions.evidence
+模型契约,SourceType,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[SourceType] / spc.model_definitions.evidence
+模型契约,SourceDocument,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SourceDocument] / spc.model_definitions.evidence
+模型契约,EvidenceSpan,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceSpan] / spc.model_definitions.evidence
+模型契约,EvidenceReference,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceReference] / spc.model_definitions.evidence
+模型契约,GroundedStatement,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[GroundedStatement] / spc.model_definitions.evidence
+模型契约,Hypothesis,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[Hypothesis] / spc.model_definitions.scientific
+模型契约,ScientificQuestion,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificQuestion] / spc.model_definitions.scientific
+模型契约,ModelDefinition,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ModelDefinition] / spc.model_definitions.scientific
+模型契约,ObservableDefinition,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ObservableDefinition] / spc.model_definitions.scientific
+模型契约,ComparisonBaseline,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ComparisonBaseline] / spc.model_definitions.scientific
+模型契约,AcceptanceCriterion,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AcceptanceCriterion] / spc.model_definitions.scientific
+模型契约,FalsificationCriterion,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[FalsificationCriterion] / spc.model_definitions.scientific
+模型契约,AssumptionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AssumptionRecord] / spc.model_definitions.scientific
+模型契约,UnknownRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[UnknownRecord] / spc.model_definitions.scientific
+模型契约,ProposedDeviation,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ProposedDeviation] / spc.model_definitions.scientific
+模型契约,IntentFingerprint,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[IntentFingerprint] / spc.model_definitions.scientific
+模型契约,SystemFingerprint,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SystemFingerprint] / spc.model_definitions.scientific
+模型契约,MethodFingerprint,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[MethodFingerprint] / spc.model_definitions.scientific
+模型契约,FingerprintDifference,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[FingerprintDifference] / spc.model_definitions.scientific
+模型契约,RequiredHumanDecision,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RequiredHumanDecision] / spc.model_definitions.scientific
+模型契约,DAGTask,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DAGTask] / spc.model_definitions.scientific
+模型契约,ScientificQuestionPlan,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificQuestionPlan] / spc.model_definitions.scientific
+模型契约,ScientificTaskExecutionContext,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificTaskExecutionContext] / spc.model_definitions.scientific
+模型契约,RequiredFix,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RequiredFix] / spc.model_definitions.approval
+模型契约,FixResolution,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[FixResolution] / spc.model_definitions.approval
+模型契约,HumanDecisionResolution,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[HumanDecisionResolution] / spc.model_definitions.approval
+模型契约,ApprovalScores,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalScores] / spc.model_definitions.approval
+模型契约,ApprovalVerdict,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalVerdict] / spc.model_definitions.approval
+模型契约,PlanValidationRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanValidationRecord] / spc.model_definitions.approval
+模型契约,ProjectTrustPolicy,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ProjectTrustPolicy] / spc.model_definitions.approval
+模型契约,GateVerdict,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[GateVerdict] / spc.model_definitions.approval
+模型契约,ScientificCapability,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificCapability] / spc.model_definitions.scientific
+模型契约,ExpertCase,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExpertCase] / spc.model_definitions.knowledge
+模型契约,LiteratureWorkflowPattern,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureWorkflowPattern] / spc.model_definitions.literature
+模型契约,LiteratureDocument,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureDocument] / spc.model_definitions.literature
+模型契约,LiteratureAcquisitionRequest,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureAcquisitionRequest] / spc.model_definitions.literature
+模型契约,FullTextCandidate,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[FullTextCandidate] / spc.model_definitions.literature
+模型契约,ResolvedLiteratureResource,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResolvedLiteratureResource] / spc.model_definitions.literature
+模型契约,LiteratureAcquisitionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureAcquisitionRecord] / spc.model_definitions.literature
+模型契约,LiteratureAcquisitionOutcome,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureAcquisitionOutcome] / spc.model_definitions.literature
+模型契约,CollectionScopePolicy,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionScopePolicy] / spc.model_definitions.collection
+模型契约,CollectionDefinition,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionDefinition] / spc.model_definitions.collection
+模型契约,CollectionPageRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionPageRecord] / spc.model_definitions.collection
+模型契约,CollectionPageArtifact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionPageArtifact] / spc.model_definitions.collection
+模型契约,DiscoveredCollectionResource,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DiscoveredCollectionResource] / spc.model_definitions.collection
+模型契约,CollectionResourceOccurrence,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionResourceOccurrence] / spc.model_definitions.collection
+模型契约,CollectionSnapshot,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionSnapshot] / spc.model_definitions.collection
+模型契约,CollectionDiscoveryResult,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionDiscoveryResult] / spc.model_definitions.collection
+模型契约,CollectionAcquisitionLink,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionAcquisitionLink] / spc.model_definitions.collection
+模型契约,CollectionResourceImportResult,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionResourceImportResult] / spc.model_definitions.collection
+模型契约,CollectionLiteratureMembership,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionLiteratureMembership] / spc.model_definitions.collection
+模型契约,CollectionImportRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionImportRecord] / spc.model_definitions.collection
+模型契约,CollectionDiff,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionDiff] / spc.model_definitions.collection
+模型契约,CollectionImportOutcome,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CollectionImportOutcome] / spc.model_definitions.collection
+模型契约,MetadataRetrievalRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[MetadataRetrievalRecord] / spc.model_definitions.literature
+模型契约,MetadataAlternative,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[MetadataAlternative] / spc.model_definitions.literature
+模型契约,MetadataFieldDecision,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[MetadataFieldDecision] / spc.model_definitions.literature
+模型契约,MetadataMergeManifest,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[MetadataMergeManifest] / spc.model_definitions.literature
+模型契约,AcquisitionAttemptRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AcquisitionAttemptRecord] / spc.model_definitions.literature
+模型契约,RawLiteratureArtifact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RawLiteratureArtifact] / spc.model_definitions.literature
+模型契约,CanonicalTextBlock,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CanonicalTextBlock] / spc.model_definitions.literature
+模型契约,CanonicalTextArtifact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CanonicalTextArtifact] / spc.model_definitions.literature
+模型契约,LiteratureSupplementarySource,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureSupplementarySource] / spc.model_definitions.literature
+模型契约,RawHTMLLiteratureArtifact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RawHTMLLiteratureArtifact] / spc.model_definitions.literature
+模型契约,CanonicalHTMLTextArtifact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CanonicalHTMLTextArtifact] / spc.model_definitions.literature
+模型契约,HTMLLiteratureIngestionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[HTMLLiteratureIngestionRecord] / spc.model_definitions.literature
+模型契约,LiteratureRepresentationReference,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureRepresentationReference] / spc.model_definitions.literature
+模型契约,DocumentStructureBlock,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DocumentStructureBlock] / spc.model_definitions.literature
+模型契约,TableCellStructure,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[TableCellStructure] / spc.model_definitions.literature
+模型契约,TableStructure,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[TableStructure] / spc.model_definitions.literature
+模型契约,FigureStructure,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[FigureStructure] / spc.model_definitions.literature
+模型契约,DocumentStructureArtifact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DocumentStructureArtifact] / spc.model_definitions.literature
+模型契约,DocumentStructureSelection,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DocumentStructureSelection] / spc.model_definitions.literature
+模型契约,StructuredEvidenceLocator,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[StructuredEvidenceLocator] / spc.model_definitions.literature
+模型契约,LiteratureIngestionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureIngestionRecord] / spc.model_definitions.literature
+模型契约,LiteratureRepresentationSelection,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureRepresentationSelection] / spc.model_definitions.literature
+模型契约,LiteratureRepresentationSelectionOutcome,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureRepresentationSelectionOutcome] / spc.model_definitions.literature
+模型契约,HistoricalLiteratureEvidenceAuthorization,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[HistoricalLiteratureEvidenceAuthorization] / spc.model_definitions.literature
+模型契约,LiteratureIngestionOutcome,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[LiteratureIngestionOutcome] / spc.model_definitions.literature
+模型契约,ExpertProfile,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExpertProfile] / spc.model_definitions.knowledge
+模型契约,ExpertAttributionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExpertAttributionRecord] / spc.model_definitions.knowledge
+模型契约,ExpertOpinion,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExpertOpinion] / spc.model_definitions.knowledge
+模型契约,KnowledgeRelation,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeRelation] / spc.model_definitions.knowledge
+模型契约,KnowledgeCurationRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeCurationRecord] / spc.model_definitions.knowledge
+模型契约,DomainProfile,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DomainProfile] / spc.model_definitions.scientific
+模型契约,AgentCapability,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AgentCapability] / spc.model_definitions.downstream
+模型契约,AgentCapabilityCatalog,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AgentCapabilityCatalog] / spc.model_definitions.downstream
+模型契约,CapabilityBinding,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CapabilityBinding] / spc.model_definitions.downstream
+模型契约,ExecutionPolicy,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExecutionPolicy] / spc.model_definitions.downstream
+模型契约,AgentHandoffPackage,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AgentHandoffPackage] / spc.model_definitions.downstream
+模型契约,ExportManifest,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExportManifest] / spc.model_definitions.downstream
+模型契约,RetrievalQuery,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RetrievalQuery] / spc.model_definitions.retrieval
+模型契约,RetrievalHit,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RetrievalHit] / spc.model_definitions.retrieval
+模型契约,KnowledgeRetrievalContext,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeRetrievalContext] / spc.model_definitions.retrieval
+模型契约,KnowledgeSnapshot,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeSnapshot] / spc.model_definitions.knowledge
+模型契约,KnowledgeGraphNode,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeGraphNode] / spc.model_definitions.knowledge
+模型契约,KnowledgeGraphEdge,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeGraphEdge] / spc.model_definitions.knowledge
+模型契约,KnowledgeGraph,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[KnowledgeGraph] / spc.model_definitions.knowledge
+模型契约,RetrievalManifest,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RetrievalManifest] / spc.model_definitions.retrieval
+模型契约,ScientificContextPacket,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificContextPacket] / spc.model_definitions.retrieval
+模型契约,SourceQuote,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SourceQuote] / spc.model_definitions.evidence
+模型契约,SourceClaim,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SourceClaim] / spc.model_definitions.evidence
+模型契约,ResultContext,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultContext] / spc.model_definitions.evidence
+模型契约,ReportedResult,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ReportedResult] / spc.model_definitions.evidence
+模型契约,ReportedObservation,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ReportedObservation] / spc.model_definitions.evidence
+模型契约,MethodFact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[MethodFact] / spc.model_definitions.evidence
+模型契约,ModelFact,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ModelFact] / spc.model_definitions.evidence
+模型契约,EvidenceAssessment,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceAssessment] / spc.model_definitions.evidence
+模型契约,ConflictSet,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ConflictSet] / spc.model_definitions.evidence
+模型契约,ComparisonConstraint,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ComparisonConstraint] / spc.model_definitions.evidence
+模型契约,EvidenceGap,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceGap] / spc.model_definitions.evidence
+模型契约,PlanningEvidenceType,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceType] / spc.model_definitions.planning
+模型契约,EvidenceGapResolutionKind,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceGapResolutionKind] / spc.model_definitions.planning
+模型契约,EvidenceResolutionStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceResolutionStatus] / spc.model_definitions.planning
+模型契约,RetrievalMatchStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[RetrievalMatchStatus] / spc.model_definitions.planning
+模型契约,PlanningEvidenceRequestProposal,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceRequestProposal] / spc.model_definitions.planning
+模型契约,PlanningEvidenceRequestLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceRequestLLMResponse] / spc.model_definitions.planning
+模型契约,PlanningEvidenceGapClassification,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceGapClassification] / spc.model_definitions.planning
+模型契约,PlanningEvidenceRequest,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceRequest] / spc.model_definitions.planning
+模型契约,PlanningEvidenceRequestSet,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceRequestSet] / spc.model_definitions.planning
+模型契约,EvidenceAcquisitionProposal,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceAcquisitionProposal] / spc.model_definitions.planning
+模型契约,EvidenceResolutionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceResolutionRecord] / spc.model_definitions.planning
+模型契约,EvidenceResolutionSet,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[EvidenceResolutionSet] / spc.model_definitions.planning
+模型契约,PlanningEvidenceCyclePolicy,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceCyclePolicy] / spc.model_definitions.planning
+模型契约,PlanningEvidenceRequestAttempt,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceRequestAttempt] / spc.model_definitions.planning
+模型契约,PlanningEvidenceCycleRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningEvidenceCycleRecord] / spc.model_definitions.planning
+模型契约,InterpretationProposal,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[InterpretationProposal] / spc.model_definitions.evidence
+模型契约,ScientificEvidencePacket,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificEvidencePacket] / spc.model_definitions.evidence
+模型契约,PlanningStrategyClass,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningStrategyClass] / spc.model_definitions.planning
+模型契约,PlanningStrategy,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningStrategy] / spc.model_definitions.planning
+模型契约,DirectionDisposition,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionDisposition] / spc.model_definitions.planning
+模型契约,ScientificPlanningInput,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificPlanningInput] / spc.model_definitions.planning
+模型契约,IntentInterpretation,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[IntentInterpretation] / spc.model_definitions.planning
+模型契约,AmbiguityAssessment,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[AmbiguityAssessment] / spc.model_definitions.planning
+模型契约,ObservableDraft,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ObservableDraft] / spc.model_definitions.planning
+模型契约,ComparisonBaselineDraft,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ComparisonBaselineDraft] / spc.model_definitions.planning
+模型契约,CriterionDraft,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CriterionDraft] / spc.model_definitions.planning
+模型契约,ProposedDeviationDraft,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ProposedDeviationDraft] / spc.model_definitions.planning
+模型契约,CandidateTaskDraft,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CandidateTaskDraft] / spc.model_definitions.planning
+模型契约,CandidatePlanDraft,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[CandidatePlanDraft] / spc.model_definitions.planning
+模型契约,PlanningLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningLLMResponse] / spc.model_definitions.planning
+模型契约,ResearchDirectionProposal,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResearchDirectionProposal] / spc.model_definitions.planning
+模型契约,ResearchDirectionLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResearchDirectionLLMResponse] / spc.model_definitions.planning
+模型契约,ResearchDirection,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResearchDirection] / spc.model_definitions.planning
+模型契约,ResearchDirectionSet,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResearchDirectionSet] / spc.model_definitions.planning
+模型契约,DirectionEvidenceNeed,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionEvidenceNeed] / spc.model_definitions.planning
+模型契约,DirectionTriageProposal,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionTriageProposal] / spc.model_definitions.planning
+模型契约,DirectionTriageLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionTriageLLMResponse] / spc.model_definitions.planning
+模型契约,DirectionTriageItem,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionTriageItem] / spc.model_definitions.planning
+模型契约,DirectionTriageRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionTriageRecord] / spc.model_definitions.planning
+模型契约,DirectionExpansionCandidate,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionExpansionCandidate] / spc.model_definitions.planning
+模型契约,DirectionExpansionLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionExpansionLLMResponse] / spc.model_definitions.planning
+模型契约,DirectionCandidateBinding,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[DirectionCandidateBinding] / spc.model_definitions.planning
+模型契约,HierarchicalPlanningExpansion,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[HierarchicalPlanningExpansion] / spc.model_definitions.planning
+模型契约,HierarchicalPlanningStageAttempt,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[HierarchicalPlanningStageAttempt] / spc.model_definitions.planning
+模型契约,PlanningProposalSet,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanningProposalSet] / spc.model_definitions.planning
+模型契约,PlanCompilationReceipt,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanCompilationReceipt] / spc.model_definitions.planning
+模型契约,ApprovalRedFlagSeverity,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalRedFlagSeverity] / spc.model_definitions.approval
+模型契约,ApprovalDimensionScore,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalDimensionScore] / spc.model_definitions.approval
+模型契约,ApprovalReviewScores,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalReviewScores] / spc.model_definitions.approval
+模型契约,ApprovalHardRedFlag,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalHardRedFlag] / spc.model_definitions.approval
+模型契约,ApprovalLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalLLMResponse] / spc.model_definitions.approval
+模型契约,PlanChangeOperation,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanChangeOperation] / spc.model_definitions.revision
+模型契约,PlanRevisionActualChange,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionActualChange] / spc.model_definitions.revision
+模型契约,RevisionIssueStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[RevisionIssueStatus] / spc.model_definitions.approval
+模型契约,RevisionIssueAssessment,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RevisionIssueAssessment] / spc.model_definitions.approval
+模型契约,RevisionApprovalLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RevisionApprovalLLMResponse] / spc.model_definitions.approval
+模型契约,ApprovalReviewInput,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalReviewInput] / spc.model_definitions.approval
+模型契约,ApprovalReviewRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ApprovalReviewRecord] / spc.model_definitions.approval
+模型契约,IndependentApprovalReceipt,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[IndependentApprovalReceipt] / spc.model_definitions.approval
+模型契约,PlanRevisionFeedbackSource,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionFeedbackSource] / spc.model_definitions.revision
+模型契约,PlanRevisionDisposition,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionDisposition] / spc.model_definitions.revision
+模型契约,PlanRevisionFeedback,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionFeedback] / spc.model_definitions.revision
+模型契约,PlanRevisionConstraints,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionConstraints] / spc.model_definitions.revision
+模型契约,PlanRevisionInput,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionInput] / spc.model_definitions.revision
+模型契约,PlanRevisionFeedbackResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionFeedbackResponse] / spc.model_definitions.revision
+模型契约,PlanRevisionLLMResponse,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionLLMResponse] / spc.model_definitions.revision
+模型契约,PlanRevisionRecord,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionRecord] / spc.model_definitions.revision
+模型契约,RevisionApprovalContext,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RevisionApprovalContext] / spc.model_definitions.revision
+模型契约,RevisionApprovalReviewInput,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[RevisionApprovalReviewInput] / spc.model_definitions.revision
+模型契约,PlanRevisionAttemptStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionAttemptStatus] / spc.model_definitions.revision
+模型契约,PlanRevisionAttemptStart,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionAttemptStart] / spc.model_definitions.revision
+模型契约,PlanRevisionAttemptOutcome,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionAttemptOutcome] / spc.model_definitions.revision
+模型契约,SPCExportPackage,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SPCExportPackage] / spc.model_definitions.downstream
+模型契约,ExecutionProposal,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ExecutionProposal] / spc.model_definitions.downstream
+模型契约,ResultEvidenceType,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultEvidenceType] / spc.model_definitions.result_feedback
+模型契约,ResultExecutionOutcome,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultExecutionOutcome] / spc.model_definitions.result_feedback
+模型契约,ResultContextComparisonStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultContextComparisonStatus] / spc.model_definitions.result_feedback
+模型契约,ResultEvidenceIntakeStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultEvidenceIntakeStatus] / spc.model_definitions.result_feedback
+模型契约,SuccessorPlanningStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[SuccessorPlanningStatus] / spc.model_definitions.result_feedback
+模型契约,ResultArtifactManifestEntry,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultArtifactManifestEntry] / spc.model_definitions.result_feedback
+模型契约,ReportedObservable,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ReportedObservable] / spc.model_definitions.result_feedback
+模型契约,ResultEvidenceSubmission,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultEvidenceSubmission] / spc.model_definitions.result_feedback
+模型契约,ResultContextComparison,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultContextComparison] / spc.model_definitions.result_feedback
+模型契约,ResultIntakeIssue,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultIntakeIssue] / spc.model_definitions.result_feedback
+模型契约,ResultEvidenceAssessment,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultEvidenceAssessment] / spc.model_definitions.result_feedback
+模型契约,ResultEvidenceMaterializationReceipt,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResultEvidenceMaterializationReceipt] / spc.model_definitions.result_feedback
+模型契约,SuccessorParentBinding,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SuccessorParentBinding] / spc.model_definitions.result_feedback
+模型契约,ResearchUpdate,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ResearchUpdate] / spc.model_definitions.result_feedback
+模型契约,SuccessorPlanningInvocation,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SuccessorPlanningInvocation] / spc.model_definitions.result_feedback
+模型契约,SuccessorCandidateSelection,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SuccessorCandidateSelection] / spc.model_definitions.result_feedback
+模型契约,SuccessorPlanningCycle,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[SuccessorPlanningCycle] / spc.model_definitions.result_feedback
+模型契约,ScientificProblemRunStatus,f5cfdd7 / enum,默认、validation、serialization Schema 与定义对象核对,成员名称与值一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificProblemRunStatus] / spc.model_definitions.workflow
+模型契约,ScientificRunBlockingItem,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificRunBlockingItem] / spc.model_definitions.workflow
+模型契约,ScientificRunArtifactBinding,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificRunArtifactBinding] / spc.model_definitions.workflow
+模型契约,PlanRevisionRound,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionRound] / spc.model_definitions.workflow
+模型契约,PlanRevisionChain,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[PlanRevisionChain] / spc.model_definitions.workflow
+模型契约,ScientificRunProviderBinding,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificRunProviderBinding] / spc.model_definitions.workflow
+模型契约,ScientificRunFailure,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificRunFailure] / spc.model_definitions.workflow
+模型契约,ScientificProblemRun,f5cfdd7 / model,默认、validation、serialization Schema 与定义对象核对,字段、默认值、工厂与别名一致,PASS,tests/test_model_contracts.py::test_model_contract[ScientificProblemRun] / spc.model_definitions.workflow
+历史样本文件,knowledge-01a-3f53101.zip,验收工作树原始字节,SHA-256 指纹,f2c3263626922603f3ce0d1c89f54ff61eaf33acf6f3ec1dc04bb47bcb9eacd4,已记录,tests/fixtures/knowledge-01a-3f53101.zip
+历史样本文件,knowledge-chunks-b414df2.zip,验收工作树原始字节,SHA-256 指纹,7d13cb26b2619d878047acbb90542d3cc6c2a514f3ce266f16e8c57251ca78eb,已记录,tests/fixtures/knowledge-chunks-b414df2.zip
+历史样本文件,model-contracts-f5cfdd7.json.gz,验收工作树原始字节,SHA-256 指纹,9dc6125abfa823ffd09529c263d6251dc0c467fc42108a8112ab40434620e465,已记录,tests/fixtures/model-contracts-f5cfdd7.json.gz
+历史样本文件,model-history-f5cfdd7.zip,验收工作树原始字节,SHA-256 指纹,b93e93124a905c8b65c3db9c21471046e91f7ad207aa710dc0f3745939042d7f,已记录,tests/fixtures/model-history-f5cfdd7.zip
+历史样本文件,provider-invocation-200a208.json,验收工作树原始字节,SHA-256 指纹,9860b47fdc1fb755d59f65e39bdcf24593f224aa18d341a841d83778fd2e80aa,已记录,tests/fixtures/provider-invocation-200a208.json
+历史样本文件,repositories-ac25bd4.zip,验收工作树原始字节,SHA-256 指纹,e030f708cd682bfba421fd9b4c0b4fd062d0df212c82aa2fedcf086423232fd6,已记录,tests/fixtures/repositories-ac25bd4.zip
+历史模型实例,IndependentApprovalReceipt.yaml,f5cfdd7 归档,load_model 后重新计算 content_hash,d586d58e28634d6b484f57e239aca6f2c4e2ae9015458420e01370571a5bc483,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+历史模型实例,PlanRevisionChain.yaml,f5cfdd7 归档,load_model 后重新计算 content_hash,534f59c37c72dad0e452948140dd371f3277d6bff6ae54c205dda64b6843afe2,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+历史模型实例,ResultEvidenceMaterializationReceipt.yaml,f5cfdd7 归档,load_model 后重新计算 content_hash,9517f63cce407f3c4a97176ceb7d7d88796084b43793ad3e1fee44152e33aa74,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+历史模型实例,ResultEvidenceSubmission.yaml,f5cfdd7 归档,load_model 后重新计算 content_hash,5e25ac9907c193c876735ac98bfae6d5793e6c56a21e5167116ec419a6068bc0,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+历史模型实例,ScientificProblemRun.json,f5cfdd7 归档,load_model 后重新计算 content_hash,5d83ac8569084b3ce68e8f5bb4f82bf9907ba2b2e4b33245cff47998da6d06b4,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+历史模型实例,ScientificQuestionPlan.yaml,f5cfdd7 归档,load_model 后重新计算 content_hash,3689053954fe7d06142eb9bf96bf96b63816abdd9e3568bbeedb7d343d25927e,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+历史模型实例,SuccessorPlanningCycle.yaml,f5cfdd7 归档,load_model 后重新计算 content_hash,40bc42f301b8d7bcfad974dac511ae5bc11f53f432a6d67c263a6a14817fcf95,PASS,tests/test_model_contracts.py::test_persisted_model_hashes
+流程,Run Lock / 并发 Resume,ba6c04f / 本机隔离用例,pytest 1 项,并发启动与恢复，共享同一 Run 时修订尝试只认领一次。,PASS,tests/test_plan_revision.py::test_concurrent_resume_cannot_claim_duplicate_revision_attempt
+流程,Workflow Resume / 投影中断,ba6c04f / 本机隔离用例,pytest 1 项,在已完成审批、投影写入中断后恢复。,PASS,tests/test_workflow.py::test_resume_validates_complete_approval_after_projection_write_interruption
+流程,Revision Budget,ba6c04f / 本机隔离用例,pytest 2 项,证据补充后的重新规划仍消耗全局修订预算。,PASS,tests/test_cross_loop_invariants.py::test_evidence_replan_does_not_reset_global_revision_attempt_budget
+流程,Evidence Resolution Budget,ba6c04f / 本机隔离用例,pytest 1 项,持续缺口在证据周期上限停止。,PASS,tests/test_planning_evidence_resolution.py::test_evidence_cycle_budget_stops_persistent_gap
+流程,Provider Claim / 结果不确定,ba6c04f / 本机隔离用例,pytest 2 项,中断的直接 Provider 调用保留认领。,PASS,tests/test_workflow.py::test_resume_after_interrupted_direct_provider_keeps_claim
+流程,证据请求认领,ba6c04f / 本机隔离用例,pytest 1 项,恢复中保留未决证据请求。,PASS,tests/test_planning_evidence_resolution.py::test_uncertain_evidence_request_attempt_is_not_repeated_on_resume
+流程,审批认领,ba6c04f / 本机隔离用例,pytest 1 项,中断审批后规划与审批调用次数各为一。,PASS,tests/test_cross_loop_invariants.py::test_approval_claim_without_complete_output_is_not_repeated
+流程,独立审批 / Receipt,ba6c04f / 本机隔离用例,pytest 1 项,重算哈希后的伪造收据仍拒绝。,PASS,tests/test_independent_approval.py::test_independent_chain_rejects_a_rehashed_forged_receipt_id
+流程,审批绑定 / Plan 版本,ba6c04f / 本机隔离用例,pytest 1 项,候选计划发生变化后原审批绑定失效。,PASS,tests/test_independent_approval.py::test_candidate_change_invalidates_materialized_approval_binding
+流程,导出时的审批策略,ba6c04f / 本机隔离用例,pytest 1 项,独立审批策略阻止普通人工 verdict 代替独立审批。,PASS,tests/test_independent_approval.py::test_manual_spc_approve_cannot_export_under_independent_policy
+流程,只读状态 / 空文件,ba6c04f / 本机隔离用例,pytest 1 项,历史 run.json 与空规划文件仍显示结果不确定，周期数为零。,PASS,tests/test_cross_loop_invariants.py::test_successor_status_reads_historical_run_with_empty_planning_files
+流程,孤立 Proposal / Outcome / Approval,ba6c04f / 本机隔离用例,pytest 11 项,按阶段标记不确定，只有 Invocation 时保留 RESERVED，查询前后文件清单与摘要一致。,PASS,tests/test_cross_loop_invariants.py::test_successor_status_detects_orphaned_stage_artifacts
+流程,有效产物及完整周期,ba6c04f / 本机隔离用例,pytest 7 项,破损散列、回执、绑定或记录均不能确立完整周期。,PASS,tests/test_cross_loop_invariants.py::test_successor_status_checks_the_artifacts_behind_a_planning_outcome
+流程,早期无 Invocation / Selection 的周期,ba6c04f / 本机隔离用例,pytest 1 项,模拟早期格式，验证已批准周期和只读状态。,PASS,tests/test_cross_loop_invariants.py::test_successor_status_reads_legacy_cycle_without_invocation_or_selection
+流程,Successor Parent Lineage,ba6c04f / 本机隔离用例,pytest 1 项,下一周期使用精确匹配的已批准父计划。,PASS,tests/test_result_feedback.py::test_approved_successor_is_exact_parent_of_second_result_cycle
+流程,结果接收 / 人工 Curation,ba6c04f / 本机隔离用例,pytest 1 项,撤回接受后，新状态阻止使用先前的回执。,PASS,tests/test_result_feedback.py::test_rejected_curation_blocks_successor_despite_prior_receipt
+流程,Result Evidence 跨 Run,ba6c04f / 本机隔离用例,pytest 1 项,跨 Run 绑定遭拒。,PASS,tests/test_result_feedback.py::test_cross_run_result_cannot_bind_a_plan_from_another_run
+流程,Fingerprint 与 Artifact,ba6c04f / 本机隔离用例,pytest 1 项,未声明的系统或方法变化阻止接收。,PASS,tests/test_result_feedback.py::test_undeclared_system_or_method_change_blocks_intake
+流程,历史修订尝试完整性,ba6c04f / 本机隔离用例,pytest 1 项,终态恢复验证尝试记录。,PASS,tests/test_plan_revision.py::test_terminal_revision_resume_fails_closed_on_attempt_tampering
+CLI 业务,本地 PDF 接收,ba6c04f / 本机隔离用例,pytest 1 项,临时目录执行文献接收并核对选择状态。,PASS,tests/test_literature_acquisition.py::test_add_literature_cli_reports_local_pdf_without_selecting_it
+CLI 业务,专家知识导入,ba6c04f / 本机隔离用例,pytest 1 项,使用原 CLI 完成专家来源、知识提取和检查。,PASS,tests/test_expert_knowledge.py::test_cli_expert_workflow_is_explicit_and_inspectable
+CLI 业务,文献知识导入 / Curation,ba6c04f / 本机隔离用例,pytest 1 项,离线提取、查看和显式审核经过现有链。,PASS,tests/test_literature_knowledge.py::test_cli_extract_inspect_and_curate_use_existing_curation_chain
+安全,SSRF / 内网,ba6c04f / 本机隔离用例,pytest 1 项,离线输入和解析器验证地址拒绝。,PASS,tests/test_literature_acquisition.py::test_safe_fetcher_rejects_local_and_private_addresses
+安全,DNS / 重定向,ba6c04f / 本机隔离用例,pytest 1 项,逐跳解析并重新绑定允许的地址集。,PASS,tests/test_literature_acquisition.py::test_redirect_dns_is_revalidated_with_a_new_pinned_set
+安全,IP Pinning,ba6c04f / 本机隔离用例,pytest 1 项,连接端地址须匹配预先验证的 IP。,PASS,tests/test_literature_acquisition.py::test_transport_connection_must_match_prevalidated_ip
+安全,TLS / SNI,ba6c04f / 本机隔离用例,pytest 1 项,离线连接探针验证 IP 和原始主机名传递。,PASS,tests/test_literature_acquisition.py::test_https_connection_uses_pinned_ip_and_original_hostname_for_sni
+安全,Collection Scope / Redirect,ba6c04f / 本机隔离用例,pytest 2 项,记录型 Transport 验证每跳授权先于请求。,PASS,tests/test_collection_http_scope.py::test_every_page_redirect_is_checked_before_transport
+安全,Collection DOI / 元数据,ba6c04f / 本机隔离用例,pytest 3 项,越界元数据与 DOI 目标未收到请求。,PASS,tests/test_collection_http_scope.py::test_metadata_and_doi_http_requests_respect_scope
+安全,Windows 外部 Junction,ba6c04f / 本机隔离用例,pytest 2 项,本机创建 Junction，覆盖空目录及具有周期记录的外部目录。,PASS,tests/test_cross_loop_invariants.py::test_successor_status_rejects_external_junction_before_counting
+安全,Windows 内部 / 失目标 Junction,ba6c04f / 本机隔离用例,pytest 1 项,内部 Junction 可恢复，失目标依照原有规则处理。,PASS,tests/test_cross_loop_invariants.py::test_successor_resumes_in_run_junction_and_ignores_missing_junction_target
+安全,写前 Safe Path / Run Root,ba6c04f / 本机隔离用例,pytest 2 项,目录替换后的读写仍检查 Run 根绑定。,PASS,tests/test_cross_loop_invariants.py::test_resumed_successor_rechecks_replaced_cycle_before_writing
+安全,Artifact 安全路径,ba6c04f / 本机隔离用例,pytest 1 项,临时存储中的越界路径拒绝。,PASS,tests/test_literature_ingestion.py::test_artifact_store_rejects_path_traversal_and_symlink
+安全,Immutable Artifact,ba6c04f / 本机隔离用例,pytest 2 项,首次读取缺失，写时出现已有文件，检查等值与冲突语义及文件 SHA-256。,PASS,tests/test_immutable_put_reuse.py::test_real_immutable_put_after_a_read_miss
+安全,Evidence Provenance / Closing,ba6c04f / 本机隔离用例,pytest 6 项,可信读取关闭时重新检查变更。,PASS,tests/test_evidence_source_reads.py::test_trusted_closing_rejects_changes_after_evidence_verification
+安全,K1F 结构关闭复验,ba6c04f / 本机隔离用例,pytest 2 项,结构验证后规范文本变化仍被发现。,PASS,tests/test_k1f_structure_reads.py::test_trusted_closing_check_rejects_text_changed_after_structure_validation
+安全,K1F 后续读取,ba6c04f / 本机隔离用例,pytest 2 项,关闭复验及独立可信读取重开原字节。,PASS,tests/test_evidence_source_reads.py::test_closing_and_later_trusted_reads_reopen_source_bytes
+安全,自定义 Reader,ba6c04f / 本机隔离用例,pytest 8 项,自定义规范文本读取路径仍执行。,PASS,tests/test_k1f_structure_reads.py::test_trusted_structure_keeps_custom_canonical_readers
+安全,自定义 Reader / 原始来源,ba6c04f / 本机隔离用例,pytest 4 项,保留自定义来源完整性钩子。,PASS,tests/test_evidence_source_reads.py::test_evidence_verification_keeps_custom_source_integrity_hooks
+安全,表格归属验证,ba6c04f / 本机隔离用例,pytest 4 项,自定义结构读取器保留原归属验证。,PASS,tests/test_k1f_table_reads.py::test_custom_structure_getters_keep_the_original_ownership_path
+业务 CLI,接收、显式审核、状态与错误,72bc0ac / ba6c04f,隔离 CLI 实际业务输入,等待审核 → accepted，完整周期 0，缺失 submission 返回 1，错误文本仅替换临时根路径后相同,PASS,src/spc/cli.py::intake_result_evidence / curate_result_evidence / successor_plan_status
+历史重放,已批准 Successor + Revision,72bc0ac 生成 → ba6c04f 恢复,独立解释器、同一原始 Run 的副本,178 个文件路径与 SHA-256 一致；两轮审批、使用一次修订；规划/审批/修订调用均为 0,PASS,tests/test_result_feedback.py::_approved_parent / tests/test_plan_revision.py::_workflow
+历史重放,完整审批材料但缺最终周期,72bc0ac 生成的树副本,复制时只排除 cycle.yaml，再查询,SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN，cycles=0，文件与目录清单一致,PASS,src/spc/result_feedback/status.py::_successor_stage_status
+历史身份,Evidence Span ID / Locator,3f53101 历史 HTML,重建表格单元、图注的 Evidence Span 与定位绑定,两个预期 evidence_id、两份 content_hash 与定位器绑定相符,PASS,tests/test_knowledge_literature_compatibility.py
+历史身份,Repository 存储,ac25bd4 归档,读取 7 类记录及等值写回,12 个归档数据文件的原始字节与相对路径一致,PASS,tests/test_repository_components.py::test_baseline_repository_tree_is_readable_and_reusable
+历史身份,Content-bound ID,历史 Collection 页面与结果回传记录,用旧输入重建 ID 与哈希,Collection、Submission 及默认值/Unicode 的约定获覆盖,PASS,tests/test_content_bound_identity.py
+历史身份,Chunk ID、偏移、顺序,b414df2 的五组固定样本,重建后按 ZIP 顺序逐对象等值比较,2+5+9+3+2=21 个 Chunk，全字段一致,PASS,tests/test_knowledge_chunking.py::test_rebuild_matches_ordered_historical_chunks
+历史身份,Provider Invocation,200a208 固定 JSON,fake CLI 离线调用，逐字段比较完整 Invocation,Content Hash 7f8fabd07508fc5791227e292f47420433c6f3486a3619b5856c5e9bb5d8ab37,PASS,tests/test_codex_cli_transport.py::test_codex_cli_transport_isolated_proposal_is_audited_and_materialized
+运行计数,同根 KnowledgeEvidenceStore,f4ce42a → ba6c04f,open_knowledge 构造计数,2 → 1，范围为单次知识库打开,PASS,tests/test_evidence_stores.py::test_knowledge_store_reuse_is_scoped_to_operation_root_and_mode
+运行计数,普通 Successor 周期目录,f4ce42a → ba6c04f,对一个已批准普通周期枚举项计数,is_symlink + is_dir → lstat 一次，写前与链接检查单独保留,PASS,tests/test_cross_loop_invariants.py::test_same_successor_inputs_reuse_one_content_bound_cycle
+运行计数,文献编译额外 Repository 构造,778e009 基线审计 / ba6c04f 回归,五种原生对象，历史 HTML 编译与构造 Spy,26 → 0；含五个组装对象的总计 31 → 5,PASS,docs/literature-repository-reuse-audit-778e009.md / tests/test_literature_repository_reuse.py
+实现数,内容绑定 ID 构造器,9435a5f → ba6c04f,审计与历史内容等值测试,相同算法 4 → 1；各域保留 ID 字段选择及前缀,PASS,docs/content-bound-id-audit-9435a5f.md / src/spc/serialization.py
+实现数,文本范围算法,b414df2 → ba6c04f,两域共享字符范围函数；固定样本,2 → 1，Expert 和 Literature 的业务策略保持独立,PASS,docs/text-chunking-audit-b414df2.md / src/spc/knowledge/text_chunking.py
+实现数,Provider 公共参数校验,200a208 → ba6c04f,4 个结构化 Provider 和知识批次参数,共享温度/尝试次数校验及批次上限校验，超时与领域错误单独保留,PASS,docs/provider-parameter-audit-200a208.md / tests/test_provider_parameters.py
+实现数,A02 put_reuse,9d6665c → ba6c04f,原探针及真实 Repository 用例,控制流 4 → 1，四种领域冲突文案；32 项原探针、9 项补充,PASS,tests/test_immutable_put_reuse.py / docs/a02-put-reuse-audit.md
+运行计数,Knowledge 索引 / 空库,f4ce42a → ba6c04f,record_index 与索引内实际 list/list_metadata 调用,构建 2 → 1，枚举 48 → 24，同一输入状态相等,PASS,src/spc/knowledge/trust.py::record_index / tests/test_workflow.py
+局部计时,Knowledge Status / 空库,同机各 7 次,预热 1 次；计时不附加 Spy，记录中位数,15.05 → 16.05 ms；范围 14.23–20.65 与 14.32–44.23 ms,已测，非生产基准,src/spc/workflow/status.py::build_knowledge_status
+运行计数,Knowledge 索引 / 有记录库,f4ce42a → ba6c04f,record_index 与索引内实际 list/list_metadata 调用,构建 2 → 1，枚举 48 → 24，同一输入状态相等,PASS,src/spc/knowledge/trust.py::record_index / tests/test_workflow.py
+局部计时,Knowledge Status / 有记录库,同机各 7 次,预热 1 次；计时不附加 Spy，记录中位数,88.1 → 87.49 ms；范围 81.12–115.8 与 85.24–118.14 ms,已测，非生产基准,src/spc/workflow/status.py::build_knowledge_status
+覆盖边界,Docling 真实本地模型,外推范围,条件集成测试,SPC_DOCLING_ARTIFACTS_PATH 未配置,SKIP,tests/test_backends.py::test_real_docling_smoke_only_with_preconfigured_local_artifacts
+覆盖边界,第三方 Reparse Point,外推范围,已运行 Windows 原生 Junction 与 symlink 用例,其他厂商的驱动、标签及文件系统语义未逐一验证,未验证,tests/test_cross_loop_invariants.py
+覆盖边界,生产调用量与并发,外推范围,本机离线功能回归及有限并发测试,未采集外部调用量、P95/P99、吞吐量与长时间负载,未验证,tests/test_plan_revision.py / 本次本机测量
+覆盖边界,公网 DNS / TLS / HTTP,外推范围,离线记录 Transport、指定 DNS 和 socket/SSL 替身,未测试真实站点、证书链、代理及网络可用性,未验证,tests/test_literature_acquisition.py / tests/test_collection_http_scope.py
+覆盖边界,全部生产历史数据,外推范围,固定归档与旧版生成的离线 Run,未读取外部完整生产目录或未收集的旧版本,未验证,tests/fixtures/

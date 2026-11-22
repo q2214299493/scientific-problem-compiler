@@ -1,0 +1,254 @@
+name,kind,baseline_location,domain_module,direct_definition_references,cycle_or_forward_reference
+_require_non_blank,helper,src/spc/models.py:23,base,,none
+_normalize_identity_text,helper,src/spc/models.py:29,literature,,none
+_normalize_doi,helper,src/spc/models.py:33,literature,_normalize_identity_text,none
+NonBlankStr,type alias,src/spc/models.py:42,base,_require_non_blank,none
+Sha256Str,type alias,src/spc/models.py:47,base,,none
+KnowledgeEntityType,type alias,src/spc/models.py:48,base,_require_non_blank,none
+StrictModel,model,src/spc/models.py:55,base,,none
+EvidenceClassification,enum,src/spc/models.py:65,evidence,,none
+ApprovalDecision,enum,src/spc/models.py:73,approval,,none
+ApprovalMode,enum,src/spc/models.py:82,approval,,none
+CurationStatus,enum,src/spc/models.py:87,knowledge,,none
+LiteratureIngestionStatus,enum,src/spc/models.py:94,literature,,none
+AcquisitionInputKind,enum,src/spc/models.py:100,literature,,none
+AcquisitionStatus,enum,src/spc/models.py:106,literature,,none
+CollectionSourceKind,enum,src/spc/models.py:118,collection,,none
+CollectionImportStatus,enum,src/spc/models.py:124,collection,,none
+CollectionResourceKind,enum,src/spc/models.py:133,collection,,none
+CollectionTraversalStatus,enum,src/spc/models.py:140,collection,,none
+CollectionCompletenessStatus,enum,src/spc/models.py:148,collection,,none
+CollectionDiscoveryConfidence,enum,src/spc/models.py:157,collection,,none
+CollectionDiscoveryContext,enum,src/spc/models.py:163,collection,,none
+CollectionMembershipDecision,enum,src/spc/models.py:176,collection,,none
+FullTextAccessStatus,enum,src/spc/models.py:183,literature,,none
+FullTextSourceKind,enum,src/spc/models.py:190,literature,,none
+LiteratureRepresentationKind,enum,src/spc/models.py:198,literature,,none
+DocumentBlockType,enum,src/spc/models.py:203,literature,,none
+DocumentContentRegion,enum,src/spc/models.py:214,literature,,none
+StructureExtractionStatus,enum,src/spc/models.py:224,literature,,none
+MetadataValueOrigin,enum,src/spc/models.py:231,literature,,none
+KnowledgeViewMode,enum,src/spc/models.py:238,knowledge,,none
+KnowledgePredicate,enum,src/spc/models.py:243,knowledge,,none
+RetrievalSourceType,enum,src/spc/models.py:257,retrieval,,none
+EpistemicStatus,enum,src/spc/models.py:271,evidence,,none
+ResultStatus,enum,src/spc/models.py:282,evidence,,none
+EvidenceAssessmentStatus,enum,src/spc/models.py:290,evidence,,none
+SourceRole,enum,src/spc/models.py:298,evidence,,none
+SourceType,enum,src/spc/models.py:307,evidence,,none
+SourceDocument,model,src/spc/models.py:319,evidence,NonBlankStr; SourceRole; SourceType; StrictModel,none
+EvidenceSpan,model,src/spc/models.py:342,evidence,NonBlankStr; StrictModel,none
+EvidenceReference,model,src/spc/models.py:359,evidence,StrictModel,none
+GroundedStatement,model,src/spc/models.py:365,evidence,EvidenceClassification; NonBlankStr; StrictModel,none
+Hypothesis,model,src/spc/models.py:378,scientific,GroundedStatement; StrictModel,none
+ScientificQuestion,model,src/spc/models.py:383,scientific,NonBlankStr; StrictModel,none
+ModelDefinition,model,src/spc/models.py:389,scientific,GroundedStatement; StrictModel,none
+ObservableDefinition,model,src/spc/models.py:395,scientific,GroundedStatement; NonBlankStr; StrictModel,none
+ComparisonBaseline,model,src/spc/models.py:401,scientific,GroundedStatement; StrictModel,none
+AcceptanceCriterion,model,src/spc/models.py:406,scientific,NonBlankStr; StrictModel,none
+FalsificationCriterion,model,src/spc/models.py:412,scientific,NonBlankStr; StrictModel,none
+AssumptionRecord,model,src/spc/models.py:418,scientific,NonBlankStr; StrictModel,none
+UnknownRecord,model,src/spc/models.py:424,scientific,NonBlankStr; StrictModel,none
+ProposedDeviation,model,src/spc/models.py:430,scientific,NonBlankStr; StrictModel,none
+IntentFingerprint,model,src/spc/models.py:438,scientific,NonBlankStr; StrictModel,none
+SystemFingerprint,model,src/spc/models.py:445,scientific,StrictModel,none
+MethodFingerprint,model,src/spc/models.py:451,scientific,StrictModel,none
+FingerprintDifference,model,src/spc/models.py:458,scientific,NonBlankStr; StrictModel,none
+RequiredHumanDecision,model,src/spc/models.py:475,scientific,NonBlankStr; StrictModel,none
+DAGTask,model,src/spc/models.py:482,scientific,NonBlankStr; StrictModel,none
+ScientificQuestionPlan,model,src/spc/models.py:499,scientific,AcceptanceCriterion; AssumptionRecord; ComparisonBaseline; DAGTask; EvidenceReference; FalsificationCriterion; FingerprintDifference; GroundedStatement; Hypothesis; IntentFingerprint; MethodFingerprint; ModelDefinition; NonBlankStr; ObservableDefinition; ProposedDeviation; RequiredHumanDecision; ScientificQuestion; StrictModel; SystemFingerprint; UnknownRecord,none
+PROHIBITED_EXECUTION_PAYLOAD_KEYS,constant,src/spc/models.py:605,scientific,,none
+prohibited_execution_payload_paths,helper,src/spc/models.py:618,scientific,PROHIBITED_EXECUTION_PAYLOAD_KEYS; prohibited_execution_payload_paths,recursive helper within module
+ScientificTaskExecutionContext,model,src/spc/models.py:636,scientific,AcceptanceCriterion; ComparisonBaseline; EvidenceReference; FalsificationCriterion; Hypothesis; ModelDefinition; NonBlankStr; ObservableDefinition; Sha256Str; StrictModel; prohibited_execution_payload_paths,none
+RequiredFix,model,src/spc/models.py:683,approval,NonBlankStr; StrictModel,none
+FixResolution,model,src/spc/models.py:689,approval,NonBlankStr; StrictModel,none
+HumanDecisionResolution,model,src/spc/models.py:696,approval,NonBlankStr; StrictModel,none
+ApprovalScores,model,src/spc/models.py:703,approval,StrictModel,none
+ApprovalVerdict,model,src/spc/models.py:713,approval,ApprovalDecision; ApprovalScores; FixResolution; HumanDecisionResolution; NonBlankStr; RequiredFix; StrictModel,none
+PlanValidationRecord,model,src/spc/models.py:729,approval,StrictModel,none
+ProjectTrustPolicy,model,src/spc/models.py:741,approval,ApprovalMode; NonBlankStr; StrictModel,none
+GateVerdict,model,src/spc/models.py:746,approval,NonBlankStr; StrictModel,none
+ScientificCapability,model,src/spc/models.py:783,scientific,NonBlankStr; StrictModel,none
+ExpertCase,model,src/spc/models.py:795,knowledge,NonBlankStr; Sha256Str; StrictModel,none
+LiteratureWorkflowPattern,model,src/spc/models.py:875,literature,NonBlankStr; StrictModel,none
+LiteratureDocument,model,src/spc/models.py:884,literature,NonBlankStr; Sha256Str; StrictModel; literature_identity_id,forward reference in same module
+literature_identity_id,helper,src/spc/models.py:924,literature,_normalize_doi; _normalize_identity_text,none
+LiteratureAcquisitionRequest,model,src/spc/models.py:944,literature,AcquisitionInputKind; NonBlankStr; Sha256Str; StrictModel,none
+FullTextCandidate,model,src/spc/models.py:967,literature,FullTextAccessStatus; FullTextSourceKind; NonBlankStr; Sha256Str; StrictModel,none
+ResolvedLiteratureResource,model,src/spc/models.py:1000,literature,AcquisitionStatus; FullTextCandidate; NonBlankStr; Sha256Str; StrictModel,none
+LiteratureAcquisitionRecord,model,src/spc/models.py:1051,literature,AcquisitionStatus; NonBlankStr; Sha256Str; StrictModel,none
+LiteratureAcquisitionOutcome,model,src/spc/models.py:1139,literature,AcquisitionInputKind; AcquisitionStatus; NonBlankStr; StrictModel,none
+CollectionScopePolicy,model,src/spc/models.py:1155,collection,NonBlankStr; Sha256Str; StrictModel,none
+CollectionDefinition,model,src/spc/models.py:1202,collection,CollectionScopePolicy; CollectionSourceKind; NonBlankStr; Sha256Str; StrictModel,none
+CollectionPageRecord,model,src/spc/models.py:1230,collection,NonBlankStr; Sha256Str; StrictModel,none
+CollectionPageArtifact,model,src/spc/models.py:1275,collection,NonBlankStr; Sha256Str; StrictModel,none
+DiscoveredCollectionResource,model,src/spc/models.py:1309,collection,CollectionDiscoveryConfidence; CollectionMembershipDecision; CollectionResourceKind; NonBlankStr; Sha256Str; StrictModel,none
+CollectionResourceOccurrence,model,src/spc/models.py:1355,collection,CollectionDiscoveryConfidence; CollectionDiscoveryContext; CollectionMembershipDecision; NonBlankStr; Sha256Str; StrictModel,none
+CollectionSnapshot,model,src/spc/models.py:1393,collection,CollectionCompletenessStatus; CollectionImportStatus; CollectionTraversalStatus; NonBlankStr; Sha256Str; StrictModel,none
+CollectionDiscoveryResult,model,src/spc/models.py:1495,collection,CollectionDefinition; CollectionPageRecord; CollectionResourceOccurrence; CollectionSnapshot; DiscoveredCollectionResource; StrictModel,none
+CollectionAcquisitionLink,model,src/spc/models.py:1566,collection,AcquisitionStatus; NonBlankStr; Sha256Str; StrictModel,none
+CollectionResourceImportResult,model,src/spc/models.py:1596,collection,AcquisitionStatus; NonBlankStr; Sha256Str; StrictModel,none
+CollectionLiteratureMembership,model,src/spc/models.py:1638,collection,NonBlankStr; Sha256Str; StrictModel,none
+CollectionImportRecord,model,src/spc/models.py:1678,collection,CollectionImportStatus; NonBlankStr; Sha256Str; StrictModel,none
+CollectionDiff,model,src/spc/models.py:1755,collection,NonBlankStr; Sha256Str; StrictModel,none
+CollectionImportOutcome,model,src/spc/models.py:1791,collection,CollectionCompletenessStatus; CollectionImportStatus; CollectionTraversalStatus; NonBlankStr; StrictModel,none
+MetadataRetrievalRecord,model,src/spc/models.py:1815,literature,NonBlankStr; Sha256Str; StrictModel,none
+MetadataAlternative,model,src/spc/models.py:1853,literature,MetadataValueOrigin; NonBlankStr; StrictModel,none
+MetadataFieldDecision,model,src/spc/models.py:1858,literature,MetadataAlternative; MetadataValueOrigin; NonBlankStr; StrictModel,none
+MetadataMergeManifest,model,src/spc/models.py:1877,literature,MetadataFieldDecision; NonBlankStr; Sha256Str; StrictModel,none
+AcquisitionAttemptRecord,model,src/spc/models.py:1901,literature,AcquisitionStatus; NonBlankStr; Sha256Str; StrictModel,none
+RawLiteratureArtifact,model,src/spc/models.py:1977,literature,NonBlankStr; Sha256Str; StrictModel,none
+CanonicalTextBlock,model,src/spc/models.py:2019,literature,NonBlankStr; Sha256Str; StrictModel,none
+CanonicalTextArtifact,model,src/spc/models.py:2041,literature,CanonicalTextBlock; NonBlankStr; Sha256Str; StrictModel,none
+LiteratureSupplementarySource,model,src/spc/models.py:2096,literature,NonBlankStr; Sha256Str; StrictModel,none
+RawHTMLLiteratureArtifact,model,src/spc/models.py:2127,literature,NonBlankStr; Sha256Str; StrictModel,none
+CanonicalHTMLTextArtifact,model,src/spc/models.py:2160,literature,CanonicalTextBlock; NonBlankStr; Sha256Str; StrictModel,none
+HTMLLiteratureIngestionRecord,model,src/spc/models.py:2210,literature,LiteratureIngestionStatus; NonBlankStr; Sha256Str; StrictModel,none
+LiteratureRepresentationReference,model,src/spc/models.py:2243,literature,LiteratureRepresentationKind; NonBlankStr; Sha256Str; StrictModel,none
+DocumentStructureBlock,model,src/spc/models.py:2273,literature,DocumentBlockType; DocumentContentRegion; NonBlankStr; Sha256Str; StrictModel,none
+TableCellStructure,model,src/spc/models.py:2316,literature,NonBlankStr; Sha256Str; StrictModel,none
+TableStructure,model,src/spc/models.py:2367,literature,NonBlankStr; Sha256Str; StrictModel; StructureExtractionStatus,none
+FigureStructure,model,src/spc/models.py:2403,literature,NonBlankStr; Sha256Str; StrictModel; StructureExtractionStatus,none
+DocumentStructureArtifact,model,src/spc/models.py:2430,literature,LiteratureRepresentationKind; NonBlankStr; Sha256Str; StrictModel; StructureExtractionStatus,none
+DocumentStructureSelection,model,src/spc/models.py:2484,literature,NonBlankStr; Sha256Str; StrictModel,none
+StructuredEvidenceLocator,model,src/spc/models.py:2515,literature,DocumentContentRegion; NonBlankStr; Sha256Str; StrictModel,none
+LiteratureIngestionRecord,model,src/spc/models.py:2568,literature,LiteratureIngestionStatus; NonBlankStr; Sha256Str; StrictModel,none
+LiteratureRepresentationSelection,model,src/spc/models.py:2633,literature,NonBlankStr; Sha256Str; StrictModel,none
+LiteratureRepresentationSelectionOutcome,model,src/spc/models.py:2689,literature,LiteratureIngestionStatus; LiteratureRepresentationSelection; NonBlankStr; StrictModel,none
+HistoricalLiteratureEvidenceAuthorization,model,src/spc/models.py:2701,literature,NonBlankStr; Sha256Str; StrictModel,none
+LiteratureIngestionOutcome,model,src/spc/models.py:2752,literature,NonBlankStr; StrictModel,none
+ExpertProfile,model,src/spc/models.py:2764,knowledge,NonBlankStr; Sha256Str; StrictModel,none
+ExpertAttributionRecord,model,src/spc/models.py:2800,knowledge,NonBlankStr; Sha256Str; StrictModel,none
+ExpertOpinion,model,src/spc/models.py:2834,knowledge,NonBlankStr; Sha256Str; StrictModel,none
+KnowledgeRelation,model,src/spc/models.py:2886,knowledge,KnowledgeEntityType; KnowledgePredicate; NonBlankStr; Sha256Str; StrictModel,none
+KnowledgeCurationRecord,model,src/spc/models.py:2923,knowledge,CurationStatus; KnowledgeEntityType; NonBlankStr; Sha256Str; StrictModel,none
+DomainProfile,model,src/spc/models.py:2957,scientific,NonBlankStr; StrictModel,none
+AgentCapability,model,src/spc/models.py:2971,downstream,NonBlankStr; StrictModel,none
+AgentCapabilityCatalog,model,src/spc/models.py:2987,downstream,AgentCapability; NonBlankStr; StrictModel,none
+CapabilityBinding,model,src/spc/models.py:3016,downstream,NonBlankStr; StrictModel,none
+ExecutionPolicy,model,src/spc/models.py:3023,downstream,StrictModel,none
+AgentHandoffPackage,model,src/spc/models.py:3033,downstream,CapabilityBinding; ExecutionPolicy; StrictModel,none
+ExportManifest,model,src/spc/models.py:3043,downstream,StrictModel,none
+RetrievalQuery,model,src/spc/models.py:3052,retrieval,NonBlankStr; RetrievalSourceType; StrictModel,none
+RetrievalHit,model,src/spc/models.py:3073,retrieval,CurationStatus; NonBlankStr; RetrievalSourceType; Sha256Str; StrictModel,none
+KnowledgeRetrievalContext,model,src/spc/models.py:3112,retrieval,KnowledgeViewMode; NonBlankStr; RetrievalHit; RetrievalQuery; RetrievalSourceType; Sha256Str; StrictModel,none
+KnowledgeSnapshot,model,src/spc/models.py:3194,knowledge,NonBlankStr; Sha256Str; StrictModel,none
+KnowledgeGraphNode,model,src/spc/models.py:3266,knowledge,CurationStatus; KnowledgeEntityType; NonBlankStr; Sha256Str; StrictModel,none
+KnowledgeGraphEdge,model,src/spc/models.py:3283,knowledge,CurationStatus; KnowledgePredicate; NonBlankStr; Sha256Str; StrictModel,none
+KnowledgeGraph,model,src/spc/models.py:3293,knowledge,CurationStatus; KnowledgeGraphEdge; KnowledgeGraphNode; KnowledgeViewMode; NonBlankStr; Sha256Str; StrictModel,none
+RetrievalManifest,model,src/spc/models.py:3348,retrieval,NonBlankStr; Sha256Str; StrictModel,none
+scientific_context_semantic_hash,helper,src/spc/models.py:3375,retrieval,,none
+ScientificContextPacket,model,src/spc/models.py:3399,retrieval,AssumptionRecord; GroundedStatement; KnowledgeRetrievalContext; KnowledgeSnapshot; NonBlankStr; RetrievalHit; RetrievalManifest; RetrievalQuery; RetrievalSourceType; Sha256Str; StrictModel; UnknownRecord; scientific_context_semantic_hash,none
+SourceQuote,model,src/spc/models.py:3574,evidence,NonBlankStr; SourceRole; SourceType; StrictModel,none
+SourceClaim,model,src/spc/models.py:3602,evidence,EpistemicStatus; NonBlankStr; SourceRole; StrictModel,none
+ResultContext,model,src/spc/models.py:3621,evidence,NonBlankStr; StrictModel,none
+ReportedResult,model,src/spc/models.py:3638,evidence,NonBlankStr; ResultContext; ResultStatus; StrictModel,none
+ReportedObservation,model,src/spc/models.py:3650,evidence,NonBlankStr; ResultContext; ResultStatus; StrictModel,none
+MethodFact,model,src/spc/models.py:3663,evidence,EpistemicStatus; NonBlankStr; StrictModel,none
+ModelFact,model,src/spc/models.py:3677,evidence,EpistemicStatus; NonBlankStr; StrictModel,none
+EvidenceAssessment,model,src/spc/models.py:3691,evidence,EvidenceAssessmentStatus; NonBlankStr; StrictModel,none
+ConflictSet,model,src/spc/models.py:3701,evidence,NonBlankStr; StrictModel,none
+ComparisonConstraint,model,src/spc/models.py:3711,evidence,NonBlankStr; StrictModel,none
+EvidenceGap,model,src/spc/models.py:3721,evidence,NonBlankStr; StrictModel,none
+PlanningEvidenceType,enum,src/spc/models.py:3731,planning,,none
+EvidenceGapResolutionKind,enum,src/spc/models.py:3741,planning,,none
+EvidenceResolutionStatus,enum,src/spc/models.py:3749,planning,,none
+RetrievalMatchStatus,enum,src/spc/models.py:3759,planning,,none
+PlanningEvidenceRequestProposal,model,src/spc/models.py:3767,planning,NonBlankStr; PlanningEvidenceType; StrictModel,none
+PlanningEvidenceRequestLLMResponse,model,src/spc/models.py:3796,planning,PlanningEvidenceRequestProposal; StrictModel,none
+PlanningEvidenceGapClassification,model,src/spc/models.py:3802,planning,EvidenceGapResolutionKind; NonBlankStr; StrictModel,none
+PlanningEvidenceRequest,model,src/spc/models.py:3808,planning,NonBlankStr; PlanningEvidenceRequestProposal; Sha256Str,none
+PlanningEvidenceRequestSet,model,src/spc/models.py:3827,planning,NonBlankStr; PlanningEvidenceGapClassification; PlanningEvidenceRequest; PlanningStrategy; Sha256Str; StrictModel,forward reference in same module
+EvidenceAcquisitionProposal,model,src/spc/models.py:3911,planning,NonBlankStr; RetrievalQuery; Sha256Str; StrictModel,none
+EvidenceResolutionRecord,model,src/spc/models.py:3936,planning,EvidenceResolutionStatus; KnowledgeRetrievalContext; NonBlankStr; RetrievalHit; RetrievalMatchStatus; Sha256Str; StrictModel,none
+EvidenceResolutionSet,model,src/spc/models.py:4002,planning,EvidenceAcquisitionProposal; EvidenceResolutionRecord; NonBlankStr; Sha256Str; StrictModel,none
+PlanningEvidenceCyclePolicy,model,src/spc/models.py:4027,planning,NonBlankStr; Sha256Str; StrictModel,none
+PlanningEvidenceRequestAttempt,model,src/spc/models.py:4047,planning,NonBlankStr; Sha256Str; StrictModel,none
+PlanningEvidenceCycleRecord,model,src/spc/models.py:4121,planning,NonBlankStr; Sha256Str; StrictModel,none
+InterpretationProposal,model,src/spc/models.py:4168,evidence,ComparisonConstraint; ConflictSet; EvidenceAssessment; EvidenceGap; MethodFact; ModelFact; NonBlankStr; ReportedResult; Sha256Str; SourceClaim; SourceQuote; StrictModel,none
+ScientificEvidencePacket,model,src/spc/models.py:4188,evidence,ComparisonConstraint; ConflictSet; EvidenceAssessment; EvidenceGap; MethodFact; ModelFact; NonBlankStr; ReportedObservation; ReportedResult; Sha256Str; SourceClaim; SourceQuote; StrictModel,none
+PlanningStrategyClass,enum,src/spc/models.py:4236,planning,,none
+PlanningStrategy,enum,src/spc/models.py:4244,planning,,none
+DirectionDisposition,enum,src/spc/models.py:4249,planning,,none
+ScientificPlanningInput,model,src/spc/models.py:4256,planning,ComparisonConstraint; ConflictSet; EvidenceAssessment; EvidenceGap; ExpertCase; LiteratureWorkflowPattern; MethodFact; ModelFact; NonBlankStr; ReportedObservation; ReportedResult; RequiredHumanDecision; ScientificCapability; Sha256Str; SourceClaim; SourceQuote; StrictModel,none
+IntentInterpretation,model,src/spc/models.py:4343,planning,NonBlankStr; StrictModel,none
+AmbiguityAssessment,model,src/spc/models.py:4353,planning,NonBlankStr; StrictModel,none
+ObservableDraft,model,src/spc/models.py:4369,planning,NonBlankStr; StrictModel,none
+ComparisonBaselineDraft,model,src/spc/models.py:4376,planning,NonBlankStr; StrictModel,none
+CriterionDraft,model,src/spc/models.py:4382,planning,NonBlankStr; StrictModel,none
+ProposedDeviationDraft,model,src/spc/models.py:4387,planning,NonBlankStr; StrictModel,none
+CandidateTaskDraft,model,src/spc/models.py:4395,planning,NonBlankStr; StrictModel,none
+CandidatePlanDraft,model,src/spc/models.py:4417,planning,CandidateTaskDraft; ComparisonBaselineDraft; CriterionDraft; NonBlankStr; ObservableDraft; PlanningStrategyClass; ProposedDeviationDraft; StrictModel,none
+PlanningLLMResponse,model,src/spc/models.py:4442,planning,AmbiguityAssessment; CandidatePlanDraft; IntentInterpretation; StrictModel,none
+ResearchDirectionProposal,model,src/spc/models.py:4448,planning,NonBlankStr; StrictModel,none
+ResearchDirectionLLMResponse,model,src/spc/models.py:4464,planning,ResearchDirectionProposal; StrictModel,none
+ResearchDirection,model,src/spc/models.py:4468,planning,NonBlankStr; ResearchDirectionProposal; Sha256Str,none
+ResearchDirectionSet,model,src/spc/models.py:4487,planning,NonBlankStr; ResearchDirection; Sha256Str; StrictModel,none
+DirectionEvidenceNeed,model,src/spc/models.py:4522,planning,EvidenceGapResolutionKind; NonBlankStr; PlanningEvidenceType; StrictModel,none
+DirectionTriageProposal,model,src/spc/models.py:4533,planning,DirectionDisposition; DirectionEvidenceNeed; NonBlankStr; StrictModel,none
+DirectionTriageLLMResponse,model,src/spc/models.py:4542,planning,DirectionTriageProposal; StrictModel,none
+DirectionTriageItem,model,src/spc/models.py:4546,planning,DirectionTriageProposal; NonBlankStr; Sha256Str,none
+DirectionTriageRecord,model,src/spc/models.py:4551,planning,DirectionTriageItem; NonBlankStr; Sha256Str; StrictModel,none
+DirectionExpansionCandidate,model,src/spc/models.py:4587,planning,CandidatePlanDraft; NonBlankStr; StrictModel,none
+DirectionExpansionLLMResponse,model,src/spc/models.py:4592,planning,DirectionExpansionCandidate; IntentInterpretation; StrictModel,none
+DirectionCandidateBinding,model,src/spc/models.py:4597,planning,NonBlankStr; Sha256Str; StrictModel,none
+HierarchicalPlanningExpansion,model,src/spc/models.py:4605,planning,DirectionCandidateBinding; NonBlankStr; PlanningProposalSet; Sha256Str; StrictModel,forward reference in same module
+HierarchicalPlanningStageAttempt,model,src/spc/models.py:4652,planning,NonBlankStr; Sha256Str; StrictModel,none
+PlanningProposalSet,model,src/spc/models.py:4682,planning,AmbiguityAssessment; CandidatePlanDraft; IntentInterpretation; NonBlankStr; Sha256Str; StrictModel,none
+PlanCompilationReceipt,model,src/spc/models.py:4720,planning,NonBlankStr; Sha256Str; StrictModel,none
+ApprovalRedFlagSeverity,enum,src/spc/models.py:4750,approval,,none
+ApprovalDimensionScore,model,src/spc/models.py:4755,approval,NonBlankStr; StrictModel,none
+ApprovalReviewScores,model,src/spc/models.py:4764,approval,ApprovalDimensionScore; StrictModel,none
+ApprovalHardRedFlag,model,src/spc/models.py:4774,approval,ApprovalRedFlagSeverity; NonBlankStr; StrictModel,none
+ApprovalLLMResponse,model,src/spc/models.py:4785,approval,ApprovalDecision; ApprovalHardRedFlag; ApprovalReviewScores; NonBlankStr; RequiredFix; StrictModel,none
+PlanChangeOperation,enum,src/spc/models.py:4795,revision,,none
+PlanRevisionActualChange,model,src/spc/models.py:4802,revision,NonBlankStr; PlanChangeOperation; Sha256Str; StrictModel,none
+RevisionIssueStatus,enum,src/spc/models.py:4809,approval,,none
+RevisionIssueAssessment,model,src/spc/models.py:4816,approval,NonBlankStr; RevisionIssueStatus; StrictModel,none
+RevisionApprovalLLMResponse,model,src/spc/models.py:4825,approval,ApprovalLLMResponse; RevisionIssueAssessment; StrictModel,none
+ApprovalReviewInput,model,src/spc/models.py:4831,approval,ComparisonConstraint; ConflictSet; EvidenceAssessment; EvidenceGap; ExpertCase; LiteratureWorkflowPattern; MethodFact; ModelFact; NonBlankStr; PlanValidationRecord; ReportedObservation; ReportedResult; ScientificCapability; ScientificQuestionPlan; Sha256Str; SourceClaim; SourceQuote; StrictModel,none
+ApprovalReviewRecord,model,src/spc/models.py:4943,approval,ApprovalDecision; ApprovalLLMResponse; NonBlankStr; RevisionApprovalLLMResponse; Sha256Str; StrictModel,none
+IndependentApprovalReceipt,model,src/spc/models.py:4971,approval,NonBlankStr; Sha256Str; StrictModel,none
+PlanRevisionFeedbackSource,enum,src/spc/models.py:5015,revision,,none
+PlanRevisionDisposition,enum,src/spc/models.py:5021,revision,,none
+PlanRevisionFeedback,model,src/spc/models.py:5027,revision,NonBlankStr; PlanRevisionFeedbackSource; StrictModel,none
+PlanRevisionConstraints,model,src/spc/models.py:5040,revision,NonBlankStr; Sha256Str; StrictModel,none
+_candidate_task_ids_by_key,helper,src/spc/models.py:5057,revision,CandidatePlanDraft; ScientificQuestionPlan,none
+_feedback_task_key_from_revision_history,helper,src/spc/models.py:5077,revision,PlanRevisionFeedback; _candidate_task_ids_by_key; _feedback_task_key_from_revision_history,recursive helper within module
+PlanRevisionInput,model,src/spc/models.py:5138,revision,ApprovalDecision; ApprovalReviewInput; ApprovalReviewRecord; ApprovalVerdict; IndependentApprovalReceipt; NonBlankStr; PlanCompilationReceipt; PlanRevisionConstraints; PlanRevisionFeedback; PlanValidationRecord; PlanningProposalSet; RevisionApprovalReviewInput; ScientificPlanningInput; ScientificQuestionPlan; Sha256Str; StrictModel; _candidate_task_ids_by_key; _feedback_task_key_from_revision_history,recursive in revision.py
+PlanRevisionFeedbackResponse,model,src/spc/models.py:5317,revision,NonBlankStr; PlanRevisionDisposition; StrictModel,none
+PlanRevisionLLMResponse,model,src/spc/models.py:5330,revision,CandidatePlanDraft; IntentInterpretation; PlanRevisionFeedbackResponse; StrictModel,none
+PlanRevisionRecord,model,src/spc/models.py:5336,revision,NonBlankStr; PlanRevisionLLMResponse; Sha256Str; StrictModel,none
+RevisionApprovalContext,model,src/spc/models.py:5374,revision,ApprovalReviewRecord; PlanRevisionActualChange; PlanRevisionFeedback; PlanRevisionFeedbackResponse; PlanRevisionInput; PlanRevisionRecord; ScientificQuestionPlan; Sha256Str; StrictModel,recursive in revision.py
+RevisionApprovalReviewInput,model,src/spc/models.py:5471,revision,ApprovalReviewInput; ComparisonConstraint; ConflictSet; EvidenceGap; NonBlankStr; PlanValidationRecord; ReportedResult; RevisionApprovalContext; ScientificQuestionPlan; Sha256Str; SourceClaim; StrictModel,recursive in revision.py
+parse_approval_review_input,helper,src/spc/models.py:5555,revision,ApprovalReviewInput; RevisionApprovalReviewInput,none
+PlanRevisionAttemptStatus,enum,src/spc/models.py:5568,revision,,none
+PlanRevisionAttemptStart,model,src/spc/models.py:5574,revision,NonBlankStr; Sha256Str; StrictModel,none
+PlanRevisionAttemptOutcome,model,src/spc/models.py:5605,revision,NonBlankStr; PlanRevisionAttemptStatus; Sha256Str; StrictModel,none
+SPCExportPackage,model,src/spc/models.py:5642,downstream,AgentHandoffPackage; ApprovalMode; CapabilityBinding; ExportManifest; GateVerdict; IndependentApprovalReceipt; NonBlankStr; PlanCompilationReceipt; ProjectTrustPolicy; ScientificQuestionPlan; Sha256Str; StrictModel,none
+ExecutionProposal,model,src/spc/models.py:5757,downstream,NonBlankStr; ScientificTaskExecutionContext; Sha256Str; StrictModel; prohibited_execution_payload_paths,none
+ResultEvidenceType,enum,src/spc/models.py:5839,result_feedback,,none
+ResultExecutionOutcome,enum,src/spc/models.py:5848,result_feedback,,none
+ResultContextComparisonStatus,enum,src/spc/models.py:5855,result_feedback,,none
+ResultEvidenceIntakeStatus,enum,src/spc/models.py:5863,result_feedback,,none
+SuccessorPlanningStatus,enum,src/spc/models.py:5873,result_feedback,,none
+ResultArtifactManifestEntry,model,src/spc/models.py:5885,result_feedback,NonBlankStr; Sha256Str; StrictModel,none
+ReportedObservable,model,src/spc/models.py:5892,result_feedback,NonBlankStr; ResultStatus; StrictModel,none
+ResultEvidenceSubmission,model,src/spc/models.py:5912,result_feedback,FingerprintDifference; MethodFingerprint; NonBlankStr; ReportedObservable; ResultArtifactManifestEntry; ResultEvidenceType; ResultExecutionOutcome; Sha256Str; StrictModel; SystemFingerprint,none
+ResultContextComparison,model,src/spc/models.py:5994,result_feedback,FingerprintDifference; NonBlankStr; ResultContextComparisonStatus; Sha256Str; StrictModel,none
+ResultIntakeIssue,model,src/spc/models.py:6021,result_feedback,NonBlankStr; StrictModel,none
+ResultEvidenceAssessment,model,src/spc/models.py:6027,result_feedback,NonBlankStr; ResultContextComparison; ResultEvidenceIntakeStatus; ResultIntakeIssue; Sha256Str; StrictModel,none
+ResultEvidenceMaterializationReceipt,model,src/spc/models.py:6076,result_feedback,NonBlankStr; Sha256Str; StrictModel,none
+SuccessorParentBinding,model,src/spc/models.py:6130,result_feedback,NonBlankStr; Sha256Str; StrictModel,none
+ResearchUpdate,model,src/spc/models.py:6173,result_feedback,NonBlankStr; Sha256Str; StrictModel; SuccessorPlanningStatus,none
+SuccessorPlanningInvocation,model,src/spc/models.py:6203,result_feedback,NonBlankStr; Sha256Str; StrictModel,none
+SuccessorCandidateSelection,model,src/spc/models.py:6276,result_feedback,NonBlankStr; Sha256Str; StrictModel,none
+SuccessorPlanningCycle,model,src/spc/models.py:6303,result_feedback,NonBlankStr; Sha256Str; StrictModel; SuccessorPlanningStatus,none
+ScientificProblemRunStatus,enum,src/spc/models.py:6398,workflow,,none
+ScientificRunBlockingItem,model,src/spc/models.py:6416,workflow,CurationStatus; KnowledgeEntityType; NonBlankStr; StrictModel,none
+ScientificRunArtifactBinding,model,src/spc/models.py:6424,workflow,KnowledgeEntityType; NonBlankStr; Sha256Str; StrictModel,none
+PlanRevisionRound,model,src/spc/models.py:6431,workflow,NonBlankStr; ScientificRunArtifactBinding; StrictModel,none
+PlanRevisionChain,model,src/spc/models.py:6470,workflow,NonBlankStr; PlanRevisionRound; Sha256Str; StrictModel,none
+ScientificRunProviderBinding,model,src/spc/models.py:6510,workflow,KnowledgeEntityType; NonBlankStr; Sha256Str; StrictModel,none
+ScientificRunFailure,model,src/spc/models.py:6518,workflow,KnowledgeEntityType; NonBlankStr; StrictModel,none
+ScientificProblemRun,model,src/spc/models.py:6525,workflow,NonBlankStr; ScientificProblemRunStatus; ScientificRunArtifactBinding; ScientificRunBlockingItem; ScientificRunFailure; ScientificRunProviderBinding; Sha256Str; StrictModel,none

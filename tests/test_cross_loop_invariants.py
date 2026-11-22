@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
+from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
+from zipfile import ZipFile
 
 import pytest
+from typer.testing import CliRunner
 
-import spc.workflow.service as workflow_service
+from spc.cli import app
+from spc.workflow import providers as workflow_providers
 from spc.approval import MockApprovalProvider
 from spc.models import (
     ApprovalDecision,
@@ -20,7 +26,6 @@ from spc.models import (
     ScientificProblemRunStatus,
     ScientificQuestionPlan,
     SuccessorParentBinding,
-    SuccessorPlanningCycle,
     RevisionApprovalLLMResponse,
 )
 from spc.planning import MockPlanningProvider
@@ -31,8 +36,9 @@ from spc.result_feedback import (
     SuccessorPlanningService,
     result_feedback_status,
 )
-from spc.serialization import content_hash, dump_yaml, load_data
+from spc.serialization import content_hash, dump_yaml, file_sha256, load_data
 from spc.workflow import ScientificProblemWorkflow
+from spc.workflow.repository import ScientificProblemRunRepository
 from test_hierarchical_planning import (
     BaselineRepairHierarchicalProvider,
     CountingHierarchicalProvider,
@@ -167,14 +173,40 @@ def test_same_successor_inputs_reuse_one_content_bound_cycle(tmp_path: Path) -> 
         planning_provider=planner,
         approval_provider=approver,
     )
-    second = service.compile(
-        parent_run_id=run.run_id,
-        submission_ids=(submission.submission_id,),
-        planning_provider=planner,
-        approval_provider=approver,
-    )
+    root = service.runs.run_dir(run.run_id) / "successor-planning"
+    (root / "cycle-2").mkdir()
+    (root / "cycle-note").touch()
+    calls = Counter()
+    lstat, is_dir = Path.lstat, Path.is_dir
+
+    def counted_lstat(path):
+        if path.parent == root:
+            calls[path.name, "lstat"] += 1
+        return lstat(path)
+
+    def counted_is_dir(path, *args, **kwargs):
+        if path.parent == root:
+            calls[path.name, "is_dir"] += 1
+        return is_dir(path, *args, **kwargs)
+
+    before = _tree_snapshot(root)
+    expected_checks = {(name, "lstat"): 1 for name in ("cycle-1", "cycle-2", "cycle-note")}
+    with patch.object(Path, "lstat", counted_lstat), patch.object(Path, "is_dir", counted_is_dir):
+        status = result_feedback_status(run.run_id, service.runs)["successor_planning"]
+        assert status["latest_complete_cycle"] == 1
+        assert status["latest_attempted_cycle"] == 2
+        assert calls == expected_checks
+        calls.clear()
+        second = service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            approval_provider=approver,
+        )
+        assert calls == expected_checks
 
     assert second.cycle_id == first.cycle_id
+    assert _tree_snapshot(root) == before
     assert planner.call_count == 1
     assert approver.call_count == 1
 
@@ -481,6 +513,12 @@ def test_complete_planning_output_resumes_at_approval_without_replanning(
             planning_provider=planner,
             approval_provider=approver,
         )
+    before = _tree_snapshot(tmp_path)
+    status = result_feedback_status(run.run_id, service.runs)["successor_planning"]
+    assert status["latest_status"] == "PLANNING_COMPLETE_AWAITING_SELECTION_OR_APPROVAL"
+    assert status["cycles"] == 0
+    assert _tree_snapshot(tmp_path) == before
+    assert (planner.call_count, approver.call_count) == (1, 0)
     monkeypatch.setattr(service.runs, "write_exclusive_artifact", original_write)
 
     cycle = service.compile(
@@ -566,6 +604,322 @@ def test_complete_approval_output_rebuilds_cycle_without_provider_calls(
     assert approver.call_count == 1
 
 
+def _tree_snapshot(root: Path):
+    return {
+        path.relative_to(root): file_sha256(path) if path.is_file() else None
+        for path in root.rglob("*")
+    }
+
+
+def _directory_link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks unavailable: {error}")
+
+
+def _directory_junction(link: Path, target: Path) -> None:
+    winapi = pytest.importorskip("_winapi", reason="requires Windows directory junctions")
+    winapi.CreateJunction(str(target), str(link))
+
+
+@pytest.mark.parametrize("redirect", [_directory_link, _directory_junction], ids=["symlink", "junction"])
+def test_resumed_successor_rechecks_replaced_cycle_before_writing(tmp_path, monkeypatch, redirect):
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    service = SuccessorPlanningService(state_dir=tmp_path / ".spc", knowledge_dir=repositories.root)
+    planner = TwoCandidateSuccessorPlanner()
+    approver = CountingSuccessorApprover()
+    inputs = {
+        "parent_run_id": run.run_id,
+        "submission_ids": (submission.submission_id,),
+        "planning_provider": planner,
+        "approval_provider": approver,
+    }
+    pending = service.compile(**inputs)
+    cycle = workflow.runs.run_dir(run.run_id) / "successor-planning/cycle-1"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write = service.runs.write_immutable_artifact
+
+    def replace_before_write(run_id, relative_path, *args):
+        assert relative_path == "successor-planning/cycle-1/parent-binding.yaml"
+        cycle.rename(cycle.with_name("original-cycle"))
+        redirect(cycle, outside)
+        return write(run_id, relative_path, *args)
+
+    monkeypatch.setattr(service.runs, "write_immutable_artifact", replace_before_write)
+    with pytest.raises(ValueError, match="escapes the run directory"):
+        service.compile(**inputs, selected_candidate_id=pending.candidate_plan_ids[0])
+    with pytest.raises(ValueError, match="escapes the run directory"):
+        service.runs.load_artifact(run.run_id, "successor-planning/cycle-1/parent-binding.yaml", SuccessorParentBinding)
+    assert list(outside.iterdir()) == []
+    assert (planner.call_count, approver.call_count) == (1, 0)
+
+
+@pytest.fixture(scope="module")
+def successor_status_artifacts(tmp_path_factory):
+    root = tmp_path_factory.mktemp("successor-status-artifacts")
+    repositories, workflow, run, plan = _approved_parent(root)
+    submission, artifact_root, _ = _submission(root, run, plan)
+    _intake_and_accept(root, repositories, run, submission, artifact_root)
+    service = SuccessorPlanningService(state_dir=root / ".spc", knowledge_dir=repositories.root)
+    planner = TwoCandidateSuccessorPlanner()
+    inputs = {
+        "parent_run_id": run.run_id,
+        "submission_ids": (submission.submission_id,),
+        "planning_provider": planner,
+    }
+    pending = service.compile(**inputs)
+    completed = service.compile(**inputs, selected_candidate_id=pending.candidate_plan_ids[0])
+    assert completed.status.value == "APPROVED"
+    return workflow.runs.run_dir(run.run_id)
+
+
+@pytest.mark.parametrize("linked_parent", [False, True], ids=["cycle", "successor-root"])
+def test_successor_status_rejects_directory_redirects(tmp_path, successor_status_artifacts, linked_parent):
+    repository = ScientificProblemRunRepository(tmp_path / "runs")
+    run_id = successor_status_artifacts.name
+    run_root = repository.run_dir(run_id)
+    run_root.mkdir(parents=True)
+    (run_root / "run.json").write_bytes((successor_status_artifacts / "run.json").read_bytes())
+    successor_root = run_root / "successor-planning"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if linked_parent:
+        (outside / "cycle-1").mkdir()
+        _directory_link(successor_root, outside)
+        message = "escapes the run directory"
+    else:
+        successor_root.mkdir()
+        _directory_link(successor_root / "cycle-1", outside)
+        message = "symlinked successor cycle directory"
+
+    before = _tree_snapshot(outside)
+    with pytest.raises(ValueError, match=message):
+        result_feedback_status(run_id, repository)
+    assert _tree_snapshot(outside) == before
+
+
+@pytest.mark.parametrize("with_cycle", [False, True], ids=["empty", "with-cycle-record"])
+def test_successor_status_rejects_external_junction_before_counting(
+    tmp_path, successor_status_artifacts, with_cycle
+):
+    repository = ScientificProblemRunRepository(tmp_path)
+    run_id = successor_status_artifacts.name
+    run_root = repository.run_dir(run_id)
+    directory = run_root / "successor-planning/cycle-1"
+    directory.parent.mkdir(parents=True)
+    (run_root / "run.json").write_bytes((successor_status_artifacts / "run.json").read_bytes())
+    outside = repository.run_dir(f"{run_id}-other")
+    outside.mkdir()
+    if with_cycle:
+        record = successor_status_artifacts / "successor-planning/cycle-1/cycle.yaml"
+        (outside / "cycle.yaml").write_bytes(record.read_bytes())
+    _directory_junction(directory, outside)
+
+    before = _tree_snapshot(outside)
+    with pytest.raises(ResultFeedbackError, match="INVALID_SUCCESSOR_CYCLE_DIRECTORY"):
+        result_feedback_status(run_id, repository)
+    assert _tree_snapshot(outside) == before
+
+
+def test_successor_resumes_in_run_junction_and_ignores_missing_junction_target(tmp_path):
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    service = SuccessorPlanningService(state_dir=tmp_path / ".spc", knowledge_dir=repositories.root)
+    inputs = {"parent_run_id": run.run_id, "submission_ids": (submission.submission_id,)}
+    original = service.compile(**inputs)
+    run_root = workflow.runs.run_dir(run.run_id)
+    directory = run_root / "successor-planning/cycle-1"
+    archive = run_root / "archived-cycle"
+    directory.rename(archive)
+    _directory_junction(directory, archive)
+    missing = tmp_path / "transient-target"
+    missing.mkdir()
+    _directory_junction(directory.with_name("cycle-2"), missing)
+    missing.rmdir()
+
+    before = _tree_snapshot(archive)
+    status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
+    assert (status["latest_status"], status["latest_attempted_cycle"], status["cycles"]) == ("APPROVED", 1, 1)
+    assert _tree_snapshot(archive) == before
+    assert service.compile(**inputs) == original
+    assert _tree_snapshot(archive) == before
+
+    missing.mkdir()
+    with pytest.raises(ResultFeedbackError, match="INVALID_SUCCESSOR_CYCLE_DIRECTORY"):
+        service.compile(**inputs)
+    assert list(missing.iterdir()) == []
+    assert _tree_snapshot(archive) == before
+
+
+@pytest.mark.parametrize(
+    ("artifacts", "expected"),
+    [
+        ((), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml",), "SUCCESSOR_INVOCATION_RESERVED"),
+        (("invocation.yaml", "research-update.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "planning-proposal.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "planning-outcome.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "candidates/*.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "compilation-receipts/*.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("invocation.yaml", "validation/*.yaml"), "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"),
+        (("selection.yaml",), "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"),
+        (("approval/approval-review.yaml",), "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"),
+        (("provider-calls/planning.yaml", "approval/plan-gate.yaml"), "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"),
+    ],
+)
+def test_successor_status_detects_orphaned_stage_artifacts(
+    tmp_path, successor_status_artifacts, artifacts, expected
+):
+    repository = ScientificProblemRunRepository(tmp_path)
+    run_id = successor_status_artifacts.name
+    run_root = repository.run_dir(run_id)
+    prefix = Path("successor-planning/cycle-1")
+    cycle_dir = run_root / prefix
+    cycle_dir.mkdir(parents=True)
+    (run_root / "run.json").write_bytes((successor_status_artifacts / "run.json").read_bytes())
+    source = successor_status_artifacts / prefix
+    for pattern in artifacts:
+        artifact = next(source.glob(pattern))
+        target = cycle_dir / artifact.relative_to(source)
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(artifact.read_bytes())
+
+    before = _tree_snapshot(tmp_path)
+    status = result_feedback_status(run_id, repository)["successor_planning"]
+    assert status["latest_status"] == expected
+    assert status["incomplete_cycles"] == [{"cycle": 1, "status": expected}]
+    assert status["cycles"] == 0
+    assert status["latest_complete_cycle"] is None
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_successor_status_reads_historical_run_with_empty_planning_files(tmp_path):
+    state = tmp_path / "state"
+    with ZipFile(Path(__file__).parent / "fixtures/model-history-f5cfdd7.zip") as archive:
+        raw_run = archive.read("ScientificProblemRun.json")
+    run_id = json.loads(raw_run)["run_id"]
+    root = state / "scientific_runs" / run_id
+    root.mkdir(parents=True)
+    (root / "run.json").write_bytes(raw_run)
+    command = ["successor-plan-status", "--parent-run-id", run_id, "--state-dir", str(state)]
+    runner = CliRunner()
+    before = _tree_snapshot(tmp_path)
+    response = runner.invoke(app, command)
+    assert response.exit_code == 0, response.output
+    assert json.loads(response.output)["successor_planning"]["latest_status"] is None
+    assert _tree_snapshot(tmp_path) == before
+
+    attempt = root / "successor-planning/cycle-1"
+    (attempt / "provider-calls").mkdir(parents=True)
+    (attempt / "provider-calls/planning.yaml").touch()
+    (attempt / "planning-proposal.yaml").touch()
+    before = _tree_snapshot(tmp_path)
+    response = runner.invoke(app, command)
+    assert response.exit_code == 0, response.output
+    status = json.loads(response.output)["successor_planning"]
+    assert status["latest_status"] == "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"
+    assert status["cycles"] == 0
+    assert status["latest_complete_cycle"] is None
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "damage", ["proposal_hash", "missing_receipt", "claim", "outcome", "parent", "empty_binding", "outcome_as_cycle"]
+)
+def test_successor_status_checks_the_artifacts_behind_a_planning_outcome(tmp_path, damage, monkeypatch):
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    planner = TwoCandidateSuccessorPlanner()
+    approver = CountingSuccessorApprover()
+    pending = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root,
+    ).compile(
+        parent_run_id=run.run_id, submission_ids=(submission.submission_id,),
+        planning_provider=planner, approval_provider=approver,
+    )
+    root = workflow.runs.resolve_artifact_path(run.run_id, "successor-planning/cycle-1")
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("status invoked a provider, workflow or successor planning")
+
+    monkeypatch.setattr(MockPlanningProvider, "propose", unexpected_call)
+    monkeypatch.setattr(MockApprovalProvider, "review", unexpected_call)
+    monkeypatch.setattr(SuccessorPlanningService, "compile", unexpected_call)
+    monkeypatch.setattr(ScientificProblemWorkflow, "resume", unexpected_call)
+
+    def query():
+        before = _tree_snapshot(tmp_path)
+        status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
+        assert _tree_snapshot(tmp_path) == before
+        assert status["cycles"] == 0
+        assert status["latest_complete_cycle"] is None
+        assert (planner.call_count, approver.call_count) == (1, 0)
+        return status["latest_status"]
+
+    assert query() == pending.status.value == "HUMAN_SCIENTIFIC_DECISION_REQUIRED"
+    if damage == "proposal_hash":
+        path = root / "planning-proposal.yaml"
+        proposal = load_data(path)
+        proposal["planning_input_hash"] = "0" * 64
+        dump_yaml(path, proposal)
+    elif damage == "missing_receipt":
+        next((root / "compilation-receipts").glob("*.yaml")).unlink()
+    elif damage == "claim":
+        (root / "provider-calls/planning.yaml").write_text("[", encoding="utf-8")
+    elif damage == "outcome":
+        (root / "planning-outcome.yaml").write_text("{}", encoding="utf-8")
+    elif damage == "outcome_as_cycle":
+        (root / "cycle.yaml").write_bytes((root / "planning-outcome.yaml").read_bytes())
+    elif damage == "empty_binding":
+        (root / "parent-binding.yaml").write_bytes(b"")
+    else:
+        from spc.result_feedback.submission import build_content_bound
+
+        path = root / "parent-binding.yaml"
+        binding = workflow.runs.load_artifact(
+            run.run_id, "successor-planning/cycle-1/parent-binding.yaml", SuccessorParentBinding
+        )
+        payload = binding.model_dump(exclude={"binding_id", "content_hash"})
+        payload["parent_run_id"] = "another-run"
+        other_parent = build_content_bound(SuccessorParentBinding, "successor-parent-binding", payload)
+        dump_yaml(path, other_parent)
+    assert query() == "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"
+    if damage != "outcome":
+        (root / "planning-outcome.yaml").unlink()
+        assert query() == "SUCCESSOR_PLANNING_OUTCOME_UNCERTAIN"
+
+
+def test_successor_status_reads_legacy_cycle_without_invocation_or_selection(tmp_path):
+    from spc.models import SuccessorPlanningCycle
+    from spc.result_feedback.submission import build_content_bound
+
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    cycle = SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(parent_run_id=run.run_id, submission_ids=(submission.submission_id,))
+    root = workflow.runs.resolve_artifact_path(run.run_id, "successor-planning/cycle-1")
+    # Earliest cycles predate invocation, claims and the separate selection record.
+    payload = cycle.model_dump(exclude={
+        "cycle_id", "content_hash", "invocation_id", "invocation_hash", "selection_id", "selection_hash"
+    })
+    dump_yaml(root / "cycle.yaml", build_content_bound(SuccessorPlanningCycle, "successor-cycle", payload))
+    for name in ("invocation.yaml", "selection.yaml", "provider-calls/planning.yaml", "provider-calls/approval.yaml"):
+        (root / name).unlink()
+
+    before = _tree_snapshot(tmp_path)
+    status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
+    assert (status["latest_status"], status["cycles"], status["latest_complete_cycle"]) == ("APPROVED", 1, 1)
+    assert _tree_snapshot(tmp_path) == before
+
+
 def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
     tmp_path: Path,
 ) -> None:
@@ -583,7 +937,7 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
         "successor-planning/cycle-1/parent-binding.yaml",
         SuccessorParentBinding,
     )
-    from spc.result_feedback.service import _build_content_bound
+    from spc.result_feedback.submission import build_content_bound
 
     def write_incomplete_binding(index: int, parent_plan_id: str) -> None:
         payload = base_binding.model_dump(
@@ -593,7 +947,7 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
             successor_cycle_index=index,
             parent_plan_id=parent_plan_id,
         )
-        binding = _build_content_bound(
+        binding = build_content_bound(
             SuccessorParentBinding, "successor-parent-binding", payload
         )
         cycle_dir = successor_root / f"cycle-{index}"
@@ -604,33 +958,17 @@ def test_successor_status_uses_numeric_indexes_and_reports_incomplete_cycles(
         )
 
     write_incomplete_binding(2, "synthetic-parent-cycle-2")
+    SuccessorPlanningService(
+        state_dir=tmp_path / ".spc", knowledge_dir=repositories.root
+    ).compile(
+        parent_run_id=run.run_id, submission_ids=(submission.submission_id,),
+        follow_up_request="Generate the third cycle with its own bound artifacts.",
+    )
     write_incomplete_binding(10, "parent-from-latest-attempted-cycle")
-    cycle1 = workflow.runs.load_artifact(
-        run.run_id, "successor-planning/cycle-1/cycle.yaml", SuccessorPlanningCycle
-    )
-    binding3_payload = base_binding.model_dump(
-        mode="python", exclude={"binding_id", "content_hash"}
-    )
-    binding3_payload["successor_cycle_index"] = 3
-    binding3 = _build_content_bound(
-        SuccessorParentBinding, "successor-parent-binding", binding3_payload
-    )
-    cycle3_payload = cycle1.model_dump(
-        mode="python", exclude={"cycle_id", "content_hash"}
-    )
-    cycle3_payload.update(
-        parent_binding_id=binding3.binding_id,
-        parent_binding_hash=binding3.content_hash,
-    )
-    cycle3 = _build_content_bound(
-        SuccessorPlanningCycle, "successor-cycle", cycle3_payload
-    )
-    cycle3_dir = successor_root / "cycle-3"
-    dump_yaml(cycle3_dir / "parent-binding.yaml", binding3)
-    dump_yaml(cycle3_dir / "cycle.yaml", cycle3)
 
     status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
 
+    assert status["cycles"] == 2
     assert status["latest_complete_cycle"] == 3
     assert status["latest_attempted_cycle"] == 10
     assert status["cycle"] == 3
@@ -686,6 +1024,13 @@ def test_completed_successor_cycle_is_not_reused_after_authority_tampering(
     policy = load_data(policy_path)
     policy["approval_mode"] = "legacy_manual_allowed"
     dump_yaml(policy_path, policy)
+
+    before = _tree_snapshot(tmp_path)
+    status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
+    assert status["cycles"] == 0
+    assert status["latest_complete_cycle"] is None
+    assert status["latest_status"] == "SUCCESSOR_APPROVAL_OUTCOME_UNCERTAIN"
+    assert _tree_snapshot(tmp_path) == before
 
     with pytest.raises(ResultFeedbackError, match="SUCCESSOR_CYCLE_INTEGRITY_INVALID"):
         service.compile(
@@ -756,7 +1101,7 @@ def test_hierarchy_then_revision_uses_revision_loop_without_rerunning_hierarchy(
 
     knowledge, *_ = _prepare(tmp_path)
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", BaselineRepairHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", BaselineRepairHierarchicalProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
@@ -769,7 +1114,7 @@ def test_hierarchy_then_revision_uses_revision_loop_without_rerunning_hierarchy(
         approval_provider="mock",
         max_plan_revisions=1,
     ).run
-    chain = workflow._load_revision_chain(run.run_id)
+    chain = workflow.runs.load_revision_chain(run.run_id)
 
     assert run.status == ScientificProblemRunStatus.APPROVED
     assert chain is not None and chain.revisions_used == 1
@@ -796,10 +1141,10 @@ def test_insufficient_evidence_replans_hierarchy_and_requires_fresh_approval(
     CountingHierarchicalProvider.expansion_calls = 0
     InsufficientThenApproveProvider.review_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", CountingHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", CountingHierarchicalProvider
     )
     monkeypatch.setattr(
-        workflow_service, "MockApprovalProvider", InsufficientThenApproveProvider
+        workflow_providers, "MockApprovalProvider", InsufficientThenApproveProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
@@ -820,18 +1165,19 @@ def test_insufficient_evidence_replans_hierarchy_and_requires_fresh_approval(
     assert CountingHierarchicalProvider.expansion_calls == 2
 
 
+@pytest.mark.parametrize("resume_before_approval", [False, True])
 def test_evidence_replan_does_not_reset_global_revision_attempt_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_before_approval: bool
 ) -> None:
     from test_knowledge_retrieval import _prepare
 
     knowledge, *_ = _prepare(tmp_path)
     RevisionThenEvidenceApproval.review_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", BaselineRepairHierarchicalProvider
+        workflow_providers, "MockPlanningProvider", BaselineRepairHierarchicalProvider
     )
     monkeypatch.setattr(
-        workflow_service, "MockApprovalProvider", RevisionThenEvidenceApproval
+        workflow_providers, "MockApprovalProvider", RevisionThenEvidenceApproval
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root
@@ -841,11 +1187,14 @@ def test_evidence_replan_does_not_reset_global_revision_attempt_budget(
         HIERARCHICAL_REQUEST,
         "base",
         planning_strategy="hierarchical",
-        approval_provider="mock",
+        approval_provider="none" if resume_before_approval else "mock",
         max_plan_revisions=1,
         max_evidence_resolution_cycles=1,
     ).run
-    attempts = workflow._load_revision_attempts(run.run_id)
+    if resume_before_approval:
+        assert run.status == ScientificProblemRunStatus.AWAITING_APPROVAL
+        run = workflow.resume(run.run_id, approval_provider="mock").run
+    attempts = workflow.runs.load_revision_attempts(run.run_id)
 
     assert run.status == ScientificProblemRunStatus.REVISION_BLOCKED
     assert run.failure is not None
@@ -864,7 +1213,7 @@ def test_human_choice_blocks_expansion_and_resume_does_not_cross_boundary(
     RetainAndHumanChoiceProvider.triage_calls = 0
     RetainAndHumanChoiceProvider.expansion_calls = 0
     monkeypatch.setattr(
-        workflow_service, "MockPlanningProvider", RetainAndHumanChoiceProvider
+        workflow_providers, "MockPlanningProvider", RetainAndHumanChoiceProvider
     )
     workflow = ScientificProblemWorkflow(
         state_dir=tmp_path / ".spc", knowledge_dir=knowledge.root

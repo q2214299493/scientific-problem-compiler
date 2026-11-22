@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from typing import Protocol
 
 from pydantic import ValidationError
 
-from ...planning.llm_transport import LLMTransport
+from ...planning.llm_transport import LLMTransport, validate_generation_parameters, validate_max_batches
+from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
 from .contracts import (
     ExpertCaseProposal,
@@ -50,12 +50,6 @@ class ExpertKnowledgeProvider(Protocol):
         compilation_input: ExpertKnowledgeCompilationInput,
         chunks: tuple[ExpertKnowledgeChunk, ...],
     ) -> ExpertKnowledgeProposalSet: ...
-
-
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
 
 
 def partition_expert_knowledge_chunks(
@@ -237,12 +231,10 @@ class StructuredLLMExpertKnowledgeProvider:
         max_batch_text_characters: int = DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
         max_batches: int | None = None,
     ) -> None:
-        if not math.isfinite(temperature) or temperature < 0:
-            raise ValueError("temperature must be finite and non-negative")
-        if not 1 <= max_attempts <= 5:
-            raise ValueError("max_attempts must be between one and five")
-        if max_batches is not None and max_batches < 1:
-            raise ValueError("max_batches must be positive")
+        validate_generation_parameters(
+            temperature, max_attempts, temperature_error="temperature must be finite and non-negative"
+        )
+        validate_max_batches(max_batches, error_message="max_batches must be positive")
         self.transport = transport
         self.temperature = temperature
         self.max_attempts = max_attempts

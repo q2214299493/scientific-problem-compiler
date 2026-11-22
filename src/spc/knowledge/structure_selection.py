@@ -10,7 +10,7 @@ from ..models import (
 )
 from ..repositories import EvidenceStore, KnowledgeRepositories
 from ..serialization import content_hash
-from .acquisition import validate_literature_representation
+from .representation import validate_literature_representation
 
 
 class DocumentStructureSelector:
@@ -175,7 +175,7 @@ class DocumentStructureSelector:
         repositories: KnowledgeRepositories,
         evidence_store: EvidenceStore,
     ) -> tuple[DocumentStructureArtifact, LiteratureRepresentationReference]:
-        from .structure import validate_document_structure
+        from .structure.validation import validate_document_structure
 
         structure = validate_document_structure(structure_id, repositories, evidence_store)
         representation = repositories.literature_representation_refs.get(representation_id)
@@ -242,7 +242,7 @@ def validate_structure_selection(
         raise ValueError("unknown document structure selection policy")
     representation = repositories.literature_representation_refs.get(record.representation_id)
     validate_literature_representation(representation, repositories, store)
-    from .structure import validate_document_structure
+    from .structure.validation import validate_document_structure
 
     structure = validate_document_structure(record.structure_id, repositories, store, **read_options)
     if (

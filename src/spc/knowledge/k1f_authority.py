@@ -353,7 +353,7 @@ class K1FCompilationAuthorityIndex:
             # Identical file bytes preserve the complete structure/selection
             # validation. Representation dependencies are outside that manifest,
             # so their raw/canonical/ingestion/source chains are checked afresh.
-            from .acquisition import validate_literature_representation
+            from .representation import validate_literature_representation
 
             checked_representations: set[str] = set()
             for cached in self._validated_structures.values():

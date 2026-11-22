@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 
 from pydantic import ValidationError
 
@@ -11,7 +10,7 @@ from ..models import (
     RevisionApprovalLLMResponse,
     RevisionApprovalReviewInput,
 )
-from ..planning.llm_transport import LLMTransport
+from ..planning.llm_transport import LLMTransport, validate_generation_parameters
 
 STRUCTURED_APPROVAL_PROVIDER_VERSION = "structured-llm-approval-1.0.0"
 APPROVAL_SYSTEM_PROMPT = """You are an independent scientific plan reviewer.
@@ -45,10 +44,7 @@ class StructuredLLMApprovalProvider:
         temperature: float = 0.0,
         max_attempts: int = 2,
     ) -> None:
-        if not math.isfinite(temperature) or temperature < 0:
-            raise ValueError("temperature must be a finite non-negative number")
-        if not 1 <= max_attempts <= 5:
-            raise ValueError("max_attempts must be between one and five")
+        validate_generation_parameters(temperature, max_attempts)
         self.transport = transport
         self.temperature = temperature
         self.max_attempts = max_attempts
