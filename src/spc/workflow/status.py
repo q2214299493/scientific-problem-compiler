@@ -86,7 +86,8 @@ def build_knowledge_status(knowledge_dir: Path, state_dir: Path, domain: str = "
         ProjectEvidenceStore(state_dir.resolve(), initialize=False),
     )
     validator = TrustedKnowledgeValidator(repositories, evidence)
-    records = validator.record_index(repositories)
+    # Validation can add representation references. Report the initial inventory.
+    record_items = sorted(validator.records.items())
     current = validator.resolve_current_curations()
     broken: list[str] = []
     try:
@@ -100,7 +101,7 @@ def build_knowledge_status(knowledge_dir: Path, state_dir: Path, domain: str = "
     }
     pending = tuple(
         f"{kind}:{record_id}"
-        for (kind, record_id), record in sorted(records.items())
+        for (kind, record_id), record in record_items
         if (
             kind in CURATED_TYPES
             or (kind == "expert_case" and bool(getattr(record, "opinion_refs", ())))
