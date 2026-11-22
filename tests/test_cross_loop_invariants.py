@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 import pytest
@@ -171,14 +173,40 @@ def test_same_successor_inputs_reuse_one_content_bound_cycle(tmp_path: Path) -> 
         planning_provider=planner,
         approval_provider=approver,
     )
-    second = service.compile(
-        parent_run_id=run.run_id,
-        submission_ids=(submission.submission_id,),
-        planning_provider=planner,
-        approval_provider=approver,
-    )
+    root = service.runs.run_dir(run.run_id) / "successor-planning"
+    (root / "cycle-2").mkdir()
+    (root / "cycle-note").touch()
+    calls = Counter()
+    lstat, is_dir = Path.lstat, Path.is_dir
+
+    def counted_lstat(path):
+        if path.parent == root:
+            calls[path.name, "lstat"] += 1
+        return lstat(path)
+
+    def counted_is_dir(path, *args, **kwargs):
+        if path.parent == root:
+            calls[path.name, "is_dir"] += 1
+        return is_dir(path, *args, **kwargs)
+
+    before = _tree_snapshot(root)
+    expected_checks = {(name, "lstat"): 1 for name in ("cycle-1", "cycle-2", "cycle-note")}
+    with patch.object(Path, "lstat", counted_lstat), patch.object(Path, "is_dir", counted_is_dir):
+        status = result_feedback_status(run.run_id, service.runs)["successor_planning"]
+        assert status["latest_complete_cycle"] == 1
+        assert status["latest_attempted_cycle"] == 2
+        assert calls == expected_checks
+        calls.clear()
+        second = service.compile(
+            parent_run_id=run.run_id,
+            submission_ids=(submission.submission_id,),
+            planning_provider=planner,
+            approval_provider=approver,
+        )
+        assert calls == expected_checks
 
     assert second.cycle_id == first.cycle_id
+    assert _tree_snapshot(root) == before
     assert planner.call_count == 1
     assert approver.call_count == 1
 
@@ -583,6 +611,47 @@ def _tree_snapshot(root: Path):
     }
 
 
+def _directory_link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks unavailable: {error}")
+
+
+def test_resumed_successor_rechecks_replaced_cycle_before_writing(tmp_path, monkeypatch):
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    service = SuccessorPlanningService(state_dir=tmp_path / ".spc", knowledge_dir=repositories.root)
+    planner = TwoCandidateSuccessorPlanner()
+    approver = CountingSuccessorApprover()
+    inputs = {
+        "parent_run_id": run.run_id,
+        "submission_ids": (submission.submission_id,),
+        "planning_provider": planner,
+        "approval_provider": approver,
+    }
+    pending = service.compile(**inputs)
+    cycle = workflow.runs.run_dir(run.run_id) / "successor-planning/cycle-1"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write = service.runs.write_immutable_artifact
+
+    def replace_before_write(run_id, relative_path, *args):
+        assert relative_path == "successor-planning/cycle-1/parent-binding.yaml"
+        cycle.rename(cycle.with_name("original-cycle"))
+        _directory_link(cycle, outside)
+        return write(run_id, relative_path, *args)
+
+    monkeypatch.setattr(service.runs, "write_immutable_artifact", replace_before_write)
+    with pytest.raises(ValueError, match="escapes the run directory"):
+        service.compile(**inputs, selected_candidate_id=pending.candidate_plan_ids[0])
+    with pytest.raises(ValueError, match="escapes the run directory"):
+        service.runs.load_artifact(run.run_id, "successor-planning/cycle-1/parent-binding.yaml", SuccessorParentBinding)
+    assert list(outside.iterdir()) == []
+    assert (planner.call_count, approver.call_count) == (1, 0)
+
+
 @pytest.fixture(scope="module")
 def successor_status_artifacts(tmp_path_factory):
     root = tmp_path_factory.mktemp("successor-status-artifacts")
@@ -600,6 +669,31 @@ def successor_status_artifacts(tmp_path_factory):
     completed = service.compile(**inputs, selected_candidate_id=pending.candidate_plan_ids[0])
     assert completed.status.value == "APPROVED"
     return workflow.runs.run_dir(run.run_id)
+
+
+@pytest.mark.parametrize("linked_parent", [False, True], ids=["cycle", "successor-root"])
+def test_successor_status_rejects_directory_redirects(tmp_path, successor_status_artifacts, linked_parent):
+    repository = ScientificProblemRunRepository(tmp_path / "runs")
+    run_id = successor_status_artifacts.name
+    run_root = repository.run_dir(run_id)
+    run_root.mkdir(parents=True)
+    (run_root / "run.json").write_bytes((successor_status_artifacts / "run.json").read_bytes())
+    successor_root = run_root / "successor-planning"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if linked_parent:
+        (outside / "cycle-1").mkdir()
+        _directory_link(successor_root, outside)
+        message = "escapes the run directory"
+    else:
+        successor_root.mkdir()
+        _directory_link(successor_root / "cycle-1", outside)
+        message = "symlinked successor cycle directory"
+
+    before = _tree_snapshot(outside)
+    with pytest.raises(ValueError, match=message):
+        result_feedback_status(run_id, repository)
+    assert _tree_snapshot(outside) == before
 
 
 @pytest.mark.parametrize(

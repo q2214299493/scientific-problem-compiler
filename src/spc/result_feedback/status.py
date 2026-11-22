@@ -19,6 +19,7 @@ from ..models import (
 )
 from ..repositories import CompositeEvidenceStore, KnowledgeEvidenceStore, ProjectEvidenceStore
 from ..workflow.repository import ScientificProblemRunRepository
+from .artifacts import successor_cycle_index
 from .submission import ResultFeedbackError
 from .successor import SuccessorStageReader
 
@@ -161,7 +162,7 @@ def result_feedback_status(
     attempted_indexes: set[int] = set()
     incomplete_cycles: list[dict[str, Any]] = []
     bindings_by_index: dict[int, SuccessorParentBinding] = {}
-    successor_root = run_root / "successor-planning"
+    successor_root = repository.resolve_artifact_path(parent_run_id, "successor-planning")
     if successor_root.exists():
         run = repository.get(parent_run_id)
         reader = SuccessorStageReader(
@@ -172,26 +173,9 @@ def result_feedback_status(
             ),
         )
         for directory in successor_root.glob("cycle-*"):
-            if directory.is_symlink():
-                raise ResultFeedbackError(
-                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                    f"symlinked successor cycle directory: {directory.name}",
-                )
-            if not directory.is_dir():
+            index = successor_cycle_index(directory, attempted_indexes)
+            if index is None:
                 continue
-            suffix = directory.name.removeprefix("cycle-")
-            try:
-                index = int(suffix)
-            except ValueError as error:
-                raise ResultFeedbackError(
-                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                    f"invalid successor cycle directory: {directory.name}",
-                ) from error
-            if index < 1 or suffix != str(index) or index in attempted_indexes:
-                raise ResultFeedbackError(
-                    "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                    f"non-canonical successor cycle directory: {directory.name}",
-                )
             attempted_indexes.add(index)
             binding_path = directory / "parent-binding.yaml"
             if binding_path.is_symlink():

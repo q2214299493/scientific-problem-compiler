@@ -75,7 +75,7 @@ from ..validators import (
     validate_question_plan,
 )
 from ..workflow.repository import ScientificProblemRunRepository
-from .artifacts import ResultArtifacts
+from .artifacts import ResultArtifacts, successor_cycle_index
 from .parent_authority import ParentAuthority
 from .submission import (
     RESULT_FEEDBACK_VERSION,
@@ -1352,38 +1352,16 @@ class SuccessorPlanningService:
             successor_root = self.runs.resolve_artifact_path(
                 parent_run_id, "successor-planning"
             )
-            cycle_indexes: list[int] = []
+            cycle_indexes: set[int] = set()
             matching_prefix: str | None = None
             matching_cycle: SuccessorPlanningCycle | None = None
             if successor_root.exists():
-                seen_cycle_indexes: set[int] = set()
                 for directory in successor_root.glob("cycle-*"):
-                    if directory.is_symlink():
-                        raise ResultFeedbackError(
-                            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                            f"symlinked successor cycle directory: {directory.name}",
-                        )
-                    if not directory.is_dir():
+                    cycle_index_value = successor_cycle_index(directory, cycle_indexes)
+                    if cycle_index_value is None:
                         continue
-                    try:
-                        suffix = directory.name.removeprefix("cycle-")
-                        cycle_index_value = int(suffix)
-                    except ValueError as error:
-                        raise ResultFeedbackError(
-                            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                            f"invalid successor cycle directory: {directory.name}",
-                        ) from error
-                    if (
-                        cycle_index_value < 1
-                        or suffix != str(cycle_index_value)
-                        or cycle_index_value in seen_cycle_indexes
-                    ):
-                        raise ResultFeedbackError(
-                            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
-                            f"non-canonical successor cycle directory: {directory.name}",
-                        )
-                    seen_cycle_indexes.add(cycle_index_value)
-                    cycle_indexes.append(cycle_index_value)
+                    cycle_indexes.add(cycle_index_value)
+                    cycle_prefix = directory.relative_to(successor_root.parent).as_posix()
                     lineage_path = directory / "parent-binding.yaml"
                     if lineage_path.is_symlink():
                         raise ResultFeedbackError(
@@ -1393,9 +1371,7 @@ class SuccessorPlanningService:
                     if lineage_path.exists():
                         lineage = self.runs.load_artifact(
                             parent_run_id,
-                            lineage_path.relative_to(
-                                self.runs.run_dir(parent_run_id)
-                            ).as_posix(),
+                            f"{cycle_prefix}/parent-binding.yaml",
                             SuccessorParentBinding,
                         )
                         if lineage.successor_cycle_index != cycle_index_value:
@@ -1407,11 +1383,8 @@ class SuccessorPlanningService:
                     invocation_path = directory / "invocation.yaml"
                     if not invocation_path.exists():
                         continue
-                    relative = invocation_path.relative_to(
-                        self.runs.run_dir(parent_run_id)
-                    ).as_posix()
                     stored_invocation = self.runs.load_artifact(
-                        parent_run_id, relative, SuccessorPlanningInvocation
+                        parent_run_id, f"{cycle_prefix}/invocation.yaml", SuccessorPlanningInvocation
                     )
                     if stored_invocation.invocation_id != invocation.invocation_id:
                         continue
@@ -1420,16 +1393,12 @@ class SuccessorPlanningService:
                             "AMBIGUOUS_SUCCESSOR_INVOCATION",
                             "the same successor invocation is bound to multiple cycles",
                         )
-                    matching_prefix = (
-                        directory.relative_to(self.runs.run_dir(parent_run_id)).as_posix()
-                    )
+                    matching_prefix = cycle_prefix
                     cycle_path = directory / "cycle.yaml"
                     if cycle_path.exists():
                         matching_cycle = self.runs.load_artifact(
                             parent_run_id,
-                            cycle_path.relative_to(
-                                self.runs.run_dir(parent_run_id)
-                            ).as_posix(),
+                            f"{cycle_prefix}/cycle.yaml",
                             SuccessorPlanningCycle,
                         )
                         if lineage_path.exists() and (

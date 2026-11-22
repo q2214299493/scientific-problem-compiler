@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path, PurePosixPath
+import stat
 import tempfile
 
 from ..models import (
@@ -15,6 +16,47 @@ from ..models import (
 from ..serialization import file_sha256
 from ..workflow.repository import ScientificProblemRunRepository
 from .submission import ResultFeedbackError
+
+
+def _is_cycle_directory(directory: Path) -> bool:
+    try:
+        entry = directory.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except (OSError, ValueError):
+        # Keep pathlib's platform-specific error handling for inaccessible entries.
+        linked = directory.is_symlink()
+    else:
+        linked = stat.S_ISLNK(entry.st_mode)
+        if not linked and not getattr(entry, "st_reparse_tag", 0):
+            return stat.S_ISDIR(entry.st_mode)
+    if linked:
+        raise ResultFeedbackError(
+            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+            f"symlinked successor cycle directory: {directory.name}",
+        )
+    # A Windows junction can refer to a directory that no longer exists.
+    return directory.is_dir()
+
+
+def successor_cycle_index(directory: Path, seen: set[int]) -> int | None:
+    """Check one entry at discovery time. Artifact access resolves its path separately."""
+    if not _is_cycle_directory(directory):
+        return None
+    suffix = directory.name.removeprefix("cycle-")
+    try:
+        index = int(suffix)
+    except ValueError as error:
+        raise ResultFeedbackError(
+            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+            f"invalid successor cycle directory: {directory.name}",
+        ) from error
+    if index < 1 or suffix != str(index) or index in seen:
+        raise ResultFeedbackError(
+            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+            f"non-canonical successor cycle directory: {directory.name}",
+        )
+    return index
 
 
 def _safe_artifact_path(root: Path, relative_path: str) -> Path:
