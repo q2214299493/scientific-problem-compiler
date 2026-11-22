@@ -106,7 +106,7 @@ def resolve_literature_knowledge_input(
         "compilation_input_id",
         identity,
     )
-    LiteratureKnowledgeCompilationInputRepository(repositories.root).put(
+    LiteratureKnowledgeCompilationInputRepository.for_operation(repositories).put(
         record.compilation_input_id,
         record,
     )
@@ -118,7 +118,7 @@ def validate_literature_knowledge_input(
     repositories: KnowledgeRepositories,
     evidence_store: EvidenceStore | None = None,
 ) -> LiteratureKnowledgeCompilationInput:
-    stored = LiteratureKnowledgeCompilationInputRepository(repositories.root).get(
+    stored = LiteratureKnowledgeCompilationInputRepository.for_operation(repositories).get(
         record.compilation_input_id
     )
     if stored != record:
@@ -287,7 +287,7 @@ def validate_literature_knowledge_chunk(
     compilation_input: LiteratureKnowledgeCompilationInput,
     repositories: KnowledgeRepositories,
 ) -> LiteratureKnowledgeChunk:
-    stored = LiteratureKnowledgeChunkRepository(repositories.root).get(chunk.chunk_id)
+    stored = LiteratureKnowledgeChunkRepository.for_operation(repositories).get(chunk.chunk_id)
     if stored != chunk:
         raise ValueError("literature knowledge chunk differs from repository record")
     if (
@@ -377,6 +377,6 @@ def build_literature_knowledge_chunks(
                 "chunk_id",
                 identity,
             )
-            LiteratureKnowledgeChunkRepository(repositories.root).put(chunk.chunk_id, chunk)
+            LiteratureKnowledgeChunkRepository.for_operation(repositories).put(chunk.chunk_id, chunk)
             chunks.append(chunk)
     return tuple(sorted(chunks, key=lambda item: (item.canonical_start_offset, item.chunk_id)))

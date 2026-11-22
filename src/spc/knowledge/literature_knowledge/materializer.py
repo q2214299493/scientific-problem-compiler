@@ -388,7 +388,7 @@ class LiteratureKnowledgeMaterializer:
             or proposal_set.compilation_input_hash != compilation_input.content_hash
         ):
             raise ValueError("literature knowledge proposal does not bind the compilation input")
-        LiteratureKnowledgeProposalSetRepository(repositories.root).put(
+        LiteratureKnowledgeProposalSetRepository.for_operation(repositories).put(
             proposal_set.proposal_set_id,
             proposal_set,
         )
@@ -474,7 +474,7 @@ class LiteratureKnowledgeMaterializer:
                 quote=quote,
             )
             _put_reuse(
-                LiteratureKnowledgeGroundingRepository(repositories.root),
+                LiteratureKnowledgeGroundingRepository.for_operation(repositories),
                 grounding.grounding_id,
                 grounding,
             )
@@ -708,7 +708,7 @@ class LiteratureKnowledgeMaterializer:
         payload = {"compilation_id": compilation_id, **compilation_identity}
         record = LiteratureKnowledgeCompilationRecord(**payload, content_hash=content_hash(payload))
         _put_reuse(
-            LiteratureKnowledgeCompilationRepository(repositories.root),
+            LiteratureKnowledgeCompilationRepository.for_operation(repositories),
             record.compilation_id,
             record,
         )
