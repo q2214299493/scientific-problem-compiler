@@ -20,7 +20,7 @@ from ...repositories import (
     TableCellStructureRepository,
     TableStructureRepository,
 )
-from ...serialization import content_hash
+from ...serialization import build_content_bound_record as _content_bound
 from ..ingestion import LiteratureRepresentationSelector
 from ..structure import validate_document_structure
 from ..structure_selection import resolve_current_structure_selection
@@ -42,12 +42,6 @@ COMPILER_POLICY_VERSION = "1.0.0"
 CHUNK_POLICY_ID = "spc-structure-block-bounded-chunks"
 CHUNK_POLICY_VERSION = "1.0.0"
 MAX_CHUNK_CHARACTERS = 8_000
-
-
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
 
 
 def resolve_literature_knowledge_input(

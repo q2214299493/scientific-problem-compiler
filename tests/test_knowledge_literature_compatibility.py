@@ -173,6 +173,27 @@ def test_reads_persisted_baseline_without_rewriting_records(tmp_path, domain, ex
         (structure,) = repositories.document_structure_artifacts.list()
         assert validate_document_structure(structure.structure_id, repositories, store) == structure
     if domain == "html":
+        from spc.knowledge.ingestion import create_evidence_span_from_canonical_text
+        from spc.models import literature_identity_id
+        from spc.serialization import content_hash
+
+        (document,) = repositories.literature_documents.list()
+        assert literature_identity_id(
+            title=document.title, authors=document.authors, year=document.year, doi=document.doi
+        ) == document.literature_id
+        assert document.content_hash == "f82eeb8f171f3b00ac68ed0f270393c22031426bff28df2ab52aea3129f6b616"
+        expected_spans = {
+            "evidence-4e53ef2dd414cfaeae594c11": "ab99205b9c69af2b3645a78ef661114a9aa90deadea71ab742532bb9cd8c53d8",
+            "evidence-c5ac59b2432a1185835820f1": "e3084046d7f77481b39130d6ef22eaa3a8de7691cdc3fb3a50f84f86487a31d2",
+        }
+        spans = store.list_evidence()
+        assert {span.evidence_id: content_hash(span) for span in spans} == expected_spans
+        for span in spans:
+            rebuilt = create_evidence_span_from_canonical_text(
+                representation.canonical_text_id, span.start_offset, span.end_offset,
+                repositories, store, locator=span.locator,
+            )
+            assert rebuilt == span
         locators = repositories.structured_evidence_locators.list()
         assert len(locators) == 2
         for locator in locators:

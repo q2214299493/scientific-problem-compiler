@@ -9,6 +9,7 @@ from ...models import (
     ExpertOpinion,
 )
 from ...repositories import KnowledgeRepositories
+from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
 from ..literature_knowledge.validation import curate_knowledge_record
 from ..trust import TrustedKnowledgeValidator
@@ -42,12 +43,6 @@ def _put_reuse(repository, key: str, record) -> None:
         return
     if existing != record:
         raise FileExistsError(f"conflicting materialized expert record: {key}")
-
-
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
 
 
 def _reject(

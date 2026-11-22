@@ -8,6 +8,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from ...planning.llm_transport import LLMTransport
+from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
 from .contracts import (
     ExpertCaseProposal,
@@ -50,12 +51,6 @@ class ExpertKnowledgeProvider(Protocol):
         compilation_input: ExpertKnowledgeCompilationInput,
         chunks: tuple[ExpertKnowledgeChunk, ...],
     ) -> ExpertKnowledgeProposalSet: ...
-
-
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
 
 
 def partition_expert_knowledge_chunks(

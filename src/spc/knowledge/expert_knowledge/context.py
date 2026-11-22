@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 from ...models import CurationStatus
 from ...repositories import KnowledgeRepositories
+from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
 from ..trust import TrustedKnowledgeValidator
 from .contracts import (
@@ -17,12 +18,6 @@ from .source import validate_expert_source
 CHUNK_POLICY_ID = "spc-expert-source-offset-chunks"
 CHUNK_POLICY_VERSION = "1.0.0"
 MAX_CHUNK_CHARACTERS = 2_000
-
-
-def _content_bound(model_type, prefix: str, id_field: str, identity: dict):
-    record_id = f"{prefix}-{content_hash(identity)[:24]}"
-    payload = {id_field: record_id, **identity}
-    return model_type(**payload, content_hash=content_hash(payload))
 
 
 def _put_reuse(repository, key: str, record) -> None:
