@@ -1,0 +1,16 @@
+{
+  "provider_id": "structured-llm-literature-knowledge",
+  "provider_version": "structured-llm-literature-knowledge-1.2.0",
+  "provider_config_hash": "3379bdc22eb1b6806338d375ec5201a7081b1514ee5752d711a182c256a4f26c",
+  "provider_invocation": {
+    "content_hash": "7f8fabd07508fc5791227e292f47420433c6f3486a3619b5856c5e9bb5d8ab37",
+    "input_hash": "05d319fe374b014a393ab5bc8ed7a660c244f5c0f8b6b4b1d230d3c9694094f0",
+    "invocation_config_hash": "d48d83d927629c18fb7e557370af6789ad6e3a6227ee8b72df7074f603ed1fa5",
+    "invocation_id": "literature-knowledge-provider-invocation-3593bfe365d0b1daa5bc0dd7",
+    "output_hash": "e93b5f261b39e2e4ccd6e0b91543e33d257efbe5a247341fb5ec35138976099e",
+    "runtime_version": "codex-cli 99.1.2-test",
+    "selected_model": "test-codex-model",
+    "transport_id": "codex-cli",
+    "transport_version": "1.1.0"
+  }
+}

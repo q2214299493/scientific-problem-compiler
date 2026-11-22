@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 import hashlib
 import json
-import math
 from pathlib import Path
 import re
 from typing import Any, Protocol
@@ -12,7 +11,7 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from ...models import EpistemicStatus
-from ...planning.llm_transport import LLMTransport
+from ...planning.llm_transport import LLMTransport, validate_generation_parameters, validate_max_batches
 from ...serialization import content_hash
 from .contracts import (
     LiteratureClaimProposal,
@@ -82,16 +81,20 @@ class StructuredOutputDiagnostic:
         return asdict(self)
 
 
+def _validate_batch_limits(max_chunks_per_batch: int, max_batch_text_characters: int) -> None:
+    if max_chunks_per_batch < 1:
+        raise ValueError("max_chunks_per_batch must be positive")
+    if max_batch_text_characters < 1:
+        raise ValueError("max_batch_text_characters must be positive")
+
+
 def partition_literature_knowledge_chunks(
     chunks: tuple[LiteratureKnowledgeChunk, ...],
     *,
     max_chunks_per_batch: int = DEFAULT_MAX_CHUNKS_PER_BATCH,
     max_batch_text_characters: int = DEFAULT_MAX_BATCH_TEXT_CHARACTERS,
 ) -> tuple[tuple[LiteratureKnowledgeChunk, ...], ...]:
-    if max_chunks_per_batch < 1:
-        raise ValueError("max_chunks_per_batch must be positive")
-    if max_batch_text_characters < 1:
-        raise ValueError("max_batch_text_characters must be positive")
+    _validate_batch_limits(max_chunks_per_batch, max_batch_text_characters)
     batches: list[tuple[LiteratureKnowledgeChunk, ...]] = []
     current: list[LiteratureKnowledgeChunk] = []
     current_characters = 0
@@ -532,16 +535,11 @@ class StructuredLLMLiteratureKnowledgeProvider:
         batch_failure_policy: str = "stop",
         provider_output_dir: Path | None = None,
     ) -> None:
-        if not math.isfinite(temperature) or temperature < 0:
-            raise ValueError("temperature must be finite and non-negative")
-        if not 1 <= max_attempts <= 5:
-            raise ValueError("max_attempts must be between one and five")
-        if max_chunks_per_batch < 1:
-            raise ValueError("max_chunks_per_batch must be positive")
-        if max_batch_text_characters < 1:
-            raise ValueError("max_batch_text_characters must be positive")
-        if max_batches is not None and max_batches < 1:
-            raise ValueError("max_batches must be positive when provided")
+        validate_generation_parameters(
+            temperature, max_attempts, temperature_error="temperature must be finite and non-negative"
+        )
+        _validate_batch_limits(max_chunks_per_batch, max_batch_text_characters)
+        validate_max_batches(max_batches, error_message="max_batches must be positive when provided")
         if batch_failure_policy not in {"stop", "continue"}:
             raise ValueError("batch_failure_policy must be 'stop' or 'continue'")
         self.transport = transport

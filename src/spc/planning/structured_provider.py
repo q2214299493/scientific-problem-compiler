@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 
 from pydantic import ValidationError
 
@@ -19,7 +18,7 @@ from ..models import (
     ResearchDirectionSet,
     ScientificPlanningInput,
 )
-from .llm_transport import LLMTransport
+from .llm_transport import LLMTransport, validate_generation_parameters
 from .mock_provider import build_proposal_set
 from .validators import validate_planning_proposal_set
 from .revision import validate_plan_revision_response
@@ -113,10 +112,7 @@ class StructuredLLMPlanningProvider:
         temperature: float = 0.0,
         max_attempts: int = 2,
     ) -> None:
-        if not math.isfinite(temperature) or temperature < 0:
-            raise ValueError("temperature must be a finite non-negative number")
-        if not 1 <= max_attempts <= 5:
-            raise ValueError("max_attempts must be between one and five")
+        validate_generation_parameters(temperature, max_attempts)
         self.transport = transport
         self.temperature = temperature
         self.max_attempts = max_attempts

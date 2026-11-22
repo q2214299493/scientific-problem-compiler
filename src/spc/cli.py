@@ -291,6 +291,18 @@ app = typer.Typer(
 )
 
 
+def _require_llm_options(endpoint: str | None, model: str | None) -> tuple[str, str]:
+    if endpoint is None or model is None:
+        raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
+    return endpoint, model
+
+
+def _require_codex_model(model: str | None) -> str:
+    if model is None:
+        raise typer.BadParameter("--provider codex requires an explicit --codex-model")
+    return model
+
+
 def _emit_report(report: object) -> None:
     typer.echo(json.dumps(report.model_dump(mode="json"), indent=2, ensure_ascii=False))
 
@@ -734,10 +746,7 @@ def extract_expert_knowledge(
         selected_provider = MockExpertKnowledgeProvider()
         provider_notice = "offline test provider; output is not expert interpretation"
     elif provider == "codex":
-        if codex_model is None:
-            raise typer.BadParameter(
-                "--provider codex requires an explicit --codex-model"
-            )
+        codex_model = _require_codex_model(codex_model)
         expert_knowledge_llm_wire_schema()
         transport = CodexCLILLMTransport(
             codex_executable,
@@ -891,10 +900,7 @@ def extract_literature_knowledge(
         selected_provider = MockLiteratureKnowledgeProvider()
         provider_notice = "offline test provider; output is not scientific paper interpretation"
     elif provider == "llm":
-        if llm_endpoint is None or llm_model is None:
-            raise typer.BadParameter(
-                "--provider llm requires --llm-endpoint and --llm-model"
-            )
+        llm_endpoint, llm_model = _require_llm_options(llm_endpoint, llm_model)
         selected_provider = StructuredLLMLiteratureKnowledgeProvider(
             HTTPJSONLLMTransport(
                 llm_endpoint,
@@ -911,10 +917,7 @@ def extract_literature_knowledge(
         )
         provider_notice = "structured proposal provider; explicit human curation remains required"
     elif provider == "codex":
-        if codex_model is None:
-            raise typer.BadParameter(
-                "--provider codex requires an explicit --codex-model"
-            )
+        codex_model = _require_codex_model(codex_model)
         transport = CodexCLILLMTransport(
             codex_executable,
             model=codex_model,
@@ -1282,8 +1285,7 @@ def plan(
         if provider == "mock":
             planning_provider = MockPlanningProvider()
         elif provider == "llm":
-            if llm_endpoint is None or llm_model is None:
-                raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
+            llm_endpoint, llm_model = _require_llm_options(llm_endpoint, llm_model)
             planning_provider = StructuredLLMPlanningProvider(
                 HTTPJSONLLMTransport(
                     llm_endpoint,
@@ -1535,8 +1537,7 @@ def review(
         if provider == "mock":
             approval_provider = MockApprovalProvider()
         elif provider == "llm":
-            if llm_endpoint is None or llm_model is None:
-                raise typer.BadParameter("--provider llm requires --llm-endpoint and --llm-model")
+            llm_endpoint, llm_model = _require_llm_options(llm_endpoint, llm_model)
             approval_provider = StructuredLLMApprovalProvider(
                 HTTPJSONLLMTransport(
                     llm_endpoint,
