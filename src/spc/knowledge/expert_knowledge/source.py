@@ -14,6 +14,7 @@ from ...models import (
     SourceType,
 )
 from ...repositories import KnowledgeEvidenceStore, KnowledgeRepositories
+from ...repository_components.base import put_reuse
 from ...serialization import content_hash, require_safe_path_component
 from ..acquisition import HTMLLiteratureTextExtractor, SafeHTTPFetcher
 from ..ingestion import PAGE_SEPARATOR, PypdfLiteratureTextExtractor
@@ -21,13 +22,7 @@ from .contracts import ExpertSourcePage, ExpertSourceRecord
 
 
 def _put_reuse(repository, key: str, record) -> None:
-    try:
-        existing = repository.get(key)
-    except FileNotFoundError:
-        repository.put(key, record)
-        return
-    if existing != record:
-        raise FileExistsError(f"conflicting immutable expert record: {key}")
+    put_reuse(repository, key, record, conflict_prefix="conflicting immutable expert record")
 
 
 def make_expert_profile(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ...models import CurationStatus
 from ...repositories import KnowledgeRepositories
+from ...repository_components.base import put_reuse
 from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
 from ..text_chunking import bounded_text_ranges
@@ -20,13 +21,7 @@ MAX_CHUNK_CHARACTERS = 2_000
 
 
 def _put_reuse(repository, key: str, record) -> None:
-    try:
-        existing = repository.get(key)
-    except FileNotFoundError:
-        repository.put(key, record)
-        return
-    if existing != record:
-        raise FileExistsError(f"conflicting immutable expert compilation record: {key}")
+    put_reuse(repository, key, record, conflict_prefix="conflicting immutable expert compilation record")
 
 
 def resolve_expert_knowledge_input(

@@ -9,6 +9,7 @@ from ...models import (
     ExpertOpinion,
 )
 from ...repositories import KnowledgeRepositories
+from ...repository_components.base import put_reuse
 from ...serialization import build_content_bound_record as _content_bound
 from ...serialization import content_hash
 from ..literature_knowledge.validation import curate_knowledge_record
@@ -36,13 +37,7 @@ class ExpertKnowledgeMaterializationOutcome:
 
 
 def _put_reuse(repository, key: str, record) -> None:
-    try:
-        existing = repository.get(key)
-    except FileNotFoundError:
-        repository.put(key, record)
-        return
-    if existing != record:
-        raise FileExistsError(f"conflicting materialized expert record: {key}")
+    put_reuse(repository, key, record, conflict_prefix="conflicting materialized expert record")
 
 
 def _reject(

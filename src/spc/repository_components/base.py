@@ -90,6 +90,17 @@ class ModelRepository(Generic[ModelT]):
         return tuple(load_model(path, self.model_type) for path in sorted(self.root.glob("*.json")))
 
 
+def put_reuse(repository: ModelRepository[ModelT], key: str, record: ModelT, *, conflict_prefix: str) -> None:
+    """Write on a read miss, preserving errors from comparison and storage."""
+    try:
+        existing = repository.get(key)
+    except FileNotFoundError:
+        repository.put(key, record)
+        return
+    if existing != record:
+        raise FileExistsError(f"{conflict_prefix}: {key}")
+
+
 class IdentityBoundRepository(ModelRepository[ModelT]):
     _key_error = "repository key must equal record {field}"
     _stored_id_error = "stored record ID does not match repository key"

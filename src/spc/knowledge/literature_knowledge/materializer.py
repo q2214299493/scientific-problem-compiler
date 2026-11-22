@@ -24,6 +24,7 @@ from ...models import (
     SourceQuote,
 )
 from ...repositories import EvidenceStore, KnowledgeRepositories, ModelRepository
+from ...repository_components.base import put_reuse
 from ...serialization import content_hash
 from ...backends.rebinding import exact_normalized_matches
 from ..ingestion import create_evidence_span_from_canonical_text
@@ -95,13 +96,7 @@ class LiteratureKnowledgeCompilationOutcome:
 
 
 def _put_reuse(repository: ModelRepository, key: str, record: BaseModel) -> None:
-    try:
-        existing = repository.get(key)
-    except FileNotFoundError:
-        repository.put(key, record)
-        return
-    if existing != record:
-        raise FileExistsError(f"conflicting materialized record: {key}")
+    put_reuse(repository, key, record, conflict_prefix="conflicting materialized record")
 
 
 def _rebind_or_create_quote_evidence(
