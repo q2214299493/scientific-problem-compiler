@@ -7,7 +7,6 @@ from ..knowledge.trust import TrustedKnowledgeValidator
 from ..models import CurationStatus, ScientificRunBlockingItem
 from ..repositories import (
     CompositeEvidenceStore,
-    KnowledgeEvidenceStore,
     KnowledgeRepositories,
     ProjectEvidenceStore,
 )
@@ -35,8 +34,9 @@ def open_knowledge(
     repositories.load_expert_cases(pack.expert_cases)
     repositories.load_workflow_patterns(pack.workflow_patterns)
     repositories.load_capabilities(pack.capabilities)
+    repositories.evidence_store.prepare_directories(initialize=True)
     evidence = CompositeEvidenceStore(
-        KnowledgeEvidenceStore(knowledge_dir),
+        repositories.evidence_store,
         ProjectEvidenceStore(state_dir),
     )
     return repositories, evidence

@@ -14,7 +14,6 @@ from ..models import (
 )
 from ..repositories import (
     CompositeEvidenceStore,
-    KnowledgeEvidenceStore,
     KnowledgeRepositories,
     ProjectEvidenceStore,
     initialize_state,
@@ -48,11 +47,12 @@ class ScientificContextBuilder:
     ) -> ScientificContextPacket:
         pack = self.domain_loader.load(domain)
         initialize_state(state_dir, domain=domain)
+        knowledge = KnowledgeRepositories(knowledge_dir)
         evidence_store = CompositeEvidenceStore(
-            KnowledgeEvidenceStore(knowledge_dir),
+            knowledge.evidence_store,
             ProjectEvidenceStore(state_dir),
         )
-        knowledge = KnowledgeRepositories(knowledge_dir)
+        knowledge.evidence_store.prepare_directories(initialize=True)
         knowledge.load_expert_cases(pack.expert_cases)
         knowledge.load_workflow_patterns(pack.workflow_patterns)
         knowledge.load_capabilities(pack.capabilities)

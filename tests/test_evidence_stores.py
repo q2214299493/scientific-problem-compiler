@@ -24,10 +24,24 @@ from spc.repositories import (
 from spc.retrieval import RetrievalIntegrityError, ScientificContextBuilder
 from spc.serialization import content_hash, dump_yaml
 from spc.workflow.knowledge_access import open_knowledge
+from spc.workflow.status import build_knowledge_status
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PDF = FIXTURES / "generic-born-digital.pdf"
+
+
+@pytest.fixture
+def constructed_knowledge_stores(monkeypatch):
+    calls = []
+    original = KnowledgeEvidenceStore.__init__
+
+    def counted(store, knowledge_root, *, initialize=True):
+        original(store, knowledge_root, initialize=initialize)
+        calls.append((store, initialize))
+
+    monkeypatch.setattr(KnowledgeEvidenceStore, "__init__", counted)
+    return calls
 
 
 def metadata(suffix: str = "k1e0") -> dict[str, object]:
@@ -600,6 +614,35 @@ def test_trusted_shared_pdf_snapshot_fails_on_source_tampering(tmp_path: Path) -
         )
 
 
+def test_knowledge_store_reuse_is_scoped_to_operation_root_and_mode(
+    tmp_path: Path, constructed_knowledge_stores
+) -> None:
+    first_root, second_root = tmp_path / "first", tmp_path / "second"
+    state = tmp_path / "state"
+    build_knowledge_status(first_root, state)
+    assert not first_root.exists() and not state.exists()
+
+    loader = DomainPackLoader()
+    first, view = open_knowledge(first_root, state, "base", loader)
+    _, span = add_text_evidence(
+        first.evidence_store, tmp_path, source_id="source", evidence_id="span", text="first only"
+    )
+    reopened, reopened_view = open_knowledge(first_root, state, "base", loader)
+    other, other_view = open_knowledge(second_root, state, "base", loader)
+
+    assert [(store.knowledge_root, initialize) for store, initialize in constructed_knowledge_stores] == [
+        (first_root, False), (first_root, True), (first_root, True), (second_root, True)
+    ]
+    assert len({store for store, _ in constructed_knowledge_stores}) == 4
+    for repos, composite in ((first, view), (reopened, reopened_view), (other, other_view)):
+        shared, project = composite.stores
+        assert shared is repos.evidence_store
+        assert isinstance(project, ProjectEvidenceStore) and project.root == state
+    assert reopened_view.get_evidence(span.evidence_id) == span
+    with pytest.raises(FileNotFoundError):
+        other_view.get_evidence(span.evidence_id)
+
+
 def test_open_knowledge_rechecks_evidence_paths_after_loading_catalogs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -622,7 +665,9 @@ def test_open_knowledge_rechecks_evidence_paths_after_loading_catalogs(
     assert not (tmp_path / "state").exists()
 
 
-def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> None:
+def test_project_b_retrieval_reads_shared_knowledge_evidence(
+    tmp_path: Path, constructed_knowledge_stores
+) -> None:
     knowledge_root = tmp_path / "knowledge"
     knowledge = KnowledgeEvidenceStore(knowledge_root)
     source, _ = add_text_evidence(
@@ -634,6 +679,7 @@ def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> 
     )
 
     builder = ScientificContextBuilder()
+    constructed_knowledge_stores.clear()
     packet = builder.build(
         "surface pathway observable",
         "base",
@@ -644,6 +690,7 @@ def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> 
     assert {hit.record_id for hit in packet.evidence_hits} == {
         "ev-shared-retrieval"
     }
+    assert len(constructed_knowledge_stores) == 1
 
     stored = knowledge.root / source.stored_path
     stored.chmod(0o644)
@@ -653,6 +700,8 @@ def test_project_b_retrieval_reads_shared_knowledge_evidence(tmp_path: Path) -> 
             "surface pathway observable", "base",
             state_dir=tmp_path / "project-b" / ".spc", knowledge_dir=knowledge_root,
         )
+    assert len(constructed_knowledge_stores) == 2
+    assert constructed_knowledge_stores[0][0] is not constructed_knowledge_stores[1][0]
 
 
 def test_literature_cli_defaults_to_knowledge_evidence_store(tmp_path: Path) -> None:
@@ -680,7 +729,9 @@ def test_literature_cli_defaults_to_knowledge_evidence_store(tmp_path: Path) -> 
     assert not (state_root / "sources").exists()
 
 
-def test_legacy_literature_evidence_migration_is_idempotent(tmp_path: Path) -> None:
+def test_legacy_literature_evidence_migration_is_idempotent(
+    tmp_path: Path, constructed_knowledge_stores
+) -> None:
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
     legacy = ProjectEvidenceStore(tmp_path / ".spc")
     knowledge = KnowledgeEvidenceStore(tmp_path / "knowledge")
@@ -716,6 +767,7 @@ def test_legacy_literature_evidence_migration_is_idempotent(tmp_path: Path) -> N
     assert legacy.get_evidence(evidence.evidence_id) == evidence
     assert knowledge.get_evidence(evidence.evidence_id) == evidence
 
+    constructed_knowledge_stores.clear()
     cli_result = CliRunner().invoke(
         app,
         [
@@ -728,6 +780,7 @@ def test_legacy_literature_evidence_migration_is_idempotent(tmp_path: Path) -> N
     )
     assert cli_result.exit_code == 0, cli_result.output
     assert json.loads(cli_result.output)["copied_source_count"] == 0
+    assert len(constructed_knowledge_stores) == 1
 
 
 def test_already_shared_only_literature_migration_succeeds(tmp_path: Path) -> None:

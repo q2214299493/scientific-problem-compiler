@@ -62,20 +62,25 @@ class FilesystemEvidenceStore:
     project_state_root: Path | None = None
 
     def __init__(self, root: Path, *, initialize: bool = True) -> None:
-        if initialize:
+        self.root = root
+        self.prepare_directories(initialize=initialize)
+        self.state_root = root
+        self.source_records = ModelRepository(root / "sources", SourceDocument)
+        self.evidence_records = ModelRepository(root / "evidence", EvidenceSpan)
+
+    def prepare_directories(self, *, initialize: bool) -> None:
+        """Check the current storage paths, creating missing directories when requested."""
+        root = self.root
+        if initialize and not root.is_dir():
             root.mkdir(parents=True, exist_ok=True)
         resolved_root = root.resolve()
         for directory in (root / "sources", root / "evidence"):
-            if initialize:
+            if initialize and not directory.is_dir():
                 directory.mkdir(exist_ok=True)
             if directory.is_symlink() or not directory.resolve().is_relative_to(
                 resolved_root
             ):
                 raise ValueError("evidence repository directory escapes its root")
-        self.root = root
-        self.state_root = root
-        self.source_records = ModelRepository(root / "sources", SourceDocument)
-        self.evidence_records = ModelRepository(root / "evidence", EvidenceSpan)
 
     def get(self, key: str) -> EvidenceSpan:
         return self.get_evidence(key)
