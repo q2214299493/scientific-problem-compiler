@@ -618,7 +618,13 @@ def _directory_link(link: Path, target: Path) -> None:
         pytest.skip(f"directory symlinks unavailable: {error}")
 
 
-def test_resumed_successor_rechecks_replaced_cycle_before_writing(tmp_path, monkeypatch):
+def _directory_junction(link: Path, target: Path) -> None:
+    winapi = pytest.importorskip("_winapi", reason="requires Windows directory junctions")
+    winapi.CreateJunction(str(target), str(link))
+
+
+@pytest.mark.parametrize("redirect", [_directory_link, _directory_junction], ids=["symlink", "junction"])
+def test_resumed_successor_rechecks_replaced_cycle_before_writing(tmp_path, monkeypatch, redirect):
     repositories, workflow, run, plan = _approved_parent(tmp_path)
     submission, artifact_root, _ = _submission(tmp_path, run, plan)
     _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
@@ -640,7 +646,7 @@ def test_resumed_successor_rechecks_replaced_cycle_before_writing(tmp_path, monk
     def replace_before_write(run_id, relative_path, *args):
         assert relative_path == "successor-planning/cycle-1/parent-binding.yaml"
         cycle.rename(cycle.with_name("original-cycle"))
-        _directory_link(cycle, outside)
+        redirect(cycle, outside)
         return write(run_id, relative_path, *args)
 
     monkeypatch.setattr(service.runs, "write_immutable_artifact", replace_before_write)
@@ -694,6 +700,60 @@ def test_successor_status_rejects_directory_redirects(tmp_path, successor_status
     with pytest.raises(ValueError, match=message):
         result_feedback_status(run_id, repository)
     assert _tree_snapshot(outside) == before
+
+
+@pytest.mark.parametrize("with_cycle", [False, True], ids=["empty", "with-cycle-record"])
+def test_successor_status_rejects_external_junction_before_counting(
+    tmp_path, successor_status_artifacts, with_cycle
+):
+    repository = ScientificProblemRunRepository(tmp_path)
+    run_id = successor_status_artifacts.name
+    run_root = repository.run_dir(run_id)
+    directory = run_root / "successor-planning/cycle-1"
+    directory.parent.mkdir(parents=True)
+    (run_root / "run.json").write_bytes((successor_status_artifacts / "run.json").read_bytes())
+    outside = repository.run_dir(f"{run_id}-other")
+    outside.mkdir()
+    if with_cycle:
+        record = successor_status_artifacts / "successor-planning/cycle-1/cycle.yaml"
+        (outside / "cycle.yaml").write_bytes(record.read_bytes())
+    _directory_junction(directory, outside)
+
+    before = _tree_snapshot(outside)
+    with pytest.raises(ResultFeedbackError, match="INVALID_SUCCESSOR_CYCLE_DIRECTORY"):
+        result_feedback_status(run_id, repository)
+    assert _tree_snapshot(outside) == before
+
+
+def test_successor_resumes_in_run_junction_and_ignores_missing_junction_target(tmp_path):
+    repositories, workflow, run, plan = _approved_parent(tmp_path)
+    submission, artifact_root, _ = _submission(tmp_path, run, plan)
+    _intake_and_accept(tmp_path, repositories, run, submission, artifact_root)
+    service = SuccessorPlanningService(state_dir=tmp_path / ".spc", knowledge_dir=repositories.root)
+    inputs = {"parent_run_id": run.run_id, "submission_ids": (submission.submission_id,)}
+    original = service.compile(**inputs)
+    run_root = workflow.runs.run_dir(run.run_id)
+    directory = run_root / "successor-planning/cycle-1"
+    archive = run_root / "archived-cycle"
+    directory.rename(archive)
+    _directory_junction(directory, archive)
+    missing = tmp_path / "transient-target"
+    missing.mkdir()
+    _directory_junction(directory.with_name("cycle-2"), missing)
+    missing.rmdir()
+
+    before = _tree_snapshot(archive)
+    status = result_feedback_status(run.run_id, workflow.runs)["successor_planning"]
+    assert (status["latest_status"], status["latest_attempted_cycle"], status["cycles"]) == ("APPROVED", 1, 1)
+    assert _tree_snapshot(archive) == before
+    assert service.compile(**inputs) == original
+    assert _tree_snapshot(archive) == before
+
+    missing.mkdir()
+    with pytest.raises(ResultFeedbackError, match="INVALID_SUCCESSOR_CYCLE_DIRECTORY"):
+        service.compile(**inputs)
+    assert list(missing.iterdir()) == []
+    assert _tree_snapshot(archive) == before
 
 
 @pytest.mark.parametrize(

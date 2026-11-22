@@ -1356,8 +1356,9 @@ class SuccessorPlanningService:
             matching_prefix: str | None = None
             matching_cycle: SuccessorPlanningCycle | None = None
             if successor_root.exists():
+                run_root = self.runs.run_dir(parent_run_id)
                 for directory in successor_root.glob("cycle-*"):
-                    cycle_index_value = successor_cycle_index(directory, cycle_indexes)
+                    cycle_index_value = successor_cycle_index(directory, cycle_indexes, run_root=run_root)
                     if cycle_index_value is None:
                         continue
                     cycle_indexes.add(cycle_index_value)

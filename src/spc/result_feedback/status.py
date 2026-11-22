@@ -173,7 +173,7 @@ def result_feedback_status(
             ),
         )
         for directory in successor_root.glob("cycle-*"):
-            index = successor_cycle_index(directory, attempted_indexes)
+            index = successor_cycle_index(directory, attempted_indexes, run_root=run_root)
             if index is None:
                 continue
             attempted_indexes.add(index)

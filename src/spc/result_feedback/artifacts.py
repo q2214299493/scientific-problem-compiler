@@ -18,7 +18,7 @@ from ..workflow.repository import ScientificProblemRunRepository
 from .submission import ResultFeedbackError
 
 
-def _is_cycle_directory(directory: Path) -> bool:
+def _is_cycle_directory(directory: Path, run_root: Path) -> bool:
     try:
         entry = directory.lstat()
     except (FileNotFoundError, NotADirectoryError):
@@ -28,20 +28,33 @@ def _is_cycle_directory(directory: Path) -> bool:
         linked = directory.is_symlink()
     else:
         linked = stat.S_ISLNK(entry.st_mode)
-        if not linked and not getattr(entry, "st_reparse_tag", 0):
+        reparse_point = (
+            getattr(entry, "st_reparse_tag", 0)
+            or getattr(entry, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        if not linked and not reparse_point:
             return stat.S_ISDIR(entry.st_mode)
     if linked:
         raise ResultFeedbackError(
             "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
             f"symlinked successor cycle directory: {directory.name}",
         )
-    # A Windows junction can refer to a directory that no longer exists.
-    return directory.is_dir()
+    # A dangling junction is not an attempt. Check live targets before counting them.
+    try:
+        target = directory.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    if not target.is_relative_to(run_root.resolve(strict=True)):
+        raise ResultFeedbackError(
+            "INVALID_SUCCESSOR_CYCLE_DIRECTORY",
+            f"successor cycle directory escapes the run directory: {directory.name}",
+        )
+    return target.is_dir()
 
 
-def successor_cycle_index(directory: Path, seen: set[int]) -> int | None:
+def successor_cycle_index(directory: Path, seen: set[int], *, run_root: Path) -> int | None:
     """Check one entry at discovery time. Artifact access resolves its path separately."""
-    if not _is_cycle_directory(directory):
+    if not _is_cycle_directory(directory, run_root):
         return None
     suffix = directory.name.removeprefix("cycle-")
     try:
