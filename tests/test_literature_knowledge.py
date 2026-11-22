@@ -185,10 +185,10 @@ def _curate(
     )
 
 
-def setup_html_literature(tmp_path: Path):
+def setup_html_literature(tmp_path: Path, *, body: bytes = HTML):
     repositories = KnowledgeRepositories(tmp_path / "knowledge")
     store = KnowledgeEvidenceStore(repositories.root)
-    fetcher = SafeHTTPFetcher(StaticHTMLTransport(), dns_resolver=lambda _host: ("93.184.216.34",))
+    fetcher = SafeHTTPFetcher(StaticHTMLTransport(body), dns_resolver=lambda _host: ("93.184.216.34",))
     outcome = LiteratureAcquisitionService(fetcher).add(ARTICLE_URL, "base", repositories, store)
     LiteratureRepresentationSelector().select(
         outcome.literature_id or "",

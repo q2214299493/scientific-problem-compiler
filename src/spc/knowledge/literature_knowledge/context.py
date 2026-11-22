@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from ...immutable import FrozenDict
 from ...models import (
     CurationStatus,
@@ -24,6 +22,7 @@ from ...serialization import build_content_bound_record as _content_bound
 from ..ingestion import LiteratureRepresentationSelector
 from ..structure import validate_document_structure
 from ..structure_selection import resolve_current_structure_selection
+from ..text_chunking import bounded_text_ranges
 from ..trust import TrustedKnowledgeValidator
 from .contracts import LiteratureKnowledgeChunk, LiteratureKnowledgeCompilationInput
 from .repositories import (
@@ -135,24 +134,6 @@ def validate_literature_knowledge_input(
     if current != record:
         raise ValueError("literature knowledge input is not bound to current authority")
     return record
-
-
-def _bounded_ranges(start: int, end: int, text: str) -> Iterable[tuple[int, int]]:
-    cursor = start
-    while cursor < end:
-        boundary = min(cursor + MAX_CHUNK_CHARACTERS, end)
-        if boundary < end:
-            relative = text[cursor:boundary]
-            split = max(relative.rfind("\n"), relative.rfind(" "))
-            if split > MAX_CHUNK_CHARACTERS // 2:
-                boundary = cursor + split + 1
-        while cursor < boundary and text[cursor].isspace():
-            cursor += 1
-        while boundary > cursor and text[boundary - 1].isspace():
-            boundary -= 1
-        if boundary > cursor:
-            yield cursor, boundary
-        cursor = max(boundary, cursor + 1)
 
 
 def _canonical_block_map(
@@ -370,7 +351,9 @@ def build_literature_knowledge_chunks(
             or block.content_region not in compilation_input.included_content_regions
         ):
             continue
-        for start, end in _bounded_ranges(block.start_offset, block.end_offset, canonical_text):
+        for start, end in bounded_text_ranges(
+            canonical_text, block.start_offset, block.end_offset, max_characters=MAX_CHUNK_CHARACTERS
+        ):
             identity = {
                 "literature_id": compilation_input.literature_id,
                 "representation_id": compilation_input.representation_id,
